@@ -1,0 +1,6 @@
+pandas
+pandas-ta-classic
+alpaca-py
+vaderSentiment
+requests
+pytest
