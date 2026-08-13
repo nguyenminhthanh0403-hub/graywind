@@ -31,6 +31,13 @@ def compute_signals(df, rsi_period=RSI_PERIOD, fast_period=FAST_SMA_PERIOD,
                      slow_period=SLOW_SMA_PERIOD, rsi_oversold=RSI_OVERSOLD,
                      rsi_overbought=RSI_OVERBOUGHT):
     df = df.copy()
+    min_bars = max(rsi_period, fast_period, slow_period)
+    if len(df) < min_bars:
+        df["rsi"] = float("nan")
+        df["sma_fast"] = float("nan")
+        df["sma_slow"] = float("nan")
+        df["signal"] = "hold"
+        return df
     df["rsi"] = df.ta.rsi(length=rsi_period)
     df["sma_fast"] = df.ta.sma(length=fast_period)
     df["sma_slow"] = df.ta.sma(length=slow_period)
