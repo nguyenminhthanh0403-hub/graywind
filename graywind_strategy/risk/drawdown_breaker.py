@@ -14,11 +14,15 @@ class DrawdownBreaker:
         self._tripped = False
 
     def start_new_day(self, day, starting_equity):
+        if starting_equity <= 0:
+            raise ValueError("starting_equity must be positive")
         self._current_day = day
         self._start_of_day_equity = starting_equity
         self._tripped = False
 
     def update_equity(self, current_equity):
+        if self._current_day is None:
+            raise RuntimeError("update_equity called before start_new_day")
         loss_fraction = (self._start_of_day_equity - current_equity) / self._start_of_day_equity
         if loss_fraction >= self.max_daily_loss_fraction:
             self._tripped = True

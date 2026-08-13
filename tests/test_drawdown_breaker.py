@@ -37,3 +37,17 @@ def test_new_day_resets_the_breaker():
 def test_init_raises_on_invalid_fraction():
     with pytest.raises(ValueError):
         DrawdownBreaker(max_daily_loss_fraction=0)
+
+
+def test_start_new_day_raises_on_non_positive_starting_equity():
+    breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
+    with pytest.raises(ValueError):
+        breaker.start_new_day(date(2024, 1, 8), starting_equity=0)
+    with pytest.raises(ValueError):
+        breaker.start_new_day(date(2024, 1, 8), starting_equity=-100)
+
+
+def test_update_equity_raises_if_called_before_start_new_day():
+    breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
+    with pytest.raises(RuntimeError):
+        breaker.update_equity(9800)
