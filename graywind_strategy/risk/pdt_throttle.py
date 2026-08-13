@@ -23,7 +23,10 @@ class PDTThrottle:
         return len(self._day_trade_dates) < self.MAX_DAY_TRADES
 
     def _prune(self, as_of):
-        cutoff = self._business_days_ago(as_of, self.WINDOW_BUSINESS_DAYS)
+        # WINDOW_BUSINESS_DAYS is inclusive of as_of itself, so the cutoff
+        # is WINDOW_BUSINESS_DAYS - 1 business days back (today + 4 prior
+        # business days = 5 business days total).
+        cutoff = self._business_days_ago(as_of, self.WINDOW_BUSINESS_DAYS - 1)
         while self._day_trade_dates and self._day_trade_dates[0] < cutoff:
             self._day_trade_dates.popleft()
 
