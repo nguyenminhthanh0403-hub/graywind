@@ -25,7 +25,7 @@ def test_fetch_latest_vix_parses_the_most_recent_observation():
     fake_session = MagicMock()
     fake_session.get.return_value = fake_response
 
-    value = fetch_latest_vix("fake-key", session=fake_session)
+    value = fetch_latest_vix("fake-key", session=fake_session, today=date(2026, 8, 12))
 
     assert value == 17.65
 
@@ -46,7 +46,7 @@ def test_fetch_latest_vix_raises_on_missing_value_marker():
     fake_session = MagicMock()
     fake_session.get.return_value = fake_response
     with pytest.raises(VixDataUnavailable):
-        fetch_latest_vix("fake-key", session=fake_session)
+        fetch_latest_vix("fake-key", session=fake_session, today=date(2026, 8, 12))
 
 
 def test_fetch_latest_vix_raises_when_observation_is_stale():
@@ -102,7 +102,7 @@ def test_fetch_latest_vix_raises_on_non_numeric_value():
     fake_session = MagicMock()
     fake_session.get.return_value = fake_response
     with pytest.raises(VixDataUnavailable):
-        fetch_latest_vix("fake-key", session=fake_session)
+        fetch_latest_vix("fake-key", session=fake_session, today=date(2026, 8, 12))
 
 
 def test_fetch_latest_vix_raises_on_http_error_status():

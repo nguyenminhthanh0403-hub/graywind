@@ -17,7 +17,7 @@ class VixDataUnavailable(Exception):
 
 
 def fetch_latest_vix(api_key, session=requests, today=None):
-    today = today or date.today()
+    today = today if today is not None else date.today()
     params = {
         "series_id": "VIXCLS",
         "api_key": api_key,
