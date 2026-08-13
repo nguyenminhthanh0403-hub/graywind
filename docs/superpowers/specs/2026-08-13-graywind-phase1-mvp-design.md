@@ -27,6 +27,12 @@ period on paper (Phase 3, not started).
   directly keeps the whole stack at $0, matching the project's cost constraint.
 - **Environment**: nothing installed yet. Phase 1 includes environment setup as its first
   task (Python, Docker, `lean-cli`, Alpaca paper account + API keys).
+- **Trading hours**: US equities regular session only — ~9:30am–4:00pm ET, Monday–Friday,
+  excluding market holidays. Graywind reads/trades live only during those hours; it is
+  idle the rest of the time by definition of the asset class, not as a limitation to fix.
+  No 24/7 operation is possible or intended for Phase 1 — that property belongs to crypto,
+  which was considered and explicitly not chosen (see asset class decision above). No
+  pre-market/after-hours extended sessions either — deferred, not in scope.
 
 ## Non-goals for Phase 1 (explicitly deferred)
 
@@ -55,6 +61,10 @@ This mirrors the pattern already proven in the Bullion project
 (`fetch_bullion_data.py` → `data.json` → app reads it locally) — same shape, not a new
 one: an external fetch script writing a local file that the main app consumes, kept
 decoupled so the fetch logic can be tested and rerun independently of the trading engine.
+
+**This component serves the research/backtest path only.** It is separate from — and
+should not be confused with — how the deployed bot gets data while actually paper trading
+live; see "Live paper-trading data path" below.
 
 ### 2. Strategy Engine (rule-based)
 A LEAN `QCAlgorithm` in Python. Signal: RSI + moving-average crossover on the watchlist.
@@ -89,11 +99,31 @@ to this project: **no 5-business-day window in the backtest period ever exceeds 
 day-trades** — the PDT throttle is verified against historical simulation, not just
 trusted from code review.
 
+### Live paper-trading data path (distinct from component 1 above)
+This was missing from an earlier draft of this spec and is added here explicitly, since
+it's the actual "read the market in real time and trade on it" mechanism — component 1's
+CSV pipeline only feeds `lean backtest`, not this.
+
+When Phase 1 is deployed as a live paper-trading run (`lean live deploy`, targeting
+Alpaca's paper endpoint), LEAN's built-in Alpaca brokerage integration handles real-time
+data natively: once `Initialize()` declares the AAPL/SPY securities and 15-minute
+resolution, LEAN subscribes to Alpaca's live data feed on its own and calls the
+algorithm's `OnData()` automatically as each new bar closes during market hours. No custom
+streaming code and no `fetch_alpaca_data.py` involvement — that script's CSVs are used
+once, by the researcher, before deployment; the live loop is a different, LEAN-native
+mechanism, running only within the trading-hours window defined in the scope decisions
+above.
+
 ## Data flow
 
+Two separate paths — research/backtest (before deployment) and live paper trading
+(during market hours, after deployment). Both feed the same Strategy Engine / Risk
+Management / Execution logic; only how data enters the pipeline differs.
+
+**Research/backtest path** (run manually, any time, off market hours included):
 ```
 Alpaca Market Data API (IEX feed)
-        │  fetch_alpaca_data.py (scheduled/manual run)
+        │  fetch_alpaca_data.py (manual run)
         ▼
 Local CSV per symbol
         │  LEAN custom PythonData reader
@@ -104,10 +134,24 @@ QCAlgorithm (Strategy Engine: RSI + MA crossover)
 Risk Management (PDT throttle, stop-loss, position sizing, drawdown breaker)
         │  approved order (or blocked)
         ▼
-Execution & Routing (LEAN → Alpaca brokerage, paper endpoint)
-        │  fill
+Execution & Routing (simulated fills against historical data)
+        │
         ▼
 Backtesting & Evaluation (lean backtest — Sharpe, drawdown, win rate, PDT-compliance check)
+```
+
+**Live paper-trading path** (`lean live deploy`, active only ~9:30am–4:00pm ET weekdays):
+```
+Alpaca live data feed (IEX, real-time)
+        │  LEAN's native Alpaca brokerage integration (no custom script)
+        ▼
+QCAlgorithm.OnData() (same Strategy Engine code as backtest)
+        │  signal (Buy/Sell/Hold)
+        ▼
+Risk Management (same PDT throttle / stop-loss / sizing / drawdown logic)
+        │  approved order (or blocked)
+        ▼
+Execution & Routing (LEAN → Alpaca brokerage, real paper-account fill)
 ```
 
 ## Error handling
