@@ -27,7 +27,7 @@ def fetch_next_earnings_date(symbol, api_key, as_of_date, session=requests):
     try:
         response = session.get(FINNHUB_CALENDAR_URL, params=params, timeout=10)
         response.raise_for_status()
-        entries = response.json().get("earningsCalendar", [])
+        entries = response.json()["earningsCalendar"]
         dates = [date.fromisoformat(entry["date"]) for entry in entries]
         return min(dates) if dates else None
     except Exception as exc:
@@ -38,4 +38,10 @@ def earnings_gate(next_earnings_date, as_of_date, blackout_days=EARNINGS_BLACKOU
     if next_earnings_date is None:
         return True
     days_until = (next_earnings_date - as_of_date).days
-    return days_until < 0 or days_until > blackout_days
+    if days_until < 0:
+        # fetch_next_earnings_date only queries forward from as_of_date, so this
+        # branch is unreachable via the normal fetch path — kept for defensive
+        # correctness since earnings_gate is a public pure function callers may
+        # invoke directly with an already-passed date.
+        return True
+    return days_until > blackout_days

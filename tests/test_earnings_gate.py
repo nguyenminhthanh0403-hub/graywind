@@ -63,3 +63,31 @@ def test_fetch_next_earnings_date_raises_on_http_error():
     fake_session.get.side_effect = Exception("network error")
     with pytest.raises(EarningsDataUnavailable):
         fetch_next_earnings_date("AAPL", "fake-key", date(2024, 1, 8), session=fake_session)
+
+
+def test_fetch_next_earnings_date_raises_on_missing_earnings_calendar_key():
+    fake_response = MagicMock()
+    fake_response.json.return_value = {}  # anomalous payload, key missing
+    fake_response.raise_for_status.return_value = None
+    fake_session = MagicMock()
+    fake_session.get.return_value = fake_response
+    with pytest.raises(EarningsDataUnavailable):
+        fetch_next_earnings_date("AAPL", "fake-key", date(2024, 1, 8), session=fake_session)
+
+
+def test_earnings_gate_blocks_at_exact_blackout_boundary():
+    assert earnings_gate(
+        next_earnings_date=date(2024, 1, 11), as_of_date=date(2024, 1, 8), blackout_days=3
+    ) is False  # exactly 3 days out — still within the blackout
+
+
+def test_earnings_gate_allows_just_outside_blackout_boundary():
+    assert earnings_gate(
+        next_earnings_date=date(2024, 1, 12), as_of_date=date(2024, 1, 8), blackout_days=3
+    ) is True  # exactly 4 days out — outside the blackout
+
+
+def test_earnings_gate_blocks_on_the_earnings_date_itself():
+    assert earnings_gate(
+        next_earnings_date=date(2024, 1, 8), as_of_date=date(2024, 1, 8), blackout_days=3
+    ) is False  # days_until == 0
