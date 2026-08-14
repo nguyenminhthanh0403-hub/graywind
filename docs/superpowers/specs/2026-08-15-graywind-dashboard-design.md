@@ -46,13 +46,18 @@ syntax, which doesn't address the underlying preference against JSON.
 ### `graywind` repo — internal operational state (replaces `live_state.json`)
 
 Not read by any browser; Python-internal only. Decomposed into two small tabular files
-instead of one nested JSON object:
+instead of one nested JSON object. Field names below are corrected against the actual
+`state_store.py`/`live_loop.py` state shape (`day_trade_dates`, `day`, `starting_equity`,
+`open_positions`) discovered while writing the implementation plan — not the approximate
+names guessed during brainstorming:
 
-- **`state/positions.csv`** — one row per open position: `symbol,qty,entry_price,entry_time`.
-  **Overwritten** each cycle (reflects current holdings, not history).
+- **`state/positions.csv`** — one row per open position:
+  `symbol,entry_price,shares,stop,target,opened_date`. **Overwritten** each cycle (reflects
+  current holdings, not history).
 - **`state/operational.csv`** — single header + single data row:
-  `cash,day_trade_count,day_trade_window_start,drawdown_baseline,last_cycle_timestamp`.
-  **Overwritten** each cycle.
+  `day,starting_equity,day_trade_dates`, where `day_trade_dates` is a semicolon-joined list
+  of ISO dates (PDT throttle's rolling-window memory) in one field — semicolon isn't the CSV
+  delimiter, so no quoting is needed. **Overwritten** each cycle.
 
 Both paths come out of `.gitignore` and are committed by the bot's workflow every cycle —
 required because GitHub Actions runners are ephemeral and nothing survives between separate
