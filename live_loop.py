@@ -144,47 +144,69 @@ def main():
     data_client = StockHistoricalDataClient(api_key, api_secret)
     news_client = NewsClient(api_key, api_secret)
 
-    account = trading_client.get_account()
-    equity = float(account.equity)
     today = datetime.now(ET).date()
-
     state = load_state()
     pdt_throttle = _restore_pdt_throttle(state)
-    drawdown_breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
-    starting_equity = state["starting_equity"] if state["day"] == today.isoformat() else equity
-    drawdown_breaker.start_new_day(today, starting_equity)
-    drawdown_breaker.update_equity(equity)
-
-    position_sizer = PositionSizer(risk_fraction=0.01)
     open_positions = state["open_positions"]
+    drawdown_breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
+    position_sizer = PositionSizer(risk_fraction=0.01)
+    # Default to whatever was already persisted so the `finally` below has
+    # something safe to write back even if get_account() itself raises
+    # before a fresh starting_equity reading is ever computed -- in that
+    # case there's nothing new to persist, so this is a no-op, not a crash
+    # on an uninitialized variable.
+    starting_equity = state["starting_equity"]
 
-    now = datetime.now(ET)
-    for symbol in WATCHLIST:
-        bars = fetch_bars(data_client, symbol, now - SIGNAL_LOOKBACK, now)
-        if not bars:
-            print(f"{symbol}: no recent bars returned, skipping this cycle")
-            continue
-        df = pd.DataFrame([
-            {"time": bar.timestamp, "close": bar.close} for bar in bars
-        ])
-        df = compute_signals(df)
-        latest = df.iloc[-1]
+    try:
+        account = trading_client.get_account()
+        equity = float(account.equity)
+        starting_equity = state["starting_equity"] if state["day"] == today.isoformat() else equity
+        drawdown_breaker.start_new_day(today, starting_equity)
+        drawdown_breaker.update_equity(equity)
 
-        process_symbol(
-            symbol=symbol, signal=latest["signal"], current_price=latest["close"],
-            today=today, open_positions=open_positions, equity=equity,
-            pdt_throttle=pdt_throttle, position_sizer=position_sizer,
-            drawdown_breaker_ok=drawdown_breaker.can_open_new_trade(),
-            fred_api_key=fred_api_key, news_client=news_client,
-            finnhub_api_key=finnhub_api_key, trading_client=trading_client,
-        )
+        now = datetime.now(ET)
+        for symbol in WATCHLIST:
+            # A single symbol's failure (a transient network error fetching
+            # bars, a gate's API call timing out, an order rejected by
+            # Alpaca, etc.) must not prevent the remaining symbols in
+            # WATCHLIST from being attempted this cycle -- routine for a
+            # script making network calls every 15 minutes.
+            try:
+                bars = fetch_bars(data_client, symbol, now - SIGNAL_LOOKBACK, now)
+                if not bars:
+                    print(f"{symbol}: no recent bars returned, skipping this cycle")
+                    continue
+                df = pd.DataFrame([
+                    {"time": bar.timestamp, "close": bar.close} for bar in bars
+                ])
+                df = compute_signals(df)
+                latest = df.iloc[-1]
 
-    save_state({
-        "day_trade_dates": [d.isoformat() for d in pdt_throttle._day_trade_dates],
-        "day": today.isoformat(),
-        "starting_equity": starting_equity,
-        "open_positions": open_positions,
-    })
+                process_symbol(
+                    symbol=symbol, signal=latest["signal"], current_price=latest["close"],
+                    today=today, open_positions=open_positions, equity=equity,
+                    pdt_throttle=pdt_throttle, position_sizer=position_sizer,
+                    drawdown_breaker_ok=drawdown_breaker.can_open_new_trade(),
+                    fred_api_key=fred_api_key, news_client=news_client,
+                    finnhub_api_key=finnhub_api_key, trading_client=trading_client,
+                )
+            except Exception as exc:
+                print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)
+    finally:
+        # Must always run, with whatever confirmed progress (submitted
+        # orders reflected in open_positions, recorded day-trades reflected
+        # in pdt_throttle) was made before any exception -- otherwise a
+        # buy that Alpaca already accepted goes untracked, and the next
+        # cycle re-buys the same symbol on a still-"buy" trend signal with
+        # its stop-loss never checked; on the sell side, a lost
+        # record_day_trade call silently under-counts the PDT window
+        # against the plan's 3-day-trade ceiling.
+        save_state({
+            "day_trade_dates": [d.isoformat() for d in pdt_throttle._day_trade_dates],
+            "day": today.isoformat(),
+            "starting_equity": starting_equity,
+            "open_positions": open_positions,
+        })
     return 0
 
 

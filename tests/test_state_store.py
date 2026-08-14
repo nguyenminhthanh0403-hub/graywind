@@ -36,3 +36,14 @@ def test_save_then_load_round_trips_open_positions(tmp_path):
     }, path=path)
     state = load_state(path=path)
     assert state["open_positions"]["AAPL"]["shares"] == 10
+
+
+def test_load_state_backfills_all_keys_for_a_severely_truncated_state_file(tmp_path):
+    # A partial/hand-edited/legacy state file (missing keys beyond just
+    # open_positions) must still load safely via bracket access elsewhere in
+    # live_loop.py rather than raising KeyError.
+    path = str(tmp_path / "state.json")
+    with open(path, "w") as f:
+        json.dump({}, f)  # no keys at all
+    state = load_state(path=path)
+    assert state == {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}

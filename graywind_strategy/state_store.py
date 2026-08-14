@@ -12,6 +12,9 @@ def load_state(path=DEFAULT_STATE_PATH):
         return {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}
     with open(path) as f:
         state = json.load(f)
+        state.setdefault("day_trade_dates", [])
+        state.setdefault("day", None)
+        state.setdefault("starting_equity", None)
         state.setdefault("open_positions", {})
         return state
 
