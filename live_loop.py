@@ -37,10 +37,12 @@ from graywind_strategy.pipeline import decide_trade
 from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
+from graywind_strategy.dashboard_export import write_cycle_export
 from graywind_strategy.state_store import load_state, save_state
 from graywind_strategy.strategy_engine import compute_signals
 
 WATCHLIST = ["AAPL", "SPY"]
+DASHBOARD_EXPORT_DIR = "dashboard_export"
 MARKET_OPEN = dt_time(9, 30)
 MARKET_CLOSE = dt_time(16, 0)
 ET = ZoneInfo("America/New_York")
@@ -95,7 +97,8 @@ def reconcile_positions(trading_client, open_positions):
 def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                     pdt_throttle, position_sizer, drawdown_breaker_ok,
                     fred_api_key, news_client, finnhub_api_key, trading_client,
-                    drawdown_breaker):
+                    drawdown_breaker, cycle_timestamp=None, cycle_trades=None,
+                    symbol_statuses=None):
     """Resolves one symbol's decision for this cycle: sell-on-stop/target
     exit if a held position crossed its stop or target, otherwise
     decide_trade() for a fresh entry -- but only if the symbol isn't
@@ -106,12 +109,22 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
     submits orders via `trading_client`; both are directly observable in
     tests via mocks, which is the point of extracting this out of main().
 
+    `cycle_timestamp`/`cycle_trades`/`symbol_statuses` are optional
+    dashboard-export collectors -- when omitted (None), no export data is
+    recorded and behavior is identical to before this parameter existed,
+    so every pre-existing caller/test needs no changes.
+
     `pending_same_day_trades` is computed from `open_positions` AFTER this
     symbol's own position (if any) has already been resolved/deleted above
     -- so it naturally excludes the symbol currently being evaluated,
     matching the "other symbols only" contract documented in
     pdt_throttle.py/pipeline.py, without needing an explicit exclusion.
     """
+    if cycle_trades is None:
+        cycle_trades = []
+    if symbol_statuses is None:
+        symbol_statuses = {}
+
     position = open_positions.get(symbol)
     if position is not None and (current_price <= position["stop"] or current_price >= position["target"]):
         order = MarketOrderRequest(
@@ -119,8 +132,12 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
             side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
         )
         trading_client.submit_order(order)
+        cycle_trades.append({
+            "timestamp": cycle_timestamp, "symbol": symbol, "side": "sell",
+            "qty": position["shares"], "price": current_price, "reason": "stop/target exit",
+        })
         # opened_date is stored/compared here as an ISO string (round-trips
-        # through JSON via state_store.py); backtester.py's equivalent
+        # through CSV via state_store.py); backtester.py's equivalent
         # comparison uses a `date` object instead since it never leaves
         # memory -- a future refactor unifying the two representations must
         # preserve each caller's own idiom.
@@ -161,10 +178,27 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 "stop": decision.stop_price, "target": decision.target_price,
                 "opened_date": today.isoformat(),
             }
+            cycle_trades.append({
+                "timestamp": cycle_timestamp, "symbol": symbol, "side": "buy",
+                "qty": decision.shares, "price": current_price, "reason": decision.reason,
+            })
+            symbol_statuses[symbol] = {
+                "position_open": True, "shares": decision.shares, "entry_price": current_price,
+                "current_price": current_price, "action": "buy", "reason": decision.reason,
+            }
             print(f"{symbol}: submitted buy for {decision.shares} shares")
         else:
+            symbol_statuses[symbol] = {
+                "position_open": False, "shares": None, "entry_price": None,
+                "current_price": current_price, "action": decision.action, "reason": decision.reason,
+            }
             print(f"{symbol}: {decision.action} ({decision.reason})")
     else:
+        symbol_statuses[symbol] = {
+            "position_open": True, "shares": position["shares"], "entry_price": position["entry_price"],
+            "current_price": current_price, "action": "hold",
+            "reason": f"already holding {position['shares']} shares",
+        }
         print(f"{symbol}: already holding {position['shares']} shares, skipping entry evaluation")
 
 
@@ -186,6 +220,9 @@ def main():
     news_client = NewsClient(api_key, api_secret)
 
     today = datetime.now(ET).date()
+    cycle_timestamp = datetime.now(ET).isoformat()
+    cycle_trades = []
+    symbol_statuses = {}
     state = load_state()
     pdt_throttle = _restore_pdt_throttle(state)
     open_positions = state["open_positions"]
@@ -198,6 +235,7 @@ def main():
     # case there's nothing new to persist, so this is a no-op, not a crash
     # on an uninitialized variable.
     starting_equity = state["starting_equity"]
+    equity = None
     # Only true once get_account() has actually succeeded and a real
     # starting_equity has been computed this cycle -- guards the `finally`
     # below from stamping today's date onto a stale (yesterday's, or
@@ -243,6 +281,8 @@ def main():
                     fred_api_key=fred_api_key, news_client=news_client,
                     finnhub_api_key=finnhub_api_key, trading_client=trading_client,
                     drawdown_breaker=drawdown_breaker,
+                    cycle_timestamp=cycle_timestamp, cycle_trades=cycle_trades,
+                    symbol_statuses=symbol_statuses,
                 )
             except Exception as exc:
                 print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)
@@ -264,6 +304,15 @@ def main():
             "starting_equity": starting_equity if baseline_established else state["starting_equity"],
             "open_positions": open_positions,
         })
+        write_cycle_export(
+            export_dir=DASHBOARD_EXPORT_DIR,
+            timestamp=cycle_timestamp,
+            symbols=WATCHLIST,
+            equity=equity,
+            today_pnl=(equity - starting_equity) if equity is not None and starting_equity else None,
+            symbol_statuses=symbol_statuses,
+            cycle_trades=cycle_trades,
+        )
     return 0
 
 

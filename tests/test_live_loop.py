@@ -231,6 +231,79 @@ def test_pending_same_day_trades_real_decide_trade_allows_when_reservation_under
     assert "AAPL" in open_positions
 
 
+# --- dashboard export collection: process_symbol optionally records what
+# happened this cycle into caller-supplied cycle_trades/symbol_statuses,
+# defaulting to None (no-op) so every pre-existing call site above is
+# unaffected.
+
+def test_process_symbol_records_buy_trade_and_status_when_collectors_passed():
+    cycle_trades = []
+    symbol_statuses = {}
+    with patch(
+        "live_loop.decide_trade",
+        return_value=TradeDecision(action="buy", reason="signal=buy", shares=10, stop_price=98.0, target_price=103.0),
+    ):
+        process_symbol(
+            symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+            open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+            trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+            cycle_timestamp="2026-08-15T10:00:00-04:00", cycle_trades=cycle_trades, symbol_statuses=symbol_statuses,
+        )
+    assert cycle_trades == [{
+        "timestamp": "2026-08-15T10:00:00-04:00", "symbol": "AAPL", "side": "buy",
+        "qty": 10, "price": 100.0, "reason": "signal=buy",
+    }]
+    assert symbol_statuses["AAPL"]["action"] == "buy"
+    assert symbol_statuses["AAPL"]["position_open"] is True
+
+
+def test_process_symbol_records_sell_trade_on_stop_exit():
+    cycle_trades = []
+    symbol_statuses = {}
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    process_symbol(
+        symbol="AAPL", signal="hold", current_price=97.0, today=date(2024, 1, 8),
+        open_positions=open_positions, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+        drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+        cycle_timestamp="2026-08-15T10:00:00-04:00", cycle_trades=cycle_trades, symbol_statuses=symbol_statuses,
+    )
+    sell_trades = [t for t in cycle_trades if t["side"] == "sell"]
+    assert sell_trades == [{
+        "timestamp": "2026-08-15T10:00:00-04:00", "symbol": "AAPL", "side": "sell",
+        "qty": 10, "price": 97.0, "reason": "stop/target exit",
+    }]
+
+
+def test_process_symbol_records_hold_status_for_already_held_position():
+    symbol_statuses = {}
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0, opened_date="2024-01-08")}
+    process_symbol(
+        symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+        open_positions=open_positions, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+        drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+        cycle_timestamp="2026-08-15T10:00:00-04:00", cycle_trades=[], symbol_statuses=symbol_statuses,
+    )
+    assert symbol_statuses["AAPL"]["action"] == "hold"
+    assert symbol_statuses["AAPL"]["position_open"] is True
+    assert symbol_statuses["AAPL"]["shares"] == 10
+
+
+def test_process_symbol_without_collectors_behaves_exactly_as_before():
+    # No cycle_timestamp/cycle_trades/symbol_statuses passed -- must not
+    # raise, matching every pre-existing call site in this file.
+    trading_client = MagicMock()
+    process_symbol(
+        symbol="AAPL", signal="hold", current_price=100.0, today=date(2024, 1, 8),
+        open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+        drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        trading_client=trading_client, drawdown_breaker=MagicMock(),
+    )
+    trading_client.submit_order.assert_not_called()
+
+
 # --- reconcile_positions: reconciles local open_positions against Alpaca's
 # real account state at the start of each live-loop cycle (final-review
 # Fix 5). Local state is authoritative for stop/target/entry_price (Alpaca's
@@ -321,7 +394,8 @@ def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
          patch("live_loop.save_state") as mock_save_state, \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
          patch("live_loop.compute_signals", side_effect=lambda df: df.assign(signal="hold")), \
-         patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")) as mock_decide:
+         patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")) as mock_decide, \
+         patch("live_loop.write_cycle_export"):
         result = live_loop.main()
 
     assert result == 0
@@ -365,7 +439,8 @@ def test_get_account_exception_leaves_day_and_starting_equity_unchanged():
          patch("live_loop.StockHistoricalDataClient"), \
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
-         patch("live_loop.save_state") as mock_save_state:
+         patch("live_loop.save_state") as mock_save_state, \
+         patch("live_loop.write_cycle_export"):
         try:
             live_loop.main()
         except RuntimeError:
@@ -407,7 +482,8 @@ def test_successful_equity_read_updates_day_and_starting_equity_normally():
          patch("live_loop.save_state") as mock_save_state, \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
          patch("live_loop.compute_signals", side_effect=lambda df: df.assign(signal="hold")), \
-         patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")):
+         patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
+         patch("live_loop.write_cycle_export"):
         result = live_loop.main()
 
     assert result == 0
@@ -415,3 +491,35 @@ def test_successful_equity_read_updates_day_and_starting_equity_normally():
     saved_state = mock_save_state.call_args[0][0]
     assert saved_state["day"] == datetime.now(ET).date().isoformat()
     assert saved_state["starting_equity"] == 11000.0
+
+
+def test_main_calls_write_cycle_export_after_save_state():
+    fake_account = MagicMock()
+    fake_account.equity = "10000.0"
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+    fake_state = {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}
+
+    def fake_fetch_bars(client, symbol, start, end):
+        return [_FakeBar(100.0, datetime(2024, 1, 8, 10, 0, tzinfo=ET))]
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+         }), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.load_state", return_value=fake_state), \
+         patch("live_loop.save_state"), \
+         patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
+         patch("live_loop.compute_signals", side_effect=lambda df: df.assign(signal="hold")), \
+         patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
+         patch("live_loop.write_cycle_export") as mock_export:
+        live_loop.main()
+
+    mock_export.assert_called_once()
+    kwargs = mock_export.call_args.kwargs
+    assert kwargs["symbols"] == live_loop.WATCHLIST
+    assert kwargs["equity"] == 10000.0
