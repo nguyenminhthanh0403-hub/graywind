@@ -3,7 +3,7 @@ close is at or above a configured threshold. Fails closed — any fetch or
 parse failure raises VixDataUnavailable, which the caller (pipeline.py)
 must treat as a blocked trade, never as a skipped gate.
 """
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -18,13 +18,24 @@ class VixDataUnavailable(Exception):
 
 def fetch_latest_vix(api_key, session=requests, today=None):
     today = today if today is not None else date.today()
+    # observation_end is the day BEFORE `today`, not `today` itself: FRED's
+    # VIXCLS observation for a given date is that day's 4:15pm close, which
+    # a bar earlier that same day (live intraday, or a backtest bar at
+    # 9:30am) cannot legitimately see yet. Querying `today.isoformat()`
+    # leaks same-day, not-yet-published data into backtests -- real
+    # lookahead bias -- and contradicts the plan's own Global Constraint of
+    # gating on *yesterday's* FRED VIXCLS close. For a live call this
+    # shifts nothing observable (FRED never has today's close published
+    # before market close anyway), so this only changes backtest behavior,
+    # which is exactly where the bug was.
+    observation_end_date = today - timedelta(days=1)
     params = {
         "series_id": "VIXCLS",
         "api_key": api_key,
         "file_type": "json",
         "sort_order": "desc",
         "limit": 1,
-        "observation_end": today.isoformat(),
+        "observation_end": observation_end_date.isoformat(),
     }
     try:
         response = session.get(FRED_OBSERVATIONS_URL, params=params, timeout=10)

@@ -7,25 +7,30 @@ real FRED_API_KEY/FINNHUB_API_KEY or a real news_client for the
 vix/sentiment/earnings gates. Per the task-11 dispatch instructions, this
 script generates synthetic, oscillating (non-monotonic -- per the Task 6
 review finding that a pure ramp fixture can hide real bugs), multi-day
-15-minute OHLCV bars for AAPL and SPY spanning a weekend, and stubs the
-vix/sentiment/earnings gates to always pass for this one verification run,
-pending real keys (see Task 12).
+15-minute OHLCV bars for AAPL and SPY spanning a weekend, and passes
+run_backtest(..., gates_always_pass=True) to bypass the vix/sentiment/
+earnings gates for this one verification run, pending real keys (see
+Task 12).
 
 Kept as a committed, reproducible script (not a deleted throwaway) per
 review feedback on the first two rounds of this task -- the exact
 integration numbers in task-11-report.md must be independently
 reproducible by re-running this file, not just trusted from a report.
 
-Run with: .venv/bin/python scripts/task11_integration_run.py
+Run with: ./.venv/bin/python scripts/task11_integration_run.py
+(no PYTHONPATH= prefix needed -- this script bootstraps its own sys.path
+below so it works regardless of the caller's cwd or PYTHONPATH.)
 """
 import math
 import random
+import sys
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 
-from graywind_strategy import pipeline
 from graywind_strategy.backtester import run_backtest
 
 random.seed(42)
@@ -82,14 +87,9 @@ print(f"AAPL bars: {len(df_by_symbol['AAPL'])}, spans "
 print(f"SPY bars: {len(df_by_symbol['SPY'])}, spans "
       f"{df_by_symbol['SPY']['time'].min()} to {df_by_symbol['SPY']['time'].max()}")
 
-with patch.multiple(
-    pipeline,
-    evaluate_vix_gate=lambda **kw: True,
-    evaluate_sentiment_gate=lambda **kw: True,
-    evaluate_earnings_gate=lambda **kw: True,
-):
-    result = run_backtest(df_by_symbol, starting_equity=10000.0,
-                           fred_api_key=None, news_client=None, finnhub_api_key=None)
+result = run_backtest(df_by_symbol, starting_equity=10000.0,
+                       fred_api_key=None, news_client=None, finnhub_api_key=None,
+                       gates_always_pass=True)
 
 print(f"trades={len(result.trades)} sharpe={result.sharpe:.3f} "
       f"max_drawdown={result.max_drawdown:.3f} win_rate={result.win_rate:.3f} "

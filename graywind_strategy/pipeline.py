@@ -60,8 +60,16 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
                   pdt_throttle, position_sizer, drawdown_breaker_ok: Optional[bool],
                   fred_api_key, news_client, finnhub_api_key,
                   pending_same_day_trades=0,
+                  gates_always_pass=False,
                   stop_pct=0.02, take_profit_pct=0.03):
     """Decide whether to buy, hold, or block a trade for `symbol` as of `as_of_date`.
+
+    `gates_always_pass`, when True, skips all three signal-augmentation
+    gates (vix/sentiment/earnings) entirely -- the plan-specified,
+    supported way to bypass them for testing/synthetic-data runs (e.g.
+    scripts/task11_integration_run.py), instead of a caller monkeypatching
+    this module's internals. Defaults to False so every existing call site
+    is unaffected.
 
     `drawdown_breaker_ok` follows the same fail-closed contract as the three
     gates below: `True` means the caller confirmed the breaker is healthy;
@@ -84,15 +92,16 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
     if signal != "buy":
         return TradeDecision(action="hold", reason="no buy signal")
 
-    # Called with keyword arguments (not positional) so that callers/tests
-    # can swap these wrappers out for arbitrary-signature stand-ins (e.g.
-    # `lambda **kw: True`) without needing to match positional arity.
-    if not evaluate_vix_gate(fred_api_key=fred_api_key, as_of_date=as_of_date):
-        return TradeDecision(action="blocked", reason="vix_gate")
-    if not evaluate_sentiment_gate(news_client=news_client, symbol=symbol, as_of_date=as_of_date):
-        return TradeDecision(action="blocked", reason="sentiment_gate")
-    if not evaluate_earnings_gate(symbol=symbol, finnhub_api_key=finnhub_api_key, as_of_date=as_of_date):
-        return TradeDecision(action="blocked", reason="earnings_gate")
+    if not gates_always_pass:
+        # Called with keyword arguments (not positional) so that callers/tests
+        # can swap these wrappers out for arbitrary-signature stand-ins (e.g.
+        # `lambda **kw: True`) without needing to match positional arity.
+        if not evaluate_vix_gate(fred_api_key=fred_api_key, as_of_date=as_of_date):
+            return TradeDecision(action="blocked", reason="vix_gate")
+        if not evaluate_sentiment_gate(news_client=news_client, symbol=symbol, as_of_date=as_of_date):
+            return TradeDecision(action="blocked", reason="sentiment_gate")
+        if not evaluate_earnings_gate(symbol=symbol, finnhub_api_key=finnhub_api_key, as_of_date=as_of_date):
+            return TradeDecision(action="blocked", reason="earnings_gate")
 
     if not drawdown_breaker_ok:  # False or None both block -- fail closed on unknown state
         return TradeDecision(action="blocked", reason="drawdown_breaker")

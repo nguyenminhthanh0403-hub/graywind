@@ -7,7 +7,7 @@ in the environment.
 import csv
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -52,7 +52,11 @@ def main():
         sys.exit(1)
 
     client = StockHistoricalDataClient(api_key, api_secret)
-    end = datetime.utcnow()
+    # tz-aware, not datetime.utcnow() (deprecated in Python 3.12+ and
+    # returns a naive datetime) -- live_loop.py passes tz-aware ET
+    # datetimes into this module's fetch_bars(), so this stays consistent
+    # with that rather than leaving a latent naive/aware inconsistency.
+    end = datetime.now(timezone.utc)
     start = end - timedelta(days=180)
 
     for symbol in WATCHLIST:

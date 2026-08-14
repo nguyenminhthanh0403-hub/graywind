@@ -281,6 +281,43 @@ def test_decide_trade_holds_when_position_size_rounds_to_zero():
     assert decision.reason == "position size rounds to zero shares"
 
 
+def test_decide_trade_gates_always_pass_bypasses_gates_and_reaches_risk_checks():
+    # Final-review Fix 4: gates_always_pass=True is the plan-specified,
+    # supported bypass for testing/synthetic-data runs (replacing the
+    # monkeypatch scripts/task11_integration_run.py used to need). Even with
+    # evaluate_vix_gate mocked to return False (which would normally block
+    # the trade), gates_always_pass=True must skip all three gate checks
+    # entirely and let the decision reach the PDT/drawdown/sizing checks --
+    # proving the bypass is real, not just accepted-but-ignored.
+    vix_mock = MagicMock(return_value=False)
+    sentiment_mock = MagicMock(return_value=False)
+    earnings_mock = MagicMock(return_value=False)
+    with patch.multiple(
+        "graywind_strategy.pipeline",
+        evaluate_vix_gate=vix_mock,
+        evaluate_sentiment_gate=sentiment_mock,
+        evaluate_earnings_gate=earnings_mock,
+    ):
+        decision = decide_trade(
+            symbol="AAPL",
+            signal="buy",
+            as_of_date=date(2024, 1, 8),
+            current_price=100.0,
+            account_equity=10000.0,
+            pdt_throttle=PDTThrottle(),
+            position_sizer=PositionSizer(risk_fraction=0.01),
+            drawdown_breaker_ok=True,
+            fred_api_key="k",
+            news_client=object(),
+            finnhub_api_key="k",
+            gates_always_pass=True,
+        )
+    assert decision.action == "buy"
+    vix_mock.assert_not_called()
+    sentiment_mock.assert_not_called()
+    earnings_mock.assert_not_called()
+
+
 def test_decide_trade_holds_on_degenerate_low_price_instead_of_raising():
     # At current_price=0.10, stop_loss_price rounds the 2% stop back onto the
     # entry price (round(0.10 * 0.98, 2) == 0.10), which would make

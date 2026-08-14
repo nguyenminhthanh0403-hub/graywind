@@ -20,6 +20,6 @@ def load_state(path=DEFAULT_STATE_PATH):
 
 
 def save_state(state, path=DEFAULT_STATE_PATH):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump(state, f)

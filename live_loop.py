@@ -44,9 +44,17 @@ WATCHLIST = ["AAPL", "SPY"]
 MARKET_OPEN = dt_time(9, 30)
 MARKET_CLOSE = dt_time(16, 0)
 ET = ZoneInfo("America/New_York")
-# 3 calendar days of 15-min bars comfortably covers the 30-period slow SMA's
-# warm-up (30 bars ~ 1.25 trading days at 15-min resolution on a 6.5h session).
-SIGNAL_LOOKBACK = timedelta(days=3)
+# 6 calendar days of 15-min bars, not 3 -- worst case is a 3-day
+# weekend+holiday gap (e.g. the Tuesday after MLK Monday, itself preceded by
+# a weekend), which still needs to leave 2 full prior trading sessions
+# (~52 bars at 26 bars/session) of headroom above the 30-bar warm-up
+# strategy_engine.compute_signals requires before it computes a real signal
+# (short-frame guard forces "hold" below that). A 3-day lookback only spans
+# the tail of one session for most of a Monday (pinned at 27 bars all day --
+# never reaching 30) and the first post-holiday session (26 bars), silently
+# forcing every "buy" evaluation to "hold" on those days -- indistinguishable
+# in logs from a genuine no-signal bar. See final-review Fix 1.
+SIGNAL_LOOKBACK = timedelta(days=6)
 
 
 def is_market_hours(now=None):
@@ -63,9 +71,31 @@ def _restore_pdt_throttle(state):
     return throttle
 
 
+def reconcile_positions(trading_client, open_positions):
+    """Reconcile local open_positions against Alpaca's real account state.
+    Local state is authoritative for stop/target/entry_price (Alpaca's
+    position API doesn't expose those), but Alpaca is authoritative for
+    WHETHER a position exists. Logs loudly on any mismatch rather than
+    guessing -- this bot never fabricates stop/target values for a
+    position it didn't itself open.
+    """
+    real_positions = {p.symbol for p in trading_client.get_all_positions()}
+    for symbol in list(open_positions.keys()):
+        if symbol not in real_positions:
+            print(f"{symbol}: WARNING - locally tracked position not found at broker, "
+                  f"dropping from local state", file=sys.stderr)
+            del open_positions[symbol]
+    for symbol in real_positions:
+        if symbol not in open_positions and symbol in WATCHLIST:
+            print(f"{symbol}: WARNING - broker reports a position not tracked locally; "
+                  f"not managed by this bot until resolved manually", file=sys.stderr)
+    return open_positions
+
+
 def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                     pdt_throttle, position_sizer, drawdown_breaker_ok,
-                    fred_api_key, news_client, finnhub_api_key, trading_client):
+                    fred_api_key, news_client, finnhub_api_key, trading_client,
+                    drawdown_breaker):
     """Resolves one symbol's decision for this cycle: sell-on-stop/target
     exit if a held position crossed its stop or target, otherwise
     decide_trade() for a fresh entry -- but only if the symbol isn't
@@ -89,10 +119,21 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
             side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
         )
         trading_client.submit_order(order)
+        # opened_date is stored/compared here as an ISO string (round-trips
+        # through JSON via state_store.py); backtester.py's equivalent
+        # comparison uses a `date` object instead since it never leaves
+        # memory -- a future refactor unifying the two representations must
+        # preserve each caller's own idiom.
         opened_date = datetime.fromisoformat(position["opened_date"]).date()
         if opened_date == today:
             pdt_throttle.record_day_trade(today)
         del open_positions[symbol]
+        # Mirrors the backtester's per-exit update_equity call (see the
+        # bar-by-bar loop in backtester.py) -- catches a same-cycle drawdown
+        # breach triggered by this exit before evaluating later symbols in
+        # this same cycle, rather than waiting for the next cycle's single
+        # per-cycle update in main().
+        drawdown_breaker.update_equity(equity)
         print(f"{symbol}: submitted sell for {position['shares']} shares (stop/target exit)")
         position = None  # eligible for a fresh same-cycle entry below, same as the backtester
 
@@ -148,6 +189,7 @@ def main():
     state = load_state()
     pdt_throttle = _restore_pdt_throttle(state)
     open_positions = state["open_positions"]
+    open_positions = reconcile_positions(trading_client, open_positions)
     drawdown_breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
     position_sizer = PositionSizer(risk_fraction=0.01)
     # Default to whatever was already persisted so the `finally` below has
@@ -200,6 +242,7 @@ def main():
                     drawdown_breaker_ok=drawdown_breaker.can_open_new_trade(),
                     fred_api_key=fred_api_key, news_client=news_client,
                     finnhub_api_key=finnhub_api_key, trading_client=trading_client,
+                    drawdown_breaker=drawdown_breaker,
                 )
             except Exception as exc:
                 print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)

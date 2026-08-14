@@ -74,11 +74,19 @@ def win_rate(trades):
 
 
 def run_backtest(df_by_symbol, starting_equity=10000.0,
-                  fred_api_key=None, news_client=None, finnhub_api_key=None):
+                  fred_api_key=None, news_client=None, finnhub_api_key=None,
+                  gates_always_pass=False):
     """Runs decide_trade() bar-by-bar for every symbol, in timestamp order
     across symbols so PDT/drawdown state is shared correctly. Assumes each
     DataFrame in df_by_symbol already has a 'time' column (from Task 5's
-    CSV format) and a 'close' column."""
+    CSV format) and a 'close' column.
+
+    `gates_always_pass` is forwarded straight into every decide_trade() call
+    below -- the plan-specified, supported way to bypass the vix/sentiment/
+    earnings gates for testing/synthetic-data runs (see
+    scripts/task11_integration_run.py), instead of monkeypatching
+    graywind_strategy.pipeline's internals.
+    """
     signals_by_symbol = {
         symbol: compute_signals(df) for symbol, df in df_by_symbol.items()
     }
@@ -130,6 +138,11 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                     "symbol": symbol, "action": "sell", "price": price,
                     "shares": position["shares"], "time": current_time,
                 })
+                # opened_date here is a `date` object (current_day, set below);
+                # live_loop.py's equivalent comparison uses an ISO string
+                # instead since its state round-trips through JSON -- a future
+                # refactor unifying the two representations must preserve
+                # each caller's own idiom.
                 if position["opened_date"] == current_day:
                     pdt_throttle.record_day_trade(current_day)
                 del open_positions[symbol]
@@ -140,6 +153,17 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                 pending_today = sum(
                     1 for p in open_positions.values() if p["opened_date"] == current_day
                 )
+                # NOTE (known follow-up, not implemented here): each bar that
+                # reaches decide_trade() triggers a fresh vix/sentiment/
+                # earnings gate fetch, with no caching across bars for the
+                # same (symbol, date). That's fine against synthetic data or
+                # with gates_always_pass=True, but a real multi-week backtest
+                # run against the real FRED/news/Finnhub APIs (once
+                # credentials exist) will need per-(symbol, date) caching of
+                # gate results before it's practical against Finnhub's
+                # free-tier rate limit (60 req/min) -- not validated here
+                # since real credentials/rate-limit behavior aren't available
+                # in this environment.
                 decision = decide_trade(
                     symbol=symbol, signal=row["signal"], as_of_date=current_day,
                     current_price=price, account_equity=equity,
@@ -148,6 +172,7 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                     fred_api_key=fred_api_key, news_client=news_client,
                     finnhub_api_key=finnhub_api_key,
                     pending_same_day_trades=pending_today,
+                    gates_always_pass=gates_always_pass,
                 )
                 if decision.action == "buy":
                     open_positions[symbol] = {

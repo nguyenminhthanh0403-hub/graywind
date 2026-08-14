@@ -8,3 +8,4 @@ venv/
 .env
 backtests/
 state/
+.pytest_cache/

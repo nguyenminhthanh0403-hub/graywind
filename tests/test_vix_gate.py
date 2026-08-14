@@ -114,15 +114,23 @@ def test_fetch_latest_vix_raises_on_http_error_status():
         fetch_latest_vix("fake-key", session=fake_session)
 
 
-def test_fetch_latest_vix_constrains_query_to_the_given_reference_date():
+def test_fetch_latest_vix_constrains_query_to_one_day_before_the_given_reference_date():
     # Lets the backtester (Task 11) evaluate historical bars by asking FRED
     # for the observation as of a historical date, rather than always
     # fetching whatever is most recent as of the real "now".
+    #
+    # Final-review Fix 2: observation_end must be `today - 1 day`, not
+    # `today` itself -- `today` is a bar's as-of date (which for an
+    # intraday backtest bar can be the SAME calendar day as "right now"),
+    # and querying FRED for observation_end=today would return today's own
+    # 4:15pm close, a value that same-day intraday bar cannot legitimately
+    # see yet. This is real lookahead bias and contradicts the plan's own
+    # Global Constraint of gating on *yesterday's* FRED VIXCLS close.
     fake_response = MagicMock()
-    fake_response.json.return_value = {"observations": [{"date": "2024-01-08", "value": "15.0"}]}
+    fake_response.json.return_value = {"observations": [{"date": "2024-01-07", "value": "15.0"}]}
     fake_response.raise_for_status.return_value = None
     fake_session = MagicMock()
     fake_session.get.return_value = fake_response
     fetch_latest_vix("fake-key", session=fake_session, today=date(2024, 1, 8))
     call_kwargs = fake_session.get.call_args.kwargs
-    assert call_kwargs["params"]["observation_end"] == "2024-01-08"
+    assert call_kwargs["params"]["observation_end"] == "2024-01-07"

@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 from graywind_strategy.backtester import max_drawdown, run_backtest, sharpe_ratio, win_rate
 from graywind_strategy.pipeline import TradeDecision
@@ -37,6 +38,48 @@ def test_win_rate_counts_profitable_round_trips():
         {"symbol": "SPY", "action": "sell", "price": 395.0, "shares": 5},   # -$25, loss
     ]
     assert win_rate(trades) == 0.5
+
+
+def test_run_backtest_sharpe_pins_the_15min_periods_per_year_scaling():
+    # Regression test for the Sharpe-scale fix: run_backtest's BacktestResult
+    # construction explicitly passes periods_per_year=PERIODS_PER_YEAR_15MIN
+    # (26 bars/session * 252 = 6552) into sharpe_ratio, instead of letting it
+    # fall back to sharpe_ratio's own default of 252 (which assumes one bar
+    # per trading day and would understate Sharpe by ~sqrt(26) for this
+    # project's 15-minute bars). No other existing test pins an exact sharpe
+    # value, so reverting that one keyword argument to the default would
+    # silently pass every other test in this file.
+    #
+    # decide_trade is mocked (same technique as the pending-same-day-trades
+    # test above) to force one fully deterministic buy-then-target-exit
+    # round trip, producing a known equity_curve of
+    # [10000, 10000, 10100, 10100] -- the expected sharpe below was computed
+    # independently from that exact curve via sharpe_ratio(equity_curve,
+    # periods_per_year=6552).
+    times = pd.to_datetime([
+        "2024-01-08 09:30:00", "2024-01-08 09:45:00",
+        "2024-01-08 10:00:00", "2024-01-08 10:15:00",
+    ])
+    df_by_symbol = {
+        "AAPL": pd.DataFrame({"time": times, "close": [100.0, 105.0, 110.0, 108.0]}),
+    }
+
+    call_count = 0
+
+    def fake_decide_trade(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return TradeDecision(
+                action="buy", reason="test", shares=10, stop_price=90.0, target_price=110.0
+            )
+        return TradeDecision(action="hold", reason="no buy signal")
+
+    with patch("graywind_strategy.backtester.decide_trade", side_effect=fake_decide_trade):
+        result = run_backtest(df_by_symbol, starting_equity=10000.0)
+
+    assert result.equity_curve == [10000.0, 10000.0, 10100.0, 10100.0]
+    assert result.sharpe == pytest.approx(57.23635208501674, rel=1e-9)
 
 
 def test_run_backtest_forwards_pending_same_day_trades_when_symbols_race_to_open():
