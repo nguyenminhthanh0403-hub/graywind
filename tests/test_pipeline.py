@@ -185,11 +185,12 @@ def test_decide_trade_blocks_on_vix_gate_failure():
 
 
 def test_decide_trade_blocks_on_sentiment_gate_failure():
+    earnings_mock = MagicMock(return_value=True)
     with patch.multiple(
         "graywind_strategy.pipeline",
         evaluate_vix_gate=MagicMock(return_value=True),
         evaluate_sentiment_gate=MagicMock(return_value=False),
-        evaluate_earnings_gate=MagicMock(return_value=True),
+        evaluate_earnings_gate=earnings_mock,
     ):
         decision = decide_trade(
             symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
@@ -199,6 +200,7 @@ def test_decide_trade_blocks_on_sentiment_gate_failure():
         )
     assert decision.action == "blocked"
     assert decision.reason == "sentiment_gate"
+    earnings_mock.assert_not_called()
 
 
 def test_decide_trade_blocks_on_earnings_gate_failure():

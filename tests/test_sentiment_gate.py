@@ -1,9 +1,10 @@
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 
 from graywind_strategy.gates.sentiment_gate import (
+    SENTIMENT_LOOKBACK_DAYS,
     SentimentDataUnavailable,
     fetch_recent_headlines,
     sentiment_gate,
@@ -62,11 +63,14 @@ def test_fetch_recent_headlines_raises_on_client_error():
 
 
 def test_fetch_recent_headlines_constrains_query_to_the_given_reference_date():
-    # NewsRequest.model_fields (alpaca-py 0.44.0) confirms the field is
-    # literally `end`, typed datetime.datetime | None -- verified via the
-    # same static-inspection technique used for the `symbols` field above.
-    # Lets the backtester (Task 11) evaluate historical bars without the
-    # sentiment gate leaking future news into the score.
+    # NewsRequest.model_fields (alpaca-py 0.44.0) confirms the fields are
+    # literally `start`/`end`, both typed datetime.datetime | None -- verified
+    # via the same static-inspection technique used for the `symbols` field
+    # above. `start` must be sent explicitly: per NewsRequest's docstring,
+    # an omitted `start` defaults server-side to the beginning of the
+    # *current* day, not `end`'s day, which would invert the window for any
+    # historical as_of. Lets the backtester (Task 11) evaluate historical
+    # bars without the sentiment gate leaking future news into the score.
     fake_response = MagicMock()
     fake_response.data = {"news": []}
     fake_client = MagicMock()
@@ -76,10 +80,31 @@ def test_fetch_recent_headlines_constrains_query_to_the_given_reference_date():
 
     fake_client.get_news.assert_called_once()
     request = fake_client.get_news.call_args.args[0]
-    assert request.end == datetime(2024, 1, 8)
+    assert request.start == datetime.combine(
+        date(2024, 1, 8) - timedelta(days=SENTIMENT_LOOKBACK_DAYS), time.min
+    )
+    assert request.end == datetime.combine(date(2024, 1, 8), time.max)
 
 
-def test_fetch_recent_headlines_omits_end_when_as_of_not_given():
+def test_fetch_recent_headlines_serializes_both_start_and_end_when_as_of_given():
+    # Checking the Python attributes (above) isn't sufficient proof -- this
+    # mirrors the exact technique that caught the original gap in review:
+    # serialize the request the way the SDK would before sending it over the
+    # wire, and confirm `start` is actually present, not silently dropped.
+    fake_response = MagicMock()
+    fake_response.data = {"news": []}
+    fake_client = MagicMock()
+    fake_client.get_news.return_value = fake_response
+
+    fetch_recent_headlines(fake_client, "AAPL", as_of=date(2024, 1, 8))
+
+    request = fake_client.get_news.call_args.args[0]
+    fields = request.to_request_fields()
+    assert "start" in fields
+    assert "end" in fields
+
+
+def test_fetch_recent_headlines_omits_start_and_end_when_as_of_not_given():
     fake_response = MagicMock()
     fake_response.data = {"news": []}
     fake_client = MagicMock()
@@ -88,4 +113,5 @@ def test_fetch_recent_headlines_omits_end_when_as_of_not_given():
     fetch_recent_headlines(fake_client, "AAPL")
 
     request = fake_client.get_news.call_args.args[0]
+    assert request.start is None
     assert request.end is None
