@@ -24,6 +24,7 @@ def fetch_latest_vix(api_key, session=requests, today=None):
         "file_type": "json",
         "sort_order": "desc",
         "limit": 1,
+        "observation_end": today.isoformat(),
     }
     try:
         response = session.get(FRED_OBSERVATIONS_URL, params=params, timeout=10)

@@ -112,3 +112,17 @@ def test_fetch_latest_vix_raises_on_http_error_status():
     fake_session.get.return_value = fake_response
     with pytest.raises(VixDataUnavailable):
         fetch_latest_vix("fake-key", session=fake_session)
+
+
+def test_fetch_latest_vix_constrains_query_to_the_given_reference_date():
+    # Lets the backtester (Task 11) evaluate historical bars by asking FRED
+    # for the observation as of a historical date, rather than always
+    # fetching whatever is most recent as of the real "now".
+    fake_response = MagicMock()
+    fake_response.json.return_value = {"observations": [{"date": "2024-01-08", "value": "15.0"}]}
+    fake_response.raise_for_status.return_value = None
+    fake_session = MagicMock()
+    fake_session.get.return_value = fake_response
+    fetch_latest_vix("fake-key", session=fake_session, today=date(2024, 1, 8))
+    call_kwargs = fake_session.get.call_args.kwargs
+    assert call_kwargs["params"]["observation_end"] == "2024-01-08"

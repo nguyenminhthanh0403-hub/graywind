@@ -12,7 +12,19 @@ of the requested one. Verified via static inspection of the installed
 NewsSet source); no live Alpaca API call was made since no credentials were
 available in this environment. `response.data["news"]` and `article.headline`
 were confirmed correct from NewsSet/News model source.
+
+Note on historical (backtest) queries: `NewsRequest.model_fields` (checked
+the same way, via `NewsRequest.model_fields` on alpaca-py 0.44.0) confirms
+a `start`/`end` pair, both typed `datetime.datetime | None` -- there is no
+`symbol_or_symbols`-style trap here, the names are exactly `start`/`end`.
+`fetch_recent_headlines` accepts an optional `as_of` (a `date`); when given,
+it's converted to a `datetime` at midnight and passed as `end`, constraining
+the query to headlines as of that reference date instead of always "now" --
+this is what lets the backtester (Task 11) evaluate historical bars without
+leaking future news into the sentiment score.
 """
+from datetime import datetime
+
 from alpaca.data.requests import NewsRequest
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
@@ -24,9 +36,12 @@ class SentimentDataUnavailable(Exception):
     pass
 
 
-def fetch_recent_headlines(news_client, symbol, limit=10):
+def fetch_recent_headlines(news_client, symbol, limit=10, as_of=None):
     try:
-        request = NewsRequest(symbols=symbol, limit=limit)
+        request_kwargs = {"symbols": symbol, "limit": limit}
+        if as_of is not None:
+            request_kwargs["end"] = datetime.combine(as_of, datetime.min.time())
+        request = NewsRequest(**request_kwargs)
         response = news_client.get_news(request)
         return [article.headline for article in response.data["news"]]
     except Exception as exc:
