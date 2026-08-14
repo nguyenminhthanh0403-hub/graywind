@@ -8,3 +8,4 @@ venv/
 .env
 backtests/
 .pytest_cache/
+dashboard_export/
