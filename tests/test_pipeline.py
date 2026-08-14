@@ -167,6 +167,36 @@ def test_decide_trade_blocks_when_pdt_throttle_exhausted():
     assert decision.reason == "pdt_throttle"
 
 
+def test_decide_trade_blocks_on_pdt_throttle_when_pending_same_day_trades_would_hit_cap():
+    # 2 realized day trades on record; the throttle alone (pending_count=0)
+    # would allow a 3rd. But 2 OTHER same-day-opened positions are still
+    # open right now (e.g. a different symbol reopened before closing) --
+    # if either or both of those close later today, that's up to 4 realized
+    # day trades, a real PDT violation. pending_same_day_trades must make
+    # decide_trade block here even though the throttle's realized count
+    # alone would not have.
+    throttle = PDTThrottle()
+    throttle.record_day_trade(date(2024, 1, 8))
+    throttle.record_day_trade(date(2024, 1, 8))
+    with _passing_gates():
+        decision = decide_trade(
+            symbol="AAPL",
+            signal="buy",
+            as_of_date=date(2024, 1, 8),
+            current_price=100.0,
+            account_equity=10000.0,
+            pdt_throttle=throttle,
+            position_sizer=PositionSizer(risk_fraction=0.01),
+            drawdown_breaker_ok=True,
+            fred_api_key="k",
+            news_client=object(),
+            finnhub_api_key="k",
+            pending_same_day_trades=1,
+        )
+    assert decision.action == "blocked"
+    assert decision.reason == "pdt_throttle"
+
+
 def test_decide_trade_blocks_on_vix_gate_failure():
     with patch.multiple(
         "graywind_strategy.pipeline",

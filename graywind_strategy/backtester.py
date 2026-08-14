@@ -8,7 +8,7 @@ simulation, not just trusted from code review.
 import statistics
 from dataclasses import dataclass, field
 
-from graywind_strategy.pipeline import TradeDecision, decide_trade
+from graywind_strategy.pipeline import decide_trade
 from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
@@ -85,19 +85,15 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
     trades = []
     open_positions = {}
     current_day = None
-    # Realized day-trades per calendar date, tracked in lockstep with
-    # pdt_throttle.record_day_trade(). PDTThrottle.can_open_day_trade only
-    # sees REALIZED (already-closed) day trades -- it can't see that a
-    # position opened *today* on a different symbol and still open would
-    # itself become a day trade if it also closes later today. Two symbols
-    # can each be independently waved through at "2 of 3 slots used" and
-    # both go on to close same-day, producing a real 4th-day-trade PDT
-    # violation that neither individual check caught. See task-11-report.md
-    # for the real backtest run that surfaced this (2024-01-10 in the
-    # synthetic integration data: AAPL and SPY each reopened same-day while
-    # only 2 realized day trades were on record, and both later closed
-    # same-day, yielding 4 realized day trades for that date).
-    day_trade_count_by_date = {}
+    # The same-day-pending-position PDT reservation (two symbols each
+    # opening a position before either closes can otherwise slip past a
+    # realized-only day-trade check and both later close same-day,
+    # producing a real violation -- see task-11-report.md for the real
+    # backtest run that surfaced this) now lives in
+    # PDTThrottle.can_open_day_trade's `pending_count` param and
+    # decide_trade's `pending_same_day_trades` param, so both the
+    # backtester and the live loop (Task 12) share the same fix instead of
+    # each needing to reimplement it.
 
     for time, symbol, row in all_rows:
         as_of_date = time.date() if hasattr(time, "date") else time
@@ -116,12 +112,14 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
             })
             if position["opened_date"] == current_day:
                 pdt_throttle.record_day_trade(current_day)
-                day_trade_count_by_date[current_day] = day_trade_count_by_date.get(current_day, 0) + 1
             del open_positions[symbol]
 
         drawdown_breaker.update_equity(equity)
 
         if symbol not in open_positions:
+            pending_today = sum(
+                1 for p in open_positions.values() if p["opened_date"] == current_day
+            )
             decision = decide_trade(
                 symbol=symbol, signal=row["signal"], as_of_date=current_day,
                 current_price=price, account_equity=equity,
@@ -129,18 +127,8 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                 drawdown_breaker_ok=drawdown_breaker.can_open_new_trade(),
                 fred_api_key=fred_api_key, news_client=news_client,
                 finnhub_api_key=finnhub_api_key,
+                pending_same_day_trades=pending_today,
             )
-            if decision.action == "buy":
-                # Reserve a day-trade slot for every same-day-opened position
-                # still open across ALL symbols, not just this one, so
-                # realized-today + pending-today never exceeds the PDT cap
-                # even when multiple symbols race to open before any closes.
-                realized_today = day_trade_count_by_date.get(current_day, 0)
-                pending_today = sum(
-                    1 for p in open_positions.values() if p["opened_date"] == current_day
-                )
-                if realized_today + pending_today >= pdt_throttle.MAX_DAY_TRADES:
-                    decision = TradeDecision(action="hold", reason="pdt_pending_same_day_opens")
             if decision.action == "buy":
                 open_positions[symbol] = {
                     "entry_price": price, "shares": decision.shares,
