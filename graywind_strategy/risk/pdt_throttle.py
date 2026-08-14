@@ -19,9 +19,10 @@ class PDTThrottle:
         self._day_trade_dates.append(trade_date)
 
     def can_open_day_trade(self, as_of, pending_count=0):
-        """`pending_count` is the number of same-day-opened positions that
-        are still open (across all symbols) and would themselves become
-        realized day trades if closed later today. Realized (already
+        """`pending_count` is the count of *other* symbols' still-open
+        positions opened earlier the same day (not including the symbol
+        currently being evaluated) -- each one would itself become a
+        realized day trade if closed later today. Realized (already
         `record_day_trade`-ed) trades alone can't see this -- two different
         symbols can each be opened while only 2 are realized, both later
         close same-day, and produce a real 4th-day-trade violation neither

@@ -7,12 +7,24 @@ simulation, not just trusted from code review.
 """
 import statistics
 from dataclasses import dataclass, field
+from itertools import groupby
 
 from graywind_strategy.pipeline import decide_trade
 from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 from graywind_strategy.strategy_engine import compute_signals
+
+# This project's bars are always 15-minute, ~6.5-hour-session bars (Task 5's
+# fetch format). sharpe_ratio's own default (periods_per_year=252) assumes
+# one bar per trading day; annualizing 15-minute bars with that default
+# understates Sharpe by roughly sqrt(BARS_PER_TRADING_DAY_15MIN). Kept as a
+# module-level constant here (not a change to sharpe_ratio's default) since
+# sharpe_ratio is a general-purpose function other callers might use with
+# different bar sizes.
+BARS_PER_TRADING_DAY_15MIN = 26  # 6.5-hour session / 15-minute bars
+TRADING_DAYS_PER_YEAR = 252
+PERIODS_PER_YEAR_15MIN = BARS_PER_TRADING_DAY_15MIN * TRADING_DAYS_PER_YEAR
 
 
 @dataclass
@@ -95,50 +107,58 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
     # backtester and the live loop (Task 12) share the same fix instead of
     # each needing to reimplement it.
 
-    for time, symbol, row in all_rows:
-        as_of_date = time.date() if hasattr(time, "date") else time
+    # Grouped by timestamp (all_rows is already sorted by time) so the
+    # equity curve gets exactly one point per real moment in time, not one
+    # point per (bar, symbol) row -- with N symbols sharing the same
+    # 15-minute timestamps, appending inside the per-row loop below would
+    # otherwise put N duplicate/near-duplicate points on the curve for every
+    # real timestamp, corrupting both max_drawdown and sharpe_ratio (which
+    # assumes one data point per period).
+    for current_time, rows_at_time in groupby(all_rows, key=lambda r: r[0]):
+        as_of_date = current_time.date() if hasattr(current_time, "date") else current_time
         if as_of_date != current_day:
             current_day = as_of_date
             drawdown_breaker.start_new_day(current_day, equity)
 
-        price = row["close"]
+        for _, symbol, row in rows_at_time:
+            price = row["close"]
 
-        position = open_positions.get(symbol)
-        if position is not None and (price <= position["stop"] or price >= position["target"]):
-            equity += (price - position["entry_price"]) * position["shares"]
-            trades.append({
-                "symbol": symbol, "action": "sell", "price": price,
-                "shares": position["shares"], "time": time,
-            })
-            if position["opened_date"] == current_day:
-                pdt_throttle.record_day_trade(current_day)
-            del open_positions[symbol]
-
-        drawdown_breaker.update_equity(equity)
-
-        if symbol not in open_positions:
-            pending_today = sum(
-                1 for p in open_positions.values() if p["opened_date"] == current_day
-            )
-            decision = decide_trade(
-                symbol=symbol, signal=row["signal"], as_of_date=current_day,
-                current_price=price, account_equity=equity,
-                pdt_throttle=pdt_throttle, position_sizer=position_sizer,
-                drawdown_breaker_ok=drawdown_breaker.can_open_new_trade(),
-                fred_api_key=fred_api_key, news_client=news_client,
-                finnhub_api_key=finnhub_api_key,
-                pending_same_day_trades=pending_today,
-            )
-            if decision.action == "buy":
-                open_positions[symbol] = {
-                    "entry_price": price, "shares": decision.shares,
-                    "stop": decision.stop_price, "target": decision.target_price,
-                    "opened_date": current_day,
-                }
+            position = open_positions.get(symbol)
+            if position is not None and (price <= position["stop"] or price >= position["target"]):
+                equity += (price - position["entry_price"]) * position["shares"]
                 trades.append({
-                    "symbol": symbol, "action": "buy", "price": price,
-                    "shares": decision.shares, "time": time,
+                    "symbol": symbol, "action": "sell", "price": price,
+                    "shares": position["shares"], "time": current_time,
                 })
+                if position["opened_date"] == current_day:
+                    pdt_throttle.record_day_trade(current_day)
+                del open_positions[symbol]
+
+            drawdown_breaker.update_equity(equity)
+
+            if symbol not in open_positions:
+                pending_today = sum(
+                    1 for p in open_positions.values() if p["opened_date"] == current_day
+                )
+                decision = decide_trade(
+                    symbol=symbol, signal=row["signal"], as_of_date=current_day,
+                    current_price=price, account_equity=equity,
+                    pdt_throttle=pdt_throttle, position_sizer=position_sizer,
+                    drawdown_breaker_ok=drawdown_breaker.can_open_new_trade(),
+                    fred_api_key=fred_api_key, news_client=news_client,
+                    finnhub_api_key=finnhub_api_key,
+                    pending_same_day_trades=pending_today,
+                )
+                if decision.action == "buy":
+                    open_positions[symbol] = {
+                        "entry_price": price, "shares": decision.shares,
+                        "stop": decision.stop_price, "target": decision.target_price,
+                        "opened_date": current_day,
+                    }
+                    trades.append({
+                        "symbol": symbol, "action": "buy", "price": price,
+                        "shares": decision.shares, "time": current_time,
+                    })
 
         equity_curve.append(equity)
 
@@ -146,7 +166,7 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
 
     return BacktestResult(
         equity_curve=equity_curve, trades=trades,
-        sharpe=sharpe_ratio(equity_curve) if equity_curve else 0.0,
+        sharpe=sharpe_ratio(equity_curve, periods_per_year=PERIODS_PER_YEAR_15MIN) if equity_curve else 0.0,
         max_drawdown=max_drawdown(equity_curve) if equity_curve else 0.0,
         win_rate=win_rate(trades),
         pdt_compliant=pdt_compliant,

@@ -71,9 +71,10 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
     never as "skip this check." Callers (the backtester in Task 11, the live
     loop in Task 12) must not pass `None` to mean "unknown, allow anyway."
 
-    `pending_same_day_trades` is the count of other same-day-opened
-    positions (any symbol) still open right now -- each one is a potential
-    day trade that hasn't been realized yet. Forwarded straight into
+    `pending_same_day_trades` is the count of *other* symbols' still-open
+    positions opened earlier the same day (not including the symbol
+    currently being evaluated) -- each one is a potential day trade that
+    hasn't been realized yet. Forwarded straight into
     `pdt_throttle.can_open_day_trade` so the PDT check reserves a slot for
     at-risk positions, not just already-realized ones; without this, two
     symbols opened in the same session before either closes can each pass
