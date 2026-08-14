@@ -274,12 +274,19 @@ def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
     assert saved_state["day_trade_dates"] == []
 
 
-def test_get_account_exception_still_runs_save_state_without_crashing():
+def test_get_account_exception_leaves_day_and_starting_equity_unchanged():
     # An exception above the per-symbol try/except layer (get_account()
     # itself, before the loop even starts) must not prevent save_state from
     # running -- there's nothing new to persist, so it should safely
     # persist back whatever was already loaded rather than raise
     # NameError/UnboundLocalError on an uninitialized starting_equity.
+    #
+    # Critically, "day" must ALSO be left unchanged (not stamped with
+    # today's date) when no fresh baseline was established -- pairing
+    # today's date with yesterday's stale starting_equity would make the
+    # next cycle think it already has today's baseline (state["day"] ==
+    # today) and skip refetching it, running DrawdownBreaker.start_new_day
+    # against the wrong number for the rest of the day.
     fake_trading_client = MagicMock()
     fake_trading_client.get_account.side_effect = RuntimeError("Alpaca API down")
 
@@ -302,5 +309,45 @@ def test_get_account_exception_still_runs_save_state_without_crashing():
 
     mock_save_state.assert_called_once()
     saved_state = mock_save_state.call_args[0][0]
-    assert saved_state["starting_equity"] == 9500.0  # fell back to the already-persisted value
+    assert saved_state["day"] == "2024-01-05"  # unchanged, NOT stamped with today's date
+    assert saved_state["starting_equity"] == 9500.0  # unchanged, fell back to the already-persisted value
     assert saved_state["open_positions"] == {}
+
+
+def test_successful_equity_read_updates_day_and_starting_equity_normally():
+    # Contrast case: when get_account() DOES succeed and a fresh baseline
+    # IS established this cycle, "day" and "starting_equity" update
+    # normally -- confirms the guard above only suppresses the update on
+    # failure, not unconditionally.
+    fake_account = MagicMock()
+    fake_account.equity = "11000.0"
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+
+    # state["day"] is a stale prior day, distinct from whatever "today"
+    # resolves to at test-run time, so the fresh-equity branch is taken.
+    fake_state = {"day_trade_dates": [], "day": "2024-01-05", "starting_equity": 9500.0, "open_positions": {}}
+
+    def fake_fetch_bars(client, symbol, start, end):
+        return [_FakeBar(100.0, datetime(2024, 1, 8, 10, 0, tzinfo=ET))]
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+         }), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.load_state", return_value=fake_state), \
+         patch("live_loop.save_state") as mock_save_state, \
+         patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
+         patch("live_loop.compute_signals", side_effect=lambda df: df.assign(signal="hold")), \
+         patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")):
+        result = live_loop.main()
+
+    assert result == 0
+    mock_save_state.assert_called_once()
+    saved_state = mock_save_state.call_args[0][0]
+    assert saved_state["day"] == datetime.now(ET).date().isoformat()
+    assert saved_state["starting_equity"] == 11000.0

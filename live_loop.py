@@ -156,11 +156,22 @@ def main():
     # case there's nothing new to persist, so this is a no-op, not a crash
     # on an uninitialized variable.
     starting_equity = state["starting_equity"]
+    # Only true once get_account() has actually succeeded and a real
+    # starting_equity has been computed this cycle -- guards the `finally`
+    # below from stamping today's date onto a stale (yesterday's, or
+    # never-set) starting_equity. Without this, a failed get_account() on
+    # the day's first cycle would still persist {"day": today, ...} paired
+    # with the old starting_equity; the next cycle would see
+    # state["day"] == today and treat that stale figure as already having
+    # today's baseline, silently running DrawdownBreaker.start_new_day
+    # against the wrong number for the rest of the day.
+    baseline_established = False
 
     try:
         account = trading_client.get_account()
         equity = float(account.equity)
         starting_equity = state["starting_equity"] if state["day"] == today.isoformat() else equity
+        baseline_established = True
         drawdown_breaker.start_new_day(today, starting_equity)
         drawdown_breaker.update_equity(equity)
 
@@ -203,8 +214,11 @@ def main():
         # against the plan's 3-day-trade ceiling.
         save_state({
             "day_trade_dates": [d.isoformat() for d in pdt_throttle._day_trade_dates],
-            "day": today.isoformat(),
-            "starting_equity": starting_equity,
+            # If get_account() failed and no fresh baseline was established
+            # this cycle, leave "day"/"starting_equity" exactly as loaded --
+            # never pair today's date with a stale or unset starting_equity.
+            "day": today.isoformat() if baseline_established else state["day"],
+            "starting_equity": starting_equity if baseline_established else state["starting_equity"],
             "open_positions": open_positions,
         })
     return 0
