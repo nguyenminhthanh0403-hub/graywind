@@ -1,5 +1,11 @@
 # Graywind Dashboard Implementation Plan
 
+> **Superseded 2026-08-15, same day:** this plan's two-repo architecture (Tasks 4-7 involve
+> `graywind-dashboard` as a separate repo, a PAT, cross-repo pushes) was reversed to a single
+> repo before Task 7's GitHub setup ever ran. This file is kept as a point-in-time historical
+> record — for what's actually true today, read the "Revision" section at the top of
+> `docs/superpowers/specs/2026-08-15-graywind-dashboard-design.md` instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give the Graywind trading bot a public-but-unlisted dashboard (equity curve, trade log, current status) driven by a GitHub Actions cron, mirroring Bullion's cron-commits-data/static-page-reads-it pattern but split across two private repos with CSV instead of JSON.

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Merges one cycle's local export directory (graywind_strategy/dashboard_export.py's
-output) into a checkout of graywind-dashboard's data/ directory: equity_curve.csv and
+output) into graywind's own dashboard-data/ directory: equity_curve.csv and
 trade_log.csv are APPENDED to (they accumulate history across every cycle ever run),
 status.csv is fully OVERWRITTEN (it's a snapshot of the most recent cycle only).
 
-Invoked by .github/workflows/live-trading.yml after cloning graywind-dashboard, and
-directly by tests against scratch directories -- never against a real clone in a test.
+Invoked by .github/workflows/live-trading.yml against this same repo's dashboard-data/
+(no second repo, no clone -- that was the two-repo version's design, superseded same-day),
+and directly by tests against scratch directories.
 """
 import csv
 import os

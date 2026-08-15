@@ -83,7 +83,14 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A state dashboard-data 2>/dev/null || true
+          # Two separate `git add` calls, not one `git add -A state dashboard-data`:
+          # git add with multiple pathspecs is atomic -- if either directory doesn't
+          # exist on disk (state/ won't, until the very first successful run creates
+          # it), the WHOLE call fails and stages NEITHER, silently discarding a real
+          # dashboard-data update alongside the missing-state failure. Caught in code
+          # review before the first real deploy, reproduced directly.
+          git add -A state 2>/dev/null || true
+          git add -A dashboard-data 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No changes this cycle; nothing to commit."
           else

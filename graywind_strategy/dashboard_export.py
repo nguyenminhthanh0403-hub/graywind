@@ -1,9 +1,10 @@
 """Writes one cycle's dashboard update -- a new equity point, any new
 trades, and a refreshed per-symbol status -- to a local scratch directory.
-This module knows nothing about the graywind-dashboard repo; it only
-writes files. merge_dashboard_export.py folds this directory's contents
-into a checkout of that repo (see that module for the append-vs-overwrite
-distinction between equity_curve.csv/trade_log.csv and status.csv).
+This module knows nothing about where the dashboard data ultimately lands;
+it only writes files. merge_dashboard_export.py folds this directory's
+contents into graywind's own dashboard-data/ directory (see that module
+for the append-vs-overwrite distinction between equity_curve.csv/
+trade_log.csv and status.csv).
 """
 import csv
 import os
