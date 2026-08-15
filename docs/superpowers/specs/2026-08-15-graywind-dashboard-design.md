@@ -1,10 +1,24 @@
 # Graywind Dashboard — Design
 
 **Date:** 2026-08-15
-**Status:** approved, pending implementation plan
+**Status:** implemented (two-repo version merged to `main` at `b5cc3e4`), then revised same-day
+to a single-repo layout before any GitHub-side setup (Task 7) happened — see "Revision" below.
 **Prior art referenced:** Bullion's live-data pipeline (`financial-map.html`,
 `.github/workflows/daily-data.yml`, `_config.yml` in
 `/Users/thanhnguyen/minhthanh0403/claude-projects/claudekit`)
+
+## Revision (2026-08-15, same day as initial implementation)
+
+The two-repo design below (Approach B) was fully implemented, task-reviewed, whole-branch
+reviewed, and merged to `graywind`'s `main`. Before Task 7 (creating the GitHub repos) ever
+ran, the decision was reversed: **one repo instead of two.** Nothing had been pushed to
+GitHub yet, so this cost nothing to undo. The sections below are updated in place to reflect
+the single-repo (Approach A) layout; where a decision changed, the original reasoning is kept
+for context but marked superseded rather than deleted.
+
+Consequence: the separate `graywind-dashboard` repo that Task 5 scaffolded was deleted
+(it was never pushed anywhere, so nothing depended on it). Its `index.html` moved into
+`graywind` at repo root.
 
 ## Goal
 
@@ -18,19 +32,20 @@ follow-on feature, independent of the still-unstarted burn-in clock (see
 `docs/superpowers/burn-in-decision.md` — real Alpaca/FRED/Finnhub credentials are still
 needed before burn-in starts; that is tracked separately from this dashboard work).
 
-## Repo Structure — two repos (Approach B)
+## Repo Structure — one repo (Approach A, supersedes the original Approach B decision)
 
-- **`graywind`** (existing, this repo) — private. Bot code + strategy logic stays here,
-  isolated from anything public-facing.
-- **`graywind-dashboard`** (new) — private, unlisted GitHub Pages URL (same privacy model
-  as originally considered for a single-repo approach: keeps it out of search engines and
-  repo listings, but the exact URL is reachable by anyone — GitHub's free tier has no login
-  wall for Pages; true access control needs GitHub Pro). Contains only sanitized
-  position/P&L/trade data, no strategy source.
+- **`graywind`** (existing, this repo) — private, unlisted GitHub Pages URL (keeps it out of
+  search engines and repo listings, but the exact URL is reachable by anyone — GitHub's free
+  tier has no login wall for Pages; true access control needs GitHub Pro). Bot code, strategy
+  logic, and the dashboard's static frontend + data all live here together.
 
-Two repos over one: more isolation if the unlisted dashboard URL ever leaks (bot's strategy
-source stays fully separate), accepted as worth the extra setup despite the project's tight
-time budget.
+*(Superseded reasoning, kept for context: the original Approach B chose two repos for extra
+isolation if the unlisted dashboard URL ever leaked, since a separate repo would keep the
+bot's strategy source out of reach even then. Reversed same-day, before any GitHub-side setup,
+because the added setup/maintenance cost — a second repo, a cross-repo PAT, a second set of
+GitHub Pages settings — wasn't worth it for a personal project on a tight time budget, and the
+isolation benefit was judged marginal: the dashboard data alone (trade log, equity curve)
+already reveals the strategy's approximate behavior even without the source.)*
 
 ## Data Format — CSV everywhere, no JSON
 
@@ -64,12 +79,22 @@ required because GitHub Actions runners are ephemeral and nothing survives betwe
 scheduled runs except what's committed to the repo. This is a real change to already-shipped
 Phase 1 code (`graywind_strategy/state_store.py`, `.gitignore`), not just new dashboard code.
 
-### `graywind-dashboard` repo — display data
+### `graywind` repo — dashboard display data
 
-- **`data/equity_curve.csv`** — `timestamp,equity`. **Append-only.**
-- **`data/trade_log.csv`** — `timestamp,symbol,side,qty,price,reason`. **Append-only.**
-- **`data/status.csv`** — open positions, today's P&L, last-cycle timestamp, per-symbol
-  gate/decision reasoning. **Overwritten** each cycle (a snapshot, not history).
+Lives at `dashboard-data/`, **not** `data/` — `graywind`'s `.gitignore` already has a bare
+`data/` entry (for cached Alpaca bars), which would silently swallow these CSVs if the same
+name were reused. This collision only became visible once the collapse actually moved files
+into `graywind`'s tree; it didn't exist in the two-repo version.
+
+- **`dashboard-data/equity_curve.csv`** — `timestamp,equity`. **Append-only.**
+- **`dashboard-data/trade_log.csv`** — `timestamp,symbol,side,qty,price,reason`. **Append-only.**
+- **`dashboard-data/status.csv`** — open positions, today's P&L, last-cycle timestamp,
+  per-symbol gate/decision reasoning. **Overwritten** each cycle (a snapshot, not history).
+
+`index.html` lives at `graywind`'s repo root (not inside `dashboard-data/`) — GitHub Pages'
+classic "deploy from a branch" only supports serving from the repo root or from `/docs`, and
+`/docs` is already `graywind`'s private planning-docs folder (specs, plans, handoffs), so root
+is the only option that doesn't require relocating that existing convention.
 
 ## Execution Model
 
@@ -77,44 +102,57 @@ Phase 1 code (`graywind_strategy/state_store.py`, `.gitignore`), not just new da
   9:30am–4:00pm ET, Monday–Friday. Local cron only fires if the Mac is awake/logged
   in/unlocked at that exact moment; a missed cycle silently gaps the 4-week burn-in record.
   Actions runs regardless of the Mac's state.
-- The `graywind` workflow runs `live_loop.py`, then:
-  1. Writes/commits `state/positions.csv` + `state/operational.csv` to **its own repo** first,
-     independent of anything dashboard-related — this must succeed or fail on its own.
-  2. Computes the incremental dashboard update (one new equity point, any new trade rows,
-     a refreshed status row) and pushes it into `graywind-dashboard` using a fine-grained
-     PAT (scoped to only that repo) stored as a secret in `graywind`
-     (`DASHBOARD_REPO_PAT`).
-- `graywind-dashboard` has **no workflow of its own** — it's a pure push target. Its only
-  content is the committed CSVs plus `index.html`.
+- The `graywind` workflow runs `live_loop.py`, which writes `state/positions.csv` +
+  `state/operational.csv` and (via `merge_dashboard_export.py`) the incremental dashboard
+  update (one new equity point, any new trade rows, a refreshed status row) into
+  `dashboard-data/`. The workflow then commits and pushes **all of it in one step** — no
+  second repo, no PAT, no cross-repo clone. *(Superseded: the two-repo version needed to
+  commit `graywind`'s own state independently of a separate cross-repo push, specifically so
+  a PAT/network failure on the second push couldn't lose the first commit. With everything in
+  one repo there's only one push to succeed or fail, so that whole failure mode — and the
+  workflow complexity built to handle it — no longer applies.)*
 
 ## Dashboard Frontend
 
-Single static `index.html` in `graywind-dashboard`, vanilla JS + D3, no build step, no
-framework — same pattern as `financial-map.html`. `fetch()`s the three CSVs at load time,
-parses them client-side (plain string splitting, no CSV library needed at this scale),
-renders:
+Single static `index.html` at `graywind`'s repo root, vanilla JS + D3, no build step, no
+framework — same pattern as `financial-map.html`. `fetch()`s the three `dashboard-data/*.csv`
+files at load time, parses them client-side (plain string splitting, no CSV library needed at
+this scale — the parser's line-splitting was hardened against Python's CSV writers' `\r\n`
+line endings during the two-repo version's final review, and that fix carries forward
+unchanged), renders:
 - An equity curve chart across the full burn-in period.
 - A scrollable trade log table.
 - A status panel: open positions, today's P&L, last-cycle timestamp, per-symbol
   gate/decision reasoning.
 
-Served via GitHub Pages from `graywind-dashboard`, reusing Bullion's `_config.yml`
-Jekyll-exclude workaround if needed.
+Served via GitHub Pages from `graywind` itself, root-served (not `/docs`, since that's
+already the private planning-docs folder). `_config.yml` at repo root excludes `docs/` from
+Jekyll processing — the actual pattern Bullion uses (site at repo root, `docs/` excluded),
+not the "docs/ folder serves Pages" description from the original brainstorm, which didn't
+match Bullion's real configuration.
 
 ## Error Handling
 
-- **Cross-repo push failure** (bad PAT, network blip, conflict) must never block the bot's
-  own operational continuity — `graywind`'s own state commit happens first and
-  independently. If the dashboard push fails, the trading cycle still completed safely; the
-  dashboard just misses one refresh and catches up next cycle (it reads committed history,
-  not a live feed).
+- **Push failure** (network blip, conflict) now affects state and dashboard data together
+  (one repo, one push) rather than being a risk isolated to a second cross-repo push. A
+  failed push means neither commits that cycle; the next cycle's push carries both forward.
+  *(Superseded: the two-repo version needed an explicit independence guarantee between the
+  state commit and the dashboard push specifically because they were two separate pushes to
+  two separate remotes. That distinction doesn't exist anymore.)*
 - **A failed trading cycle** (gate rejection, broker API error) still writes a `status.csv`
   row reflecting that outcome — "last cycle failed / no trade" is a real status, not a
-  missing file.
+  missing file. The workflow must still commit `state/*.csv`/`dashboard-data/*.csv` even when
+  `live_loop.py` itself exits non-zero (they're written by its `finally` block regardless) —
+  this was Important Finding #3 from the two-repo version's final review and remains equally
+  true in the single-repo version; the fix (`if: always()` on the commit step) carries
+  forward.
+- The out-of-market-hours cron/false-alarm gap (Critical Finding #2 from the two-repo
+  version's final review — GitHub cron can't track DST, so scheduled runs outside real market
+  hours produced no `dashboard_export/` output and crashed the merge step) is unaffected by
+  the repo-count change and its fix (a "did this cycle actually run" gate) carries forward too.
 - Reuse Bullion's existing failure-alert pattern (`.github/workflows/daily-data.yml`'s
-  auto-filed GitHub issue on workflow failure) for both repos' workflows, so a silent cron
-  failure — the exact failure mode already seen once on Bullion — gets surfaced instead of
-  going quiet.
+  auto-filed GitHub issue on workflow failure), so a silent cron failure — the exact failure
+  mode already seen once on Bullion — gets surfaced instead of going quiet.
 
 ## Testing
 
@@ -124,22 +162,24 @@ Jekyll-exclude workaround if needed.
   `status.csv`/`positions.csv`/`operational.csv`. Verified by running it, not by reading the
   code, per this project's standing discipline (Phase 1 caught real bugs this way in nearly
   every task).
-- **Cross-repo push dry run**: verify the PAT has write access and the push mechanism works
-  against a throwaway commit before wiring it into the live schedule.
+- **Push dry run**: trigger the workflow manually (`workflow_dispatch`) and confirm a real
+  commit lands in `graywind` before trusting the live schedule. *(Superseded: this used to be
+  specifically a "cross-repo push" dry run verifying PAT write-access; with one repo there's
+  no PAT and no second remote to validate — it's just a normal workflow dry run now.)*
 - `pytest tests/` gets new cases for the CSV read/write paths in `state_store.py`, replacing
-  whatever covered the old JSON path.
+  whatever covered the old JSON path. (Already done, carries forward unchanged.)
 
 ## Manual Setup Required (not automatable, human-only steps)
 
-`graywind` currently has **no git remote at all** — it has been 100% local since Phase 1.
-Before implementation can wire up either workflow, the user must, outside of Claude Code:
+`graywind` currently has **no git remote at all** — it has been 100% local this entire
+project. Before the workflow can run for real, the user must, outside of Claude Code:
 
-1. Create the `graywind` GitHub repo (private) and add it as this local repo's remote.
-2. Create the `graywind-dashboard` GitHub repo (private).
-3. Generate a fine-grained PAT scoped to write-access on `graywind-dashboard` only, and add
-   it as the `DASHBOARD_REPO_PAT` secret in `graywind`'s repo settings.
-4. Enable GitHub Pages on `graywind-dashboard` (serving from the branch/folder the
-   implementation plan settles on).
+1. Create the `graywind` GitHub repo (private) and add it as this local repo's remote, push.
+2. Enable GitHub Pages on `graywind` itself, root-served.
+
+*(Superseded: the two-repo version's list also included creating a second GitHub repo and
+generating/storing a fine-grained PAT as a `DASHBOARD_REPO_PAT` secret. Both steps are gone —
+one repo means one remote and no PAT to manage.)*
 
 The implementation plan should surface these as explicit checkpoints, not assume they've
 silently happened.

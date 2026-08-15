@@ -1,0 +1,9 @@
+# graywind is a static hand-written dashboard (index.html at repo root), not
+# a Jekyll site. GitHub Pages' default "legacy" build still runs everything
+# through Jekyll regardless -- excluding docs/ here since it holds private
+# planning/spec/plan/handoff markdown that isn't part of the served site and
+# can contain code snippets (e.g. Python f-string braces `{{`) that Jekyll's
+# Liquid parser misreads as template tags and fails on. Same pattern as the
+# claudekit/Bullion repo's own _config.yml.
+exclude:
+  - docs/

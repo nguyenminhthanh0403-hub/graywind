@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Graywind — Live Status</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #0b0e11; color: #e6e6e6; margin: 0; padding: 24px; }
+  h1, h2 { font-weight: 500; }
+  #chart { width: 100%; height: 320px; }
+  .line { fill: none; stroke: #4dabf7; stroke-width: 2; }
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #2a2f36; font-size: 14px; }
+  th { color: #9aa4b2; font-weight: 500; }
+  .pnl-positive { color: #51cf66; }
+  .pnl-negative { color: #ff6b6b; }
+  #trade-log { max-height: 360px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h1>Graywind — Live Status</h1>
+<div id="status-panel"></div>
+<h2>Equity Curve</h2>
+<svg id="chart"></svg>
+<h2>Trade Log</h2>
+<div id="trade-log"><table id="trade-table"><thead>
+  <tr><th>Timestamp</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Reason</th></tr>
+</thead><tbody></tbody></table></div>
+
+<script>
+function parseCSV(text) {
+  // Split on \r?\n and trim each value -- Python's csv module writes \r\n
+  // line endings by default, and this parser used to split on "\n" only,
+  // leaving a trailing "\r" on every row's last field. That silently broke
+  // status.csv's "reason" column (row.reason was undefined) and permanently
+  // killed the equity chart on the first blank-equity row (parseFloat("\r")
+  // is NaN). Caught in final review, fixed here.
+  const lines = text.trim().split(/\r?\n/);
+  const headers = lines[0].split(",").map(h => h.trim());
+  return lines.slice(1).filter(l => l.length > 0).map(line => {
+    const values = line.split(",").map(v => v.trim());
+    const row = {};
+    headers.forEach((h, i) => { row[h] = values[i]; });
+    return row;
+  });
+}
+
+async function loadCSV(path) {
+  const res = await fetch(path);
+  const text = await res.text();
+  return parseCSV(text);
+}
+
+function renderStatus(statusRows) {
+  const panel = document.getElementById("status-panel");
+  if (statusRows.length === 0) { panel.textContent = "No status data yet."; return; }
+  const first = statusRows[0];
+  const pnl = parseFloat(first.today_pnl);
+  const pnlClass = pnl > 0 ? "pnl-positive" : (pnl < 0 ? "pnl-negative" : "");
+  let html = `<p>Last cycle: ${first.last_cycle_timestamp} &middot; Equity: $${first.account_equity} &middot; `
+    + `Today's P&amp;L: <span class="${pnlClass}">$${first.today_pnl}</span></p>`;
+  html += "<table><thead><tr><th>Symbol</th><th>Position</th><th>Action</th><th>Reason</th></tr></thead><tbody>";
+  for (const row of statusRows) {
+    const position = row.position_open === "True" ? `${row.shares} sh @ $${row.entry_price}` : "flat";
+    html += `<tr><td>${row.symbol}</td><td>${position}</td><td>${row.action}</td><td>${row.reason}</td></tr>`;
+  }
+  html += "</tbody></table>";
+  panel.innerHTML = html;
+}
+
+function renderTradeLog(tradeRows) {
+  const tbody = document.querySelector("#trade-table tbody");
+  tbody.innerHTML = "";
+  for (const row of tradeRows.slice().reverse()) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${row.timestamp}</td><td>${row.symbol}</td><td>${row.side}</td>`
+      + `<td>${row.qty}</td><td>${row.price}</td><td>${row.reason}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+function renderEquityCurve(equityRows) {
+  const svg = d3.select("#chart");
+  const width = svg.node().clientWidth || 800;
+  const height = 320;
+  const margin = { top: 16, right: 16, bottom: 32, left: 64 };
+  svg.attr("viewBox", `0 0 ${width} ${height}`);
+
+  if (equityRows.length === 0) return;
+
+  const data = equityRows
+    .filter(r => r.equity !== "")
+    .map(r => ({ time: new Date(r.timestamp), equity: parseFloat(r.equity) }));
+
+  const x = d3.scaleTime()
+    .domain(d3.extent(data, d => d.time))
+    .range([margin.left, width - margin.right]);
+  const y = d3.scaleLinear()
+    .domain([d3.min(data, d => d.equity) * 0.98, d3.max(data, d => d.equity) * 1.02])
+    .range([height - margin.bottom, margin.top]);
+
+  const line = d3.line().x(d => x(d.time)).y(d => y(d.equity));
+
+  svg.append("g")
+    .attr("transform", `translate(0,${height - margin.bottom})`)
+    .call(d3.axisBottom(x));
+  svg.append("g")
+    .attr("transform", `translate(${margin.left},0)`)
+    .call(d3.axisLeft(y));
+  svg.append("path").datum(data).attr("class", "line").attr("d", line);
+}
+
+async function main() {
+  const [equityRows, tradeRows, statusRows] = await Promise.all([
+    loadCSV("dashboard-data/equity_curve.csv"),
+    loadCSV("dashboard-data/trade_log.csv"),
+    loadCSV("dashboard-data/status.csv"),
+  ]);
+  renderStatus(statusRows);
+  renderTradeLog(tradeRows);
+  renderEquityCurve(equityRows);
+}
+
+main();
+</script>
+</body>
+</html>

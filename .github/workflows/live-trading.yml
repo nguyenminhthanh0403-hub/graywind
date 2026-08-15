@@ -13,10 +13,10 @@ on:
     - cron: "*/15 13-20 * * 1-5"
   workflow_dispatch:
 
-# Lets the built-in GITHUB_TOKEN push graywind's own state/*.csv commit and
-# manage the pipeline-alarm issue. DASHBOARD_REPO_PAT (a separate,
-# fine-grained PAT scoped only to graywind-dashboard) is what authorizes
-# the cross-repo push -- GITHUB_TOKEN alone can never reach outside this repo.
+# Lets the built-in GITHUB_TOKEN push graywind's own state/*.csv and
+# dashboard-data/*.csv commit and manage the pipeline-alarm issue. No PAT
+# needed -- state and dashboard data live in this same repo, so the default
+# token already has everything this workflow pushes to.
 permissions:
   contents: write
   issues: write
@@ -56,52 +56,38 @@ jobs:
         # An out-of-market-hours cron firing (GitHub cron is UTC-only and
         # can't track DST, so it fires several times/day outside
         # is_market_hours()) makes main() return before dashboard_export/
-        # is ever written. Detect that here so the dashboard-push step
-        # below can skip cleanly instead of failing on a missing directory.
-        # always() so this still runs (and reports ran=false) even if the
-        # trading cycle step itself failed.
+        # is ever written. Detect that here so the merge step below can
+        # skip cleanly instead of failing on a missing directory. always()
+        # so this still runs (and reports ran=false) even if the trading
+        # cycle step itself failed.
         id: cycle
         if: always()
         run: |
           if [ -d dashboard_export ]; then echo "ran=true" >> "$GITHUB_OUTPUT"; else echo "ran=false" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Commit and push graywind's own state
-        # if: always() -- state/*.csv and dashboard_export/ are written by
-        # main()'s finally block before any non-zero exit, so a failed
-        # cycle (missing env vars, an uncaught exception) still leaves a
-        # status row that must be committed rather than silently discarded
-        # under the default if: success().
+      - name: Merge this cycle's export into dashboard-data
+        # Skipped on an out-of-market-hours firing where dashboard_export/
+        # was never written -- otherwise this raises FileNotFoundError and
+        # fails the job on every such firing.
+        if: always() && steps.cycle.outputs.ran == 'true'
+        run: python3 merge_dashboard_export.py dashboard_export dashboard-data
+
+      - name: Commit and push state + dashboard data
+        # if: always() -- state/*.csv and dashboard-data/*.csv are written
+        # before any non-zero exit (state by main()'s finally block;
+        # dashboard-data by the merge step above, itself gated on always()),
+        # so a failed cycle still leaves a status row that must be committed
+        # rather than silently discarded under the default if: success().
+        # One repo, one push -- no PAT, no second remote to fail against.
         if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A state 2>/dev/null || true
+          git add -A state dashboard-data 2>/dev/null || true
           if git diff --cached --quiet; then
-            echo "No state changes this cycle; nothing to commit."
+            echo "No changes this cycle; nothing to commit."
           else
-            git commit -m "Update live state for $(date -u +%FT%H:%M)"
-            git push
-          fi
-
-      - name: Push this cycle's export to graywind-dashboard
-        # Skip on an out-of-market-hours firing where dashboard_export/ was
-        # never written (see the "Check whether this cycle actually ran"
-        # step) -- otherwise merge_dashboard_export.py raises
-        # FileNotFoundError and files a false alarm on every such firing.
-        if: always() && steps.cycle.outputs.ran == 'true'
-        env:
-          DASHBOARD_REPO_PAT: ${{ secrets.DASHBOARD_REPO_PAT }}
-        run: |
-          git clone "https://x-access-token:${DASHBOARD_REPO_PAT}@github.com/${{ github.repository_owner }}/graywind-dashboard.git" /tmp/graywind-dashboard
-          python3 merge_dashboard_export.py dashboard_export /tmp/graywind-dashboard/data
-          cd /tmp/graywind-dashboard
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/equity_curve.csv data/trade_log.csv data/status.csv
-          if git diff --cached --quiet; then
-            echo "No dashboard changes this cycle; nothing to commit."
-          else
-            git commit -m "Update dashboard data for $(date -u +%FT%H:%M)"
+            git commit -m "Update live state and dashboard data for $(date -u +%FT%H:%M)"
             git push
           fi
 

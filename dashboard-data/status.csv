@@ -1,0 +1,3 @@
+last_cycle_timestamp,account_equity,today_pnl,symbol,position_open,shares,entry_price,current_price,action,reason
+2026-08-15T00:00:00-04:00,,,AAPL,,,,,unknown,no cycle has run yet
+2026-08-15T00:00:00-04:00,,,SPY,,,,,unknown,no cycle has run yet
