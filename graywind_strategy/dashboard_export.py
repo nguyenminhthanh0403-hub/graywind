@@ -29,18 +29,18 @@ def write_cycle_export(export_dir, timestamp, symbols, equity, today_pnl, symbol
     os.makedirs(export_dir, exist_ok=True)
 
     with open(os.path.join(export_dir, "new_equity_point.csv"), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=EQUITY_POINT_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=EQUITY_POINT_FIELDS, lineterminator="\n")
         writer.writeheader()
         writer.writerow({"timestamp": timestamp, "equity": _fmt(equity)})
 
     with open(os.path.join(export_dir, "new_trades.csv"), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=TRADE_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=TRADE_FIELDS, lineterminator="\n")
         writer.writeheader()
         for trade in cycle_trades:
             writer.writerow({field: trade[field] for field in TRADE_FIELDS})
 
     with open(os.path.join(export_dir, "status.csv"), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=STATUS_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=STATUS_FIELDS, lineterminator="\n")
         writer.writeheader()
         for symbol in symbols:
             status = symbol_statuses.get(symbol, _UNEVALUATED_STATUS)

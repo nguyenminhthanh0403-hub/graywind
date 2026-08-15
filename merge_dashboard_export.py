@@ -28,13 +28,13 @@ def _append_csv(source_path, target_path, fieldnames):
         if not os.path.exists(target_path):
             os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
             with open(target_path, "w", newline="") as f:
-                csv.DictWriter(f, fieldnames=fieldnames).writeheader()
+                csv.DictWriter(f, fieldnames=fieldnames, lineterminator="\n").writeheader()
         return
 
     os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
     file_exists = os.path.exists(target_path)
     with open(target_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, lineterminator="\n")
         if not file_exists:
             writer.writeheader()
         writer.writerows(new_rows)

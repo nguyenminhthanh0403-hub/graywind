@@ -50,7 +50,7 @@ def save_state(state, state_dir=DEFAULT_STATE_DIR):
     os.makedirs(state_dir, exist_ok=True)
 
     with open(os.path.join(state_dir, OPERATIONAL_FILENAME), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=OPERATIONAL_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=OPERATIONAL_FIELDS, lineterminator="\n")
         writer.writeheader()
         writer.writerow({
             "day": state["day"] or "",
@@ -59,7 +59,7 @@ def save_state(state, state_dir=DEFAULT_STATE_DIR):
         })
 
     with open(os.path.join(state_dir, POSITIONS_FILENAME), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=POSITIONS_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=POSITIONS_FIELDS, lineterminator="\n")
         writer.writeheader()
         for symbol, position in state["open_positions"].items():
             writer.writerow({"symbol": symbol, **position})

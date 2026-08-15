@@ -110,3 +110,22 @@ def test_export_dir_is_created_if_missing(tmp_path):
         equity=10500.0, today_pnl=500.0, symbol_statuses={}, cycle_trades=[],
     )
     assert os.path.exists(os.path.join(export_dir, "status.csv"))
+
+
+def test_written_csvs_use_bare_lf_not_crlf(tmp_path):
+    # Regression test for the final whole-branch review's Critical #1:
+    # csv.DictWriter's default "excel" dialect writes "\r\n" line endings.
+    # index.html's parseCSV splits on "\n" only, so a CRLF-terminated last
+    # header/field silently retains a trailing "\r" (e.g. "reason\r"),
+    # breaking row.reason lookups and poisoning parseFloat on numeric
+    # fields. This must be checked at the byte level -- csv.DictReader
+    # transparently absorbs CRLF on read, so a round-trip test through
+    # DictReader (as every other test in this file does) cannot catch it.
+    export_dir = str(tmp_path)
+    write_cycle_export(
+        export_dir=export_dir, timestamp="2026-08-15T10:00:00-04:00", symbols=["AAPL"],
+        equity=10500.0, today_pnl=500.0, symbol_statuses={}, cycle_trades=[],
+    )
+    for filename in ("new_equity_point.csv", "new_trades.csv", "status.csv"):
+        content = open(os.path.join(export_dir, filename), "rb").read()
+        assert b"\r\n" not in content, f"{filename} contains CRLF line endings"

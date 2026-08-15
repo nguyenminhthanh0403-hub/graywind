@@ -101,3 +101,25 @@ def test_two_run_round_trip_simulation_preserves_append_vs_overwrite_semantics(t
     assert len(_read_csv(os.path.join(target_dir, "equity_curve.csv"))) == 2
     assert len(_read_csv(os.path.join(target_dir, "trade_log.csv"))) == 1
     assert len(_read_csv(os.path.join(target_dir, "status.csv"))) == 1
+
+
+def test_merged_csvs_use_bare_lf_not_crlf(tmp_path):
+    # Regression test for the final whole-branch review's Critical #1.
+    # merge_export appends into an existing target file (or writes a fresh
+    # header-only file on a zero-row cycle) and status.csv is copied
+    # wholesale via shutil.copyfile -- all three paths must stay CRLF-free
+    # so index.html's naive "\n"-split parser never sees a trailing "\r".
+    # Byte-level check: csv.DictReader on the read side would silently
+    # absorb CRLF and hide this bug, as it did across 136 passing tests.
+    export_dir = str(tmp_path / "export")
+    target_dir = str(tmp_path / "target")
+    _make_export(export_dir, "2026-08-15T10:00:00-04:00", 10100.0,
+                  trades=[{"timestamp": "2026-08-15T10:00:00-04:00", "symbol": "AAPL", "side": "buy", "qty": 10, "price": 150.0, "reason": "signal=buy"}])
+    merge_export(export_dir=export_dir, target_data_dir=target_dir)
+    # Zero-trade second cycle exercises the header-only "ensure file exists" path too.
+    _make_export(export_dir, "2026-08-15T10:15:00-04:00", 10150.0, trades=[])
+    merge_export(export_dir=export_dir, target_data_dir=target_dir)
+
+    for filename in ("equity_curve.csv", "trade_log.csv", "status.csv"):
+        content = open(os.path.join(target_dir, filename), "rb").read()
+        assert b"\r\n" not in content, f"{filename} contains CRLF line endings"

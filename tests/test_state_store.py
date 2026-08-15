@@ -114,3 +114,18 @@ def test_save_overwrites_previous_positions_rather_than_appending(tmp_path):
     }, state_dir=state_dir)
     state = load_state(state_dir=state_dir)
     assert state["open_positions"] == {}
+
+
+def test_saved_csvs_use_bare_lf_not_crlf(tmp_path):
+    # Regression test for the final whole-branch review's Critical #1.
+    # Byte-level check: csv.DictReader (used by load_state and every other
+    # test here) transparently absorbs CRLF, hiding the bug from round-trip
+    # tests -- only reading the raw bytes catches it.
+    state_dir = str(tmp_path)
+    save_state({
+        "day_trade_dates": ["2024-01-08"], "day": "2024-01-08", "starting_equity": 9500.0,
+        "open_positions": {"AAPL": {"entry_price": 150.0, "shares": 10, "stop": 147.0, "target": 154.5, "opened_date": "2024-01-08"}},
+    }, state_dir=state_dir)
+    for filename in ("operational.csv", "positions.csv"):
+        content = open(os.path.join(state_dir, filename), "rb").read()
+        assert b"\r\n" not in content, f"{filename} contains CRLF line endings"
