@@ -9,6 +9,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -23,6 +24,10 @@ def fetch_bars(client, symbol, start, end):
         timeframe=TimeFrame(15, TimeFrameUnit.Minute),
         start=start,
         end=end,
+        # A free/paper account can't query the default SIP feed for recent
+        # data ("subscription does not permit querying recent SIP data") --
+        # IEX is the feed free-tier accounts are actually allowed to use.
+        feed=DataFeed.IEX,
     )
     response = client.get_stock_bars(request)
     return list(response[symbol])

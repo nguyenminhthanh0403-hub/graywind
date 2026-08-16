@@ -78,8 +78,17 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                   gates_always_pass=False):
     """Runs decide_trade() bar-by-bar for every symbol, in timestamp order
     across symbols so PDT/drawdown state is shared correctly. Assumes each
-    DataFrame in df_by_symbol already has a 'time' column (from Task 5's
-    CSV format) and a 'close' column.
+    DataFrame in df_by_symbol already has 'time', 'open', and 'close'
+    columns (from Task 5's CSV format).
+
+    A signal or stop/target trigger is only knowable once a bar's close
+    prints, so any resulting order is queued rather than filled immediately
+    -- it fills at that same symbol's *next* bar's open, the earliest a
+    live system reacting to the same close could actually have gotten
+    filled. Filling at the same bar's own close (the previous behavior)
+    would let the backtest trade at a price it could not have known was
+    coming. A trigger on a symbol's last available bar has no following bar
+    to fill on and is simply left unfilled.
 
     `gates_always_pass` is forwarded straight into every decide_trade() call
     below -- the plan-specified, supported way to bypass the vix/sentiment/
@@ -104,6 +113,10 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
     equity_curve = []
     trades = []
     open_positions = {}
+    # symbol -> order decided off a previous bar's close, awaiting a fill at
+    # that same symbol's *next* bar's open (see run_backtest's docstring).
+    queued_orders = {}
+    last_price_by_symbol = {}
     current_day = None
     # The same-day-pending-position PDT reservation (two symbols each
     # opening a position before either closes can otherwise slip past a
@@ -129,29 +142,80 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
             drawdown_breaker.start_new_day(current_day, equity)
 
         for _, symbol, row in rows_at_time:
-            price = row["close"]
+            open_price = row["open"]
+            close_price = row["close"]
+            last_price_by_symbol[symbol] = close_price
+
+            # Fill whatever this symbol had queued from its previous bar,
+            # at *this* bar's open -- one bar later, and at a different
+            # price, than the close that produced the order.
+            queued = queued_orders.pop(symbol, None)
+            if queued is not None:
+                if queued["type"] == "sell":
+                    position = open_positions[symbol]
+                    equity += (open_price - position["entry_price"]) * position["shares"]
+                    trades.append({
+                        "symbol": symbol, "action": "sell", "price": open_price,
+                        "shares": position["shares"], "time": current_time,
+                    })
+                    # opened_date here is a `date` object (current_day);
+                    # live_loop.py's equivalent comparison uses an ISO
+                    # string instead since its state round-trips through
+                    # JSON -- a future refactor unifying the two
+                    # representations must preserve each caller's own idiom.
+                    if position["opened_date"] == current_day:
+                        pdt_throttle.record_day_trade(current_day)
+                    del open_positions[symbol]
+                elif queued["type"] == "buy":
+                    decision = queued["decision"]
+                    # decision.shares was sized off the full running
+                    # `equity` at decision time, with no regard for capital
+                    # already committed to other symbols' open positions. A
+                    # real broker would reject (or partial-fill) an order
+                    # that outspends buying power, so clamp to what's
+                    # actually left in cash -- equity minus the cost basis
+                    # of every still-open position -- at fill time, instead
+                    # of letting combined notional across symbols exceed
+                    # account equity.
+                    committed_capital = sum(
+                        p["entry_price"] * p["shares"] for p in open_positions.values()
+                    )
+                    available_cash = equity - committed_capital
+                    shares = min(decision.shares, int(available_cash // open_price)) if open_price > 0 else 0
+                    if shares > 0:
+                        open_positions[symbol] = {
+                            "entry_price": open_price, "shares": shares,
+                            "stop": decision.stop_price, "target": decision.target_price,
+                            "opened_date": current_day,
+                        }
+                        trades.append({
+                            "symbol": symbol, "action": "buy", "price": open_price,
+                            "shares": shares, "time": current_time,
+                        })
+                    # else: order expires unfilled -- no cash left to fund it.
+
+            # DrawdownBreaker's contract is "realized+unrealized" losses
+            # (see risk/drawdown_breaker.py's docstring), so it must see
+            # open positions marked to their latest known price, not just
+            # the realized-only `equity` -- otherwise a position drifting
+            # deep into unrealized loss without ever hitting its own stop
+            # can never trip the shared daily breaker for other symbols.
+            mark_to_market_equity = equity + sum(
+                (last_price_by_symbol.get(sym, pos["entry_price"]) - pos["entry_price"]) * pos["shares"]
+                for sym, pos in open_positions.items()
+            )
+            drawdown_breaker.update_equity(mark_to_market_equity)
 
             position = open_positions.get(symbol)
-            if position is not None and (price <= position["stop"] or price >= position["target"]):
-                equity += (price - position["entry_price"]) * position["shares"]
-                trades.append({
-                    "symbol": symbol, "action": "sell", "price": price,
-                    "shares": position["shares"], "time": current_time,
-                })
-                # opened_date here is a `date` object (current_day, set below);
-                # live_loop.py's equivalent comparison uses an ISO string
-                # instead since its state round-trips through JSON -- a future
-                # refactor unifying the two representations must preserve
-                # each caller's own idiom.
-                if position["opened_date"] == current_day:
-                    pdt_throttle.record_day_trade(current_day)
-                del open_positions[symbol]
-
-            drawdown_breaker.update_equity(equity)
-
-            if symbol not in open_positions:
+            if position is not None:
+                if close_price <= position["stop"] or close_price >= position["target"]:
+                    queued_orders[symbol] = {"type": "sell"}
+            elif symbol not in queued_orders:
                 pending_today = sum(
                     1 for p in open_positions.values() if p["opened_date"] == current_day
+                ) + sum(
+                    1 for q in queued_orders.values()
+                    if q["type"] == "buy" and q["decided_date"] == current_day
                 )
                 # NOTE (known follow-up, not implemented here): each bar that
                 # reaches decide_trade() triggers a fresh vix/sentiment/
@@ -166,7 +230,7 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                 # in this environment.
                 decision = decide_trade(
                     symbol=symbol, signal=row["signal"], as_of_date=current_day,
-                    current_price=price, account_equity=equity,
+                    current_price=close_price, account_equity=equity,
                     pdt_throttle=pdt_throttle, position_sizer=position_sizer,
                     drawdown_breaker_ok=drawdown_breaker.can_open_new_trade(),
                     fred_api_key=fred_api_key, news_client=news_client,
@@ -175,15 +239,9 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                     gates_always_pass=gates_always_pass,
                 )
                 if decision.action == "buy":
-                    open_positions[symbol] = {
-                        "entry_price": price, "shares": decision.shares,
-                        "stop": decision.stop_price, "target": decision.target_price,
-                        "opened_date": current_day,
+                    queued_orders[symbol] = {
+                        "type": "buy", "decision": decision, "decided_date": current_day,
                     }
-                    trades.append({
-                        "symbol": symbol, "action": "buy", "price": price,
-                        "shares": decision.shares, "time": current_time,
-                    })
 
         equity_curve.append(equity)
 

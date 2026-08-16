@@ -6,6 +6,11 @@ import pytest
 from graywind_strategy.backtester import max_drawdown, run_backtest, sharpe_ratio, win_rate
 from graywind_strategy.pipeline import TradeDecision
 
+# Computed independently via sharpe_ratio([10000.0, 10000.0, 10000.0, 10120.0,
+# 10120.0], periods_per_year=PERIODS_PER_YEAR_15MIN) -- see
+# test_run_backtest_sharpe_pins_the_15min_periods_per_year_scaling.
+EXPECTED_SHARPE_FOR_PINNED_CURVE = 46.73328578219169
+
 
 def test_sharpe_ratio_of_flat_equity_curve_is_zero():
     # Zero variance in returns -> Sharpe is defined as 0.0, not a division error.
@@ -51,17 +56,25 @@ def test_run_backtest_sharpe_pins_the_15min_periods_per_year_scaling():
     # silently pass every other test in this file.
     #
     # decide_trade is mocked (same technique as the pending-same-day-trades
-    # test above) to force one fully deterministic buy-then-target-exit
-    # round trip, producing a known equity_curve of
-    # [10000, 10000, 10100, 10100] -- the expected sharpe below was computed
-    # independently from that exact curve via sharpe_ratio(equity_curve,
-    # periods_per_year=6552).
+    # test below) to force one fully deterministic buy-then-target-exit
+    # round trip. Orders fill at the *next* bar's open (see
+    # test_run_backtest_fills_entry_at_the_next_bars_open, not this bar's
+    # close): the buy decided on t1's close fills at t2's open (100.0); the
+    # target hit detected on t3's close (110.0 >= target 110.0) fills at
+    # t4's open (112.0). That produces equity_curve
+    # [10000, 10000, 10000, 10120, 10120] -- the expected sharpe below was
+    # computed independently from that exact curve via
+    # sharpe_ratio(equity_curve, periods_per_year=6552).
     times = pd.to_datetime([
         "2024-01-08 09:30:00", "2024-01-08 09:45:00",
-        "2024-01-08 10:00:00", "2024-01-08 10:15:00",
+        "2024-01-08 10:00:00", "2024-01-08 10:15:00", "2024-01-08 10:30:00",
     ])
     df_by_symbol = {
-        "AAPL": pd.DataFrame({"time": times, "close": [100.0, 105.0, 110.0, 108.0]}),
+        "AAPL": pd.DataFrame({
+            "time": times,
+            "open": [99.0, 100.0, 107.0, 112.0, 108.0],
+            "close": [100.0, 105.0, 110.0, 108.0, 999.0],
+        }),
     }
 
     call_count = 0
@@ -78,8 +91,73 @@ def test_run_backtest_sharpe_pins_the_15min_periods_per_year_scaling():
     with patch("graywind_strategy.backtester.decide_trade", side_effect=fake_decide_trade):
         result = run_backtest(df_by_symbol, starting_equity=10000.0)
 
-    assert result.equity_curve == [10000.0, 10000.0, 10100.0, 10100.0]
-    assert result.sharpe == pytest.approx(57.23635208501674, rel=1e-9)
+    assert result.equity_curve == [10000.0, 10000.0, 10000.0, 10120.0, 10120.0]
+    assert result.sharpe == pytest.approx(EXPECTED_SHARPE_FOR_PINNED_CURVE, rel=1e-9)
+
+
+def test_run_backtest_fills_entry_at_the_next_bars_open_not_the_signal_bars_close():
+    # Regression test for the lookahead-bias fix: a signal computed from a
+    # bar's close is only knowable once that bar finishes printing, so a
+    # live system reacting to it could not have been filled at that exact
+    # same close. The resulting buy must fill at the *next* bar's open
+    # (105.0) instead -- not t1's close (100.0) that produced the signal,
+    # and not t1's own open (99.0).
+    t1 = pd.Timestamp("2024-01-08 09:30:00")
+    t2 = pd.Timestamp("2024-01-08 09:45:00")
+    df_by_symbol = {
+        "AAPL": pd.DataFrame({
+            "time": [t1, t2], "open": [99.0, 105.0], "close": [100.0, 999.0],
+        }),
+    }
+
+    def fake_decide_trade(**kwargs):
+        return TradeDecision(
+            action="buy", reason="test", shares=1, stop_price=1.0, target_price=99999.0
+        )
+
+    with patch("graywind_strategy.backtester.decide_trade", side_effect=fake_decide_trade):
+        result = run_backtest(df_by_symbol, starting_equity=10000.0)
+
+    assert result.trades == [
+        {"symbol": "AAPL", "action": "buy", "price": 105.0, "shares": 1, "time": t2},
+    ]
+
+
+def test_run_backtest_fills_exit_at_the_next_bars_open_not_the_trigger_bars_close():
+    # Same lookahead-bias fix, for exits: a stop/target crossing detected on
+    # a bar's close must fill at the *next* bar's open, not the triggering
+    # close itself. AAPL enters at t2's open (102.0, deferred from t1's buy
+    # signal). t2's close (80.0) crosses the stop (90.0), so the exit fills
+    # at t3's open (95.0) -- not 80.0, the close that triggered it.
+    t1 = pd.Timestamp("2024-01-08 09:30:00")
+    t2 = pd.Timestamp("2024-01-08 09:45:00")
+    t3 = pd.Timestamp("2024-01-08 10:00:00")
+    df_by_symbol = {
+        "AAPL": pd.DataFrame({
+            "time": [t1, t2, t3],
+            "open": [99.0, 102.0, 95.0],
+            "close": [100.0, 80.0, 999.0],
+        }),
+    }
+
+    call_count = 0
+
+    def fake_decide_trade(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return TradeDecision(
+                action="buy", reason="test", shares=10, stop_price=90.0, target_price=9999.0
+            )
+        return TradeDecision(action="hold", reason="test")
+
+    with patch("graywind_strategy.backtester.decide_trade", side_effect=fake_decide_trade):
+        result = run_backtest(df_by_symbol, starting_equity=10000.0)
+
+    sell_trades = [t for t in result.trades if t["action"] == "sell"]
+    assert sell_trades == [
+        {"symbol": "AAPL", "action": "sell", "price": 95.0, "shares": 10, "time": t3},
+    ]
 
 
 def test_run_backtest_forwards_pending_same_day_trades_when_symbols_race_to_open():
@@ -100,8 +178,8 @@ def test_run_backtest_forwards_pending_same_day_trades_when_symbols_race_to_open
     # the second assertion below would fail.
     t1 = pd.Timestamp("2024-01-08 09:30:00")
     df_by_symbol = {
-        "AAPL": pd.DataFrame({"time": [t1], "close": [100.0]}),
-        "SPY": pd.DataFrame({"time": [t1], "close": [50.0]}),
+        "AAPL": pd.DataFrame({"time": [t1], "open": [100.0], "close": [100.0]}),
+        "SPY": pd.DataFrame({"time": [t1], "open": [50.0], "close": [50.0]}),
     }
 
     calls = []
@@ -124,3 +202,106 @@ def test_run_backtest_forwards_pending_same_day_trades_when_symbols_race_to_open
     # row, or max_drawdown/sharpe_ratio would be corrupted by duplicate
     # points at every real moment in time.
     assert len(result.equity_curve) == 1
+
+
+def test_run_backtest_trips_drawdown_breaker_on_unrealized_loss_alone():
+    # Regression test: DrawdownBreaker's own docstring says it halts trading
+    # once "realized+unrealized losses" reach the daily threshold, but
+    # run_backtest was feeding it the realized-only `equity` variable, which
+    # never moves while a losing position stays open (it only moves when a
+    # position is *closed*). An open position that drifts deep into
+    # unrealized loss without ever hitting its own stop must still be able
+    # to trip the shared daily breaker and block a *different* symbol from
+    # opening a new position that same day.
+    #
+    # AAPL's buy is decided at t1 (mocked) and fills at t2's open (100.0,
+    # 10 shares, stop=1.0/target=9999.0 so nothing about AAPL's own
+    # stop/target triggers within this test). At t2, AAPL's close drops to
+    # 80: unrealized loss = (100-80)*10 = $200 = 2% of the $10,000 starting
+    # equity, i.e. exactly at run_backtest's default
+    # max_daily_loss_fraction=0.02 threshold, so the breaker should trip.
+    # SPY, evaluated moments later at the same t2 bar, must then see
+    # drawdown_breaker_ok=False on its decide_trade call.
+    t1 = pd.Timestamp("2024-01-08 09:30:00")
+    t2 = pd.Timestamp("2024-01-08 09:45:00")
+    df_by_symbol = {
+        "AAPL": pd.DataFrame({"time": [t1, t2], "open": [100.0, 100.0], "close": [100.0, 80.0]}),
+        "SPY": pd.DataFrame({"time": [t1, t2], "open": [50.0, 50.0], "close": [50.0, 50.0]}),
+    }
+
+    calls = []
+
+    def fake_decide_trade(**kwargs):
+        calls.append(kwargs)
+        if kwargs["symbol"] == "AAPL" and kwargs["as_of_date"] == t1.date():
+            return TradeDecision(
+                action="buy", reason="test", shares=10, stop_price=1.0, target_price=9999.0
+            )
+        return TradeDecision(action="hold", reason="test")
+
+    with patch("graywind_strategy.backtester.decide_trade", side_effect=fake_decide_trade):
+        run_backtest(df_by_symbol, starting_equity=10000.0)
+
+    spy_calls = [c for c in calls if c["symbol"] == "SPY"]
+    assert len(spy_calls) == 2
+    assert spy_calls[0]["drawdown_breaker_ok"] is True  # t1: no loss yet
+    assert spy_calls[1]["drawdown_breaker_ok"] is False  # t2: AAPL's unrealized loss tripped it
+
+
+def test_run_backtest_clamps_a_buy_to_cash_left_after_earlier_same_bar_fills():
+    # Regression test: decide_trade sizes each symbol's position off the full
+    # running `equity`, with no awareness of capital already committed to
+    # other symbols opened earlier the same bar. A real broker would reject
+    # (or partial-fill) an order that outspends available buying power; the
+    # backtester must simulate that instead of letting combined notional
+    # across symbols exceed account equity.
+    #
+    # starting_equity=1000. Both symbols' buys are decided at t1 and fill at
+    # t2's open. AAPL (processed first -- dict insertion order) fills for 6
+    # shares @ $100 = $600 notional, leaving $400 cash. SPY, filling moments
+    # later at the same t2 bar, is also sized (by the mocked decide_trade)
+    # for 6 shares @ $100 = $600 notional -- but only $400 is actually
+    # left, so it must be clamped down to what $400 can actually buy:
+    # floor(400 / 100) = 4 shares.
+    t1 = pd.Timestamp("2024-01-08 09:30:00")
+    t2 = pd.Timestamp("2024-01-08 09:45:00")
+    df_by_symbol = {
+        "AAPL": pd.DataFrame({"time": [t1, t2], "open": [99.0, 100.0], "close": [100.0, 100.0]}),
+        "SPY": pd.DataFrame({"time": [t1, t2], "open": [99.0, 100.0], "close": [100.0, 100.0]}),
+    }
+
+    def fake_decide_trade(**kwargs):
+        return TradeDecision(
+            action="buy", reason="test", shares=6, stop_price=1.0, target_price=9999.0
+        )
+
+    with patch("graywind_strategy.backtester.decide_trade", side_effect=fake_decide_trade):
+        result = run_backtest(df_by_symbol, starting_equity=1000.0)
+
+    buys_by_symbol = {t["symbol"]: t for t in result.trades if t["action"] == "buy"}
+    assert buys_by_symbol["AAPL"]["shares"] == 6  # first mover gets what it asked for
+    assert buys_by_symbol["SPY"]["shares"] == 4  # clamped to the $400 actually left
+
+
+def test_run_backtest_skips_a_buy_when_no_cash_is_left_after_earlier_same_bar_fills():
+    # Same capital-check fix as above, at the boundary: if an earlier
+    # same-bar fill has already consumed all available cash, a later
+    # symbol's buy must be skipped entirely (not filled with 0 shares),
+    # exactly as a broker would reject an order it can't fund at all.
+    t1 = pd.Timestamp("2024-01-08 09:30:00")
+    t2 = pd.Timestamp("2024-01-08 09:45:00")
+    df_by_symbol = {
+        "AAPL": pd.DataFrame({"time": [t1, t2], "open": [99.0, 100.0], "close": [100.0, 100.0]}),
+        "SPY": pd.DataFrame({"time": [t1, t2], "open": [99.0, 100.0], "close": [100.0, 100.0]}),
+    }
+
+    def fake_decide_trade(**kwargs):
+        return TradeDecision(
+            action="buy", reason="test", shares=6, stop_price=1.0, target_price=9999.0
+        )
+
+    with patch("graywind_strategy.backtester.decide_trade", side_effect=fake_decide_trade):
+        result = run_backtest(df_by_symbol, starting_equity=600.0)
+
+    symbols_bought = {t["symbol"] for t in result.trades if t["action"] == "buy"}
+    assert symbols_bought == {"AAPL"}  # SPY's buy had no cash left to fund it
