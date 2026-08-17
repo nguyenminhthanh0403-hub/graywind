@@ -367,6 +367,8 @@ class _FakeBar:
     def __init__(self, price, ts):
         self.timestamp = ts
         self.close = price
+        self.high = price
+        self.low = price
 
 
 def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
@@ -393,7 +395,7 @@ def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state") as mock_save_state, \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
-         patch("live_loop.compute_signals", side_effect=lambda df: df.assign(signal="hold")), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")) as mock_decide, \
          patch("live_loop.write_cycle_export"):
         result = live_loop.main()
@@ -481,7 +483,7 @@ def test_successful_equity_read_updates_day_and_starting_equity_normally():
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state") as mock_save_state, \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
-         patch("live_loop.compute_signals", side_effect=lambda df: df.assign(signal="hold")), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
          patch("live_loop.write_cycle_export"):
         result = live_loop.main()
@@ -514,7 +516,7 @@ def test_main_calls_write_cycle_export_after_save_state():
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
-         patch("live_loop.compute_signals", side_effect=lambda df: df.assign(signal="hold")), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
          patch("live_loop.write_cycle_export") as mock_export:
         live_loop.main()
@@ -523,3 +525,34 @@ def test_main_calls_write_cycle_export_after_save_state():
     kwargs = mock_export.call_args.kwargs
     assert kwargs["symbols"] == live_loop.WATCHLIST
     assert kwargs["equity"] == 10000.0
+
+
+def test_process_symbol_cycle_passes_confirmation_bars_to_compute_signals():
+    fake_account = MagicMock()
+    fake_account.equity = "10000.0"
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+    fake_state = {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}
+
+    def fake_fetch_bars(client, symbol, start, end):
+        return [_FakeBar(100.0, datetime(2024, 1, 8, 10, 0, tzinfo=ET))]
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+         }), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.load_state", return_value=fake_state), \
+         patch("live_loop.save_state"), \
+         patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")) as mock_compute, \
+         patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
+         patch("live_loop.write_cycle_export"):
+        live_loop.main()
+
+    assert mock_compute.call_count == len(live_loop.WATCHLIST)
+    for call in mock_compute.call_args_list:
+        assert "confirmation_bars" in call.kwargs

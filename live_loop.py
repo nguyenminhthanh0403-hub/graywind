@@ -39,6 +39,7 @@ from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 from graywind_strategy.dashboard_export import write_cycle_export
 from graywind_strategy.state_store import load_state, save_state
+from graywind_strategy import volatility
 from graywind_strategy.strategy_engine import compute_signals
 
 WATCHLIST = ["AAPL", "SPY"]
@@ -46,17 +47,28 @@ DASHBOARD_EXPORT_DIR = "dashboard_export"
 MARKET_OPEN = dt_time(9, 30)
 MARKET_CLOSE = dt_time(16, 0)
 ET = ZoneInfo("America/New_York")
-# 6 calendar days of 15-min bars, not 3 -- worst case is a 3-day
-# weekend+holiday gap (e.g. the Tuesday after MLK Monday, itself preceded by
-# a weekend), which still needs to leave 2 full prior trading sessions
-# (~52 bars at 26 bars/session) of headroom above the 30-bar warm-up
-# strategy_engine.compute_signals requires before it computes a real signal
-# (short-frame guard forces "hold" below that). A 3-day lookback only spans
-# the tail of one session for most of a Monday (pinned at 27 bars all day --
-# never reaching 30) and the first post-holiday session (26 bars), silently
-# forcing every "buy" evaluation to "hold" on those days -- indistinguishable
-# in logs from a genuine no-signal bar. See final-review Fix 1.
-SIGNAL_LOOKBACK = timedelta(days=6)
+# 15 calendar days of 15-min bars (up from 6): the original 6-day figure
+# only needed to clear strategy_engine.compute_signals' own 30-bar
+# indicator warm-up with a comfortable multi-session margin against
+# weekend/holiday gaps (see below) -- volatility.confirmation_bars_series'
+# 260-bar trailing percentile window (~10 trading sessions at ~26 bars/
+# session) is now the binding constraint. 15 calendar days comfortably
+# covers 10+ trading sessions even across a long weekend, so the
+# confirmation-bars filter actually leaves its K=1 (unfiltered) fallback
+# in live trading instead of running permanently unfiltered.
+#
+# Original 6-day reasoning, still true as a lower bound: worst case is a
+# 3-day weekend+holiday gap (e.g. the Tuesday after MLK Monday, itself
+# preceded by a weekend), which still needs to leave 2 full prior trading
+# sessions (~52 bars at 26 bars/session) of headroom above the 30-bar
+# warm-up strategy_engine.compute_signals requires before it computes a
+# real signal (short-frame guard forces "hold" below that). A 3-day
+# lookback only spans the tail of one session for most of a Monday
+# (pinned at 27 bars all day -- never reaching 30) and the first
+# post-holiday session (26 bars), silently forcing every "buy" evaluation
+# to "hold" on those days -- indistinguishable in logs from a genuine
+# no-signal bar. See final-review Fix 1.
+SIGNAL_LOOKBACK = timedelta(days=15)
 
 
 def is_market_hours(now=None):
@@ -268,9 +280,11 @@ def main():
                     print(f"{symbol}: no recent bars returned, skipping this cycle")
                     continue
                 df = pd.DataFrame([
-                    {"time": bar.timestamp, "close": bar.close} for bar in bars
+                    {"time": bar.timestamp, "close": bar.close,
+                     "high": bar.high, "low": bar.low}
+                    for bar in bars
                 ])
-                df = compute_signals(df)
+                df = compute_signals(df, confirmation_bars=volatility.confirmation_bars_series(df))
                 latest = df.iloc[-1]
 
                 process_symbol(
