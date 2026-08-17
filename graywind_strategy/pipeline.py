@@ -7,12 +7,15 @@ apart.
 from dataclasses import dataclass
 from typing import Optional
 
+import requests
+
 from graywind_strategy.gates.earnings_gate import (
     EARNINGS_BLACKOUT_DAYS,
     EarningsDataUnavailable,
     earnings_gate,
     fetch_next_earnings_date,
 )
+from graywind_strategy.gates.macro_gate import MacroDataUnavailable, fetch_bullion_macro_snapshot, macro_gate
 from graywind_strategy.gates.sentiment_gate import (
     SENTIMENT_THRESHOLD,
     SentimentDataUnavailable,
@@ -54,6 +57,14 @@ def evaluate_earnings_gate(symbol, finnhub_api_key, as_of_date, blackout_days=EA
     except EarningsDataUnavailable:
         return False
     return earnings_gate(next_date, as_of_date, blackout_days)
+
+
+def evaluate_macro_gate(as_of_date, session=requests, required_breaches=2):
+    try:
+        snapshot = fetch_bullion_macro_snapshot(as_of_date, session=session)
+    except MacroDataUnavailable:
+        return False
+    return macro_gate(snapshot, required_breaches)
 
 
 def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
@@ -102,6 +113,8 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
             return TradeDecision(action="blocked", reason="sentiment_gate")
         if not evaluate_earnings_gate(symbol=symbol, finnhub_api_key=finnhub_api_key, as_of_date=as_of_date):
             return TradeDecision(action="blocked", reason="earnings_gate")
+        if not evaluate_macro_gate(as_of_date=as_of_date):
+            return TradeDecision(action="blocked", reason="macro_gate")
 
     if not drawdown_breaker_ok:  # False or None both block -- fail closed on unknown state
         return TradeDecision(action="blocked", reason="drawdown_breaker")

@@ -183,6 +183,7 @@ def _passing_gates():
         evaluate_vix_gate=lambda **kw: True,
         evaluate_sentiment_gate=lambda **kw: True,
         evaluate_earnings_gate=lambda **kw: True,
+        evaluate_macro_gate=lambda **kw: True,
     )
 
 

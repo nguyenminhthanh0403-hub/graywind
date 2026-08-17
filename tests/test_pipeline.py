@@ -1,11 +1,15 @@
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from graywind_strategy.gates.earnings_gate import EarningsDataUnavailable
+from graywind_strategy.gates.macro_gate import MacroDataUnavailable
 from graywind_strategy.gates.sentiment_gate import SentimentDataUnavailable
 from graywind_strategy.gates.vix_gate import VixDataUnavailable
 from graywind_strategy.pipeline import (
     evaluate_earnings_gate,
+    evaluate_macro_gate,
     evaluate_sentiment_gate,
     evaluate_vix_gate,
     decide_trade,
@@ -54,12 +58,30 @@ def test_evaluate_earnings_gate_fails_closed_on_fetch_error():
         ) is False
 
 
+def test_evaluate_macro_gate_fails_closed_on_fetch_error():
+    with patch(
+        "graywind_strategy.pipeline.fetch_bullion_macro_snapshot",
+        side_effect=MacroDataUnavailable("boom"),
+    ):
+        assert evaluate_macro_gate(as_of_date=date(2024, 1, 8)) is False
+
+
+def test_evaluate_macro_gate_passes_through_on_success():
+    snapshot = {"vix": 14.6, "nfci": -0.55, "hy_oas": 2.71, "curve_slope": 0.48}
+    with patch(
+        "graywind_strategy.pipeline.fetch_bullion_macro_snapshot", return_value=snapshot
+    ) as mock_fetch:
+        assert evaluate_macro_gate(as_of_date=date(2024, 1, 8)) is True
+    mock_fetch.assert_called_once_with(date(2024, 1, 8), session=requests)
+
+
 def _passing_gates():
     return patch.multiple(
         "graywind_strategy.pipeline",
         evaluate_vix_gate=lambda **kw: True,
         evaluate_sentiment_gate=lambda **kw: True,
         evaluate_earnings_gate=lambda **kw: True,
+        evaluate_macro_gate=lambda **kw: True,
     )
 
 
@@ -248,6 +270,24 @@ def test_decide_trade_blocks_on_earnings_gate_failure():
         )
     assert decision.action == "blocked"
     assert decision.reason == "earnings_gate"
+
+
+def test_decide_trade_blocks_on_macro_gate_failure():
+    with patch.multiple(
+        "graywind_strategy.pipeline",
+        evaluate_vix_gate=MagicMock(return_value=True),
+        evaluate_sentiment_gate=MagicMock(return_value=True),
+        evaluate_earnings_gate=MagicMock(return_value=True),
+        evaluate_macro_gate=MagicMock(return_value=False),
+    ):
+        decision = decide_trade(
+            symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
+            current_price=100.0, account_equity=10000.0,
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(risk_fraction=0.01),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        )
+    assert decision.action == "blocked"
+    assert decision.reason == "macro_gate"
 
 
 def test_decide_trade_short_circuits_before_later_gates_on_vix_block():
