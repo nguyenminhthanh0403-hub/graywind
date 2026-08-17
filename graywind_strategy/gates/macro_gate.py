@@ -21,8 +21,8 @@ class MacroDataUnavailable(Exception):
 
 
 BULLION_DATA_URL = "https://nguyenminhthanh0403-hub.github.io/claudekit/bullion-live-map/data.json"
-DAILY_STALENESS_CEILING_DAYS = 5
-WEEKLY_STALENESS_CEILING_DAYS = 10
+DAILY_STALENESS_CEILING_DAYS = 7
+WEEKLY_STALENESS_CEILING_DAYS = 14
 
 _FIELD_CEILINGS = {
     "vix": DAILY_STALENESS_CEILING_DAYS,
@@ -68,19 +68,19 @@ def fetch_bullion_macro_snapshot(as_of_date, session=requests):
         response = session.get(BULLION_DATA_URL, timeout=10)
         response.raise_for_status()
         history = response.json()["history"]
+
+        values = {
+            field: _most_recent_value_before(history, field, as_of_date, ceiling)
+            for field, ceiling in _FIELD_CEILINGS.items()
+        }
+
+        return {
+            "vix": float(values["vix"]),
+            "nfci": float(values["nfci"]),
+            "hy_oas": float(values["hy_oas"]),
+            "curve_slope": float(values["us10y"]) - float(values["us2y"]),
+        }
     except MacroDataUnavailable:
         raise
     except Exception as exc:
         raise MacroDataUnavailable(str(exc)) from exc
-
-    values = {
-        field: _most_recent_value_before(history, field, as_of_date, ceiling)
-        for field, ceiling in _FIELD_CEILINGS.items()
-    }
-
-    return {
-        "vix": values["vix"],
-        "nfci": values["nfci"],
-        "hy_oas": values["hy_oas"],
-        "curve_slope": values["us10y"] - values["us2y"],
-    }

@@ -1,4 +1,4 @@
-"""Composes the strategy signal, the three signal-augmentation gates, and
+"""Composes the strategy signal, the four signal-augmentation gates, and
 risk management into one order-eligibility decision. This is the single
 code path both the backtester and the live loop call — keeping order logic
 in one place is what guarantees backtest and live behavior can't drift
@@ -75,8 +75,8 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
                   stop_pct=0.02, take_profit_pct=0.03):
     """Decide whether to buy, hold, or block a trade for `symbol` as of `as_of_date`.
 
-    `gates_always_pass`, when True, skips all three signal-augmentation
-    gates (vix/sentiment/earnings) entirely -- the plan-specified,
+    `gates_always_pass`, when True, skips all four signal-augmentation
+    gates (vix/sentiment/earnings/macro) entirely -- the plan-specified,
     supported way to bypass them for testing/synthetic-data runs (e.g.
     scripts/task11_integration_run.py), instead of a caller monkeypatching
     this module's internals. Defaults to False so every existing call site

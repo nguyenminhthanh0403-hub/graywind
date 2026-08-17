@@ -332,11 +332,13 @@ def test_decide_trade_gates_always_pass_bypasses_gates_and_reaches_risk_checks()
     vix_mock = MagicMock(return_value=False)
     sentiment_mock = MagicMock(return_value=False)
     earnings_mock = MagicMock(return_value=False)
+    macro_mock = MagicMock(return_value=False)
     with patch.multiple(
         "graywind_strategy.pipeline",
         evaluate_vix_gate=vix_mock,
         evaluate_sentiment_gate=sentiment_mock,
         evaluate_earnings_gate=earnings_mock,
+        evaluate_macro_gate=macro_mock,
     ):
         decision = decide_trade(
             symbol="AAPL",
@@ -356,6 +358,7 @@ def test_decide_trade_gates_always_pass_bypasses_gates_and_reaches_risk_checks()
     vix_mock.assert_not_called()
     sentiment_mock.assert_not_called()
     earnings_mock.assert_not_called()
+    macro_mock.assert_not_called()
 
 
 def test_decide_trade_holds_on_degenerate_low_price_instead_of_raising():

@@ -89,9 +89,9 @@ def test_fetch_bullion_macro_snapshot_never_uses_a_value_dated_on_as_of_date():
 
 
 def test_fetch_bullion_macro_snapshot_raises_when_field_stale_beyond_daily_ceiling():
-    # Only candidate for vix is 6 days before as_of_date -- daily ceiling is 5 days.
+    # Only candidate for vix is 8 days before as_of_date -- daily ceiling is 7 days.
     history = {
-        "2026-08-09": {"vix": 15.0, "hy_oas": 2.5, "us10y": 4.5, "us2y": 4.0, "nfci": -0.3},
+        "2026-08-07": {"vix": 15.0, "hy_oas": 2.5, "us10y": 4.5, "us2y": 4.0, "nfci": -0.3},
     }
     session = _fake_session({"history": history})
 
@@ -100,9 +100,9 @@ def test_fetch_bullion_macro_snapshot_raises_when_field_stale_beyond_daily_ceili
 
 
 def test_fetch_bullion_macro_snapshot_accepts_field_within_daily_ceiling():
-    # Exactly 5 days before as_of_date -- boundary is inclusive (not stale).
+    # Exactly 7 days before as_of_date -- boundary is inclusive (not stale).
     history = {
-        "2026-08-10": {"vix": 15.0, "hy_oas": 2.5, "us10y": 4.5, "us2y": 4.0, "nfci": -0.3},
+        "2026-08-08": {"vix": 15.0, "hy_oas": 2.5, "us10y": 4.5, "us2y": 4.0, "nfci": -0.3},
     }
     session = _fake_session({"history": history})
 
@@ -112,8 +112,8 @@ def test_fetch_bullion_macro_snapshot_accepts_field_within_daily_ceiling():
 
 
 def test_fetch_bullion_macro_snapshot_accepts_weekly_field_within_wider_ceiling():
-    # nfci found 9 days before as_of_date -- would fail a 5-day daily ceiling but passes
-    # its own 10-day weekly ceiling. Other fields found close-in so only nfci's ceiling is
+    # nfci found 9 days before as_of_date -- would fail a 7-day daily ceiling but passes
+    # its own 14-day weekly ceiling. Other fields found close-in so only nfci's ceiling is
     # exercised.
     history = {
         "2026-08-06": {"nfci": -0.3},
@@ -124,6 +124,32 @@ def test_fetch_bullion_macro_snapshot_accepts_weekly_field_within_wider_ceiling(
     snapshot = fetch_bullion_macro_snapshot(date(2026, 8, 15), session=session)
 
     assert snapshot["nfci"] == -0.3
+
+
+def test_fetch_bullion_macro_snapshot_accepts_weekly_field_at_exact_ceiling_boundary():
+    # nfci found exactly 14 days before as_of_date -- weekly ceiling boundary is inclusive
+    # (not stale). Other fields found close-in so only nfci's ceiling is exercised.
+    history = {
+        "2026-08-01": {"nfci": -0.3},
+        "2026-08-10": {"vix": 15.0, "hy_oas": 2.5, "us10y": 4.5, "us2y": 4.0},
+    }
+    session = _fake_session({"history": history})
+
+    snapshot = fetch_bullion_macro_snapshot(date(2026, 8, 15), session=session)
+
+    assert snapshot["nfci"] == -0.3
+
+
+def test_fetch_bullion_macro_snapshot_raises_when_nfci_stale_beyond_weekly_ceiling():
+    # Only candidate for nfci is 15 days before as_of_date -- weekly ceiling is 14 days.
+    history = {
+        "2026-07-31": {"nfci": -0.3},
+        "2026-08-10": {"vix": 15.0, "hy_oas": 2.5, "us10y": 4.5, "us2y": 4.0},
+    }
+    session = _fake_session({"history": history})
+
+    with pytest.raises(MacroDataUnavailable, match="nfci"):
+        fetch_bullion_macro_snapshot(date(2026, 8, 15), session=session)
 
 
 def test_fetch_bullion_macro_snapshot_computes_curve_slope_as_us10y_minus_us2y():
@@ -166,4 +192,25 @@ def test_fetch_bullion_macro_snapshot_raises_when_no_value_found_for_field_at_al
     }
     session = _fake_session({"history": history})
     with pytest.raises(MacroDataUnavailable, match="hy_oas"):
+        fetch_bullion_macro_snapshot(date(2026, 8, 15), session=session)
+
+
+def test_fetch_bullion_macro_snapshot_raises_when_history_is_malformed_list():
+    # history is a list instead of a dict (malformed payload) -- must be wrapped as
+    # MacroDataUnavailable, not surfaced as a raw AttributeError from .keys() on a list.
+    session = _fake_session({"history": ["not", "a", "dict"]})
+    with pytest.raises(MacroDataUnavailable):
+        fetch_bullion_macro_snapshot(date(2026, 8, 15), session=session)
+
+
+def test_fetch_bullion_macro_snapshot_raises_when_field_value_is_null():
+    # us10y is present as a key but its value is None (malformed payload). Pre-fix, this
+    # value flows unchecked straight into the curve_slope subtraction (None - float),
+    # raising a raw TypeError outside the try block. Post-fix, the float() coercion inside
+    # the try block turns it into MacroDataUnavailable instead.
+    history = {
+        "2026-08-10": {"vix": 15.0, "hy_oas": 2.5, "us10y": None, "us2y": 4.0, "nfci": -0.3},
+    }
+    session = _fake_session({"history": history})
+    with pytest.raises(MacroDataUnavailable):
         fetch_bullion_macro_snapshot(date(2026, 8, 15), session=session)

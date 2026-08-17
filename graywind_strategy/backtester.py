@@ -95,7 +95,7 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
 
     `gates_always_pass` is forwarded straight into every decide_trade() call
     below -- the plan-specified, supported way to bypass the vix/sentiment/
-    earnings gates for testing/synthetic-data runs (see
+    earnings/macro gates for testing/synthetic-data runs (see
     scripts/task11_integration_run.py), instead of monkeypatching
     graywind_strategy.pipeline's internals.
 
@@ -236,15 +236,15 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                 )
                 # NOTE (known follow-up, not implemented here): each bar that
                 # reaches decide_trade() triggers a fresh vix/sentiment/
-                # earnings gate fetch, with no caching across bars for the
-                # same (symbol, date). That's fine against synthetic data or
-                # with gates_always_pass=True, but a real multi-week backtest
-                # run against the real FRED/news/Finnhub APIs (once
-                # credentials exist) will need per-(symbol, date) caching of
-                # gate results before it's practical against Finnhub's
-                # free-tier rate limit (60 req/min) -- not validated here
-                # since real credentials/rate-limit behavior aren't available
-                # in this environment.
+                # earnings/macro gate fetch, with no caching across bars for
+                # the same (symbol, date). That's fine against synthetic data
+                # or with gates_always_pass=True, but a real multi-week
+                # backtest run against the real FRED/news/Finnhub/Bullion
+                # APIs (once credentials exist) will need per-(symbol, date)
+                # caching of gate results before it's practical against
+                # Finnhub's free-tier rate limit (60 req/min) -- not
+                # validated here since real credentials/rate-limit behavior
+                # aren't available in this environment.
                 decision = decide_trade(
                     symbol=symbol, signal=row["signal"], as_of_date=current_day,
                     current_price=close_price, account_equity=equity,
