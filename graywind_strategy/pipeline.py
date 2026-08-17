@@ -16,6 +16,7 @@ from graywind_strategy.gates.earnings_gate import (
     fetch_next_earnings_date,
 )
 from graywind_strategy.gates.macro_gate import MacroDataUnavailable, fetch_bullion_macro_snapshot, macro_gate
+from graywind_strategy.gates.sector_gates import evaluate_sector_gates
 from graywind_strategy.gates.sentiment_gate import (
     SENTIMENT_THRESHOLD,
     SentimentDataUnavailable,
@@ -115,6 +116,8 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
             return TradeDecision(action="blocked", reason="earnings_gate")
         if not evaluate_macro_gate(as_of_date=as_of_date):
             return TradeDecision(action="blocked", reason="macro_gate")
+        if not evaluate_sector_gates(symbol=symbol, as_of_date=as_of_date):
+            return TradeDecision(action="blocked", reason="sector_gate")
 
     if not drawdown_breaker_ok:  # False or None both block -- fail closed on unknown state
         return TradeDecision(action="blocked", reason="drawdown_breaker")
