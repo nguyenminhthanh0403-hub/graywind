@@ -5,6 +5,7 @@ import pytest
 
 from graywind_strategy.backtester import max_drawdown, run_backtest, sharpe_ratio, win_rate
 from graywind_strategy.pipeline import TradeDecision
+from graywind_strategy.strategy_engine import compute_signals
 
 # Computed independently via sharpe_ratio([10000.0, 10000.0, 10000.0, 10120.0,
 # 10120.0], periods_per_year=PERIODS_PER_YEAR_15MIN) -- see
@@ -305,3 +306,40 @@ def test_run_backtest_skips_a_buy_when_no_cash_is_left_after_earlier_same_bar_fi
 
     symbols_bought = {t["symbol"] for t in result.trades if t["action"] == "buy"}
     assert symbols_bought == {"AAPL"}  # SPY's buy had no cash left to fund it
+
+
+def test_run_backtest_passes_a_confirmation_bars_series_from_volatility_module():
+    times = pd.to_datetime([
+        "2024-01-08 09:30:00", "2024-01-08 09:45:00", "2024-01-08 10:00:00",
+        "2024-01-08 10:15:00", "2024-01-08 10:30:00",
+    ])
+    df_by_symbol = {
+        "AAPL": pd.DataFrame({"time": times, "open": [100.0] * 5, "close": [100.0] * 5}),
+    }
+    with patch("graywind_strategy.backtester.compute_signals", wraps=compute_signals) as mock_compute, \
+         patch("graywind_strategy.backtester.decide_trade",
+               return_value=TradeDecision(action="hold", reason="no buy signal")):
+        run_backtest(df_by_symbol)
+
+    assert mock_compute.call_count == 1
+    # 5 bars is far short of both compute_signals' own 30-bar warmup and
+    # volatility's 260-bar percentile window -- the point of this test is
+    # that run_backtest wires a real per-bar confirmation_bars Series
+    # through at all, not what its (all-K=1, here) value works out to.
+    assert isinstance(mock_compute.call_args.kwargs["confirmation_bars"], pd.Series)
+
+
+def test_run_backtest_confirmation_bars_override_disables_filter_for_that_symbol():
+    times = pd.to_datetime([
+        "2024-01-08 09:30:00", "2024-01-08 09:45:00", "2024-01-08 10:00:00",
+        "2024-01-08 10:15:00", "2024-01-08 10:30:00",
+    ])
+    df_by_symbol = {
+        "AAPL": pd.DataFrame({"time": times, "open": [100.0] * 5, "close": [100.0] * 5}),
+    }
+    with patch("graywind_strategy.backtester.compute_signals", wraps=compute_signals) as mock_compute, \
+         patch("graywind_strategy.backtester.decide_trade",
+               return_value=TradeDecision(action="hold", reason="no buy signal")):
+        run_backtest(df_by_symbol, confirmation_bars_override={"AAPL": None})
+
+    assert mock_compute.call_args.kwargs["confirmation_bars"] is None

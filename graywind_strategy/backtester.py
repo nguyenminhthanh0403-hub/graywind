@@ -9,6 +9,7 @@ import statistics
 from dataclasses import dataclass, field
 from itertools import groupby
 
+from graywind_strategy import volatility
 from graywind_strategy.pipeline import decide_trade
 from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
@@ -75,7 +76,7 @@ def win_rate(trades):
 
 def run_backtest(df_by_symbol, starting_equity=10000.0,
                   fred_api_key=None, news_client=None, finnhub_api_key=None,
-                  gates_always_pass=False):
+                  gates_always_pass=False, confirmation_bars_override=None):
     """Runs decide_trade() bar-by-bar for every symbol, in timestamp order
     across symbols so PDT/drawdown state is shared correctly. Assumes each
     DataFrame in df_by_symbol already has 'time', 'open', and 'close'
@@ -95,10 +96,24 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
     earnings gates for testing/synthetic-data runs (see
     scripts/task11_integration_run.py), instead of monkeypatching
     graywind_strategy.pipeline's internals.
+
+    `confirmation_bars_override`, when given, is a `{symbol: value}` dict
+    that overrides the auto-computed `volatility.confirmation_bars_series`
+    for just the symbols present in it (value can be `None` to disable
+    confirmation-bars filtering entirely for that symbol) -- the supported
+    way for a research script (scripts/validate_sector_engine.py) to run
+    the same backtest with confirmation-bars on vs. off, instead of
+    monkeypatching graywind_strategy.volatility's internals. Symbols not
+    present in the dict (or when the dict itself is None, the default) use
+    the real per-bar volatility-scaled K.
     """
-    signals_by_symbol = {
-        symbol: compute_signals(df) for symbol, df in df_by_symbol.items()
-    }
+    signals_by_symbol = {}
+    for symbol, df in df_by_symbol.items():
+        if confirmation_bars_override is not None and symbol in confirmation_bars_override:
+            k = confirmation_bars_override[symbol]
+        else:
+            k = volatility.confirmation_bars_series(df)
+        signals_by_symbol[symbol] = compute_signals(df, confirmation_bars=k)
     pdt_throttle = PDTThrottle()
     position_sizer = PositionSizer(risk_fraction=0.01)
     drawdown_breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
