@@ -33,6 +33,24 @@ def test_compute_atr_pct_is_nan_not_inf_for_non_positive_close():
     assert pd.isna(result.iloc[-1])
 
 
+def test_compute_atr_pct_and_confirmation_bars_series_degrade_safely_when_high_low_missing():
+    # Enough rows to clear ATR_PERIOD, but no high/low columns -- must
+    # degrade to the same safe fallback as insufficient history (all-NaN
+    # from compute_atr_pct, all-K=1 from confirmation_bars_series built on
+    # top of it), not raise. pandas_ta_classic's .ta.atr() silently no-ops
+    # instead of erroring on missing columns, and without this guard the
+    # downstream percentile-rank/bucketing logic raises a confusing
+    # "truth value of a Series is ambiguous" ValueError instead.
+    df = pd.DataFrame({"close": [100.0 + i * 0.1 for i in range(20)]})
+
+    atr_result = compute_atr_pct(df)
+    assert len(atr_result) == 20
+    assert atr_result.isna().all()
+
+    k_result = confirmation_bars_series(df)
+    assert (k_result == 1).all()
+
+
 def test_confirmation_bars_series_defaults_to_k1_below_percentile_window():
     df = _ohlc([100.0 + i * 0.1 for i in range(50)])  # fewer than PERCENTILE_WINDOW=260
     result = confirmation_bars_series(df)

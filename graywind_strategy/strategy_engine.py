@@ -8,6 +8,7 @@ retune out whipsaw entries on higher-volatility symbols.
 """
 import math
 
+import numpy as np
 import pandas as pd
 import pandas_ta_classic  # noqa: F401  (registers the .ta accessor on DataFrame)
 
@@ -44,7 +45,7 @@ def apply_confirmation_filter(df, confirmation_bars, rsi_oversold=RSI_OVERSOLD,
     index doesn't match `df.index` raises ValueError -- that's a caller
     bug, not a market-data edge case.
     """
-    if isinstance(confirmation_bars, int):
+    if isinstance(confirmation_bars, (int, np.integer)):
         k_series = pd.Series(confirmation_bars, index=df.index)
     else:
         k_series = confirmation_bars
@@ -90,12 +91,17 @@ def compute_signals(df, rsi_period=RSI_PERIOD, fast_period=FAST_SMA_PERIOD,
     df["rsi"] = df.ta.rsi(length=rsi_period)
     df["sma_fast"] = df.ta.sma(length=fast_period)
     df["sma_slow"] = df.ta.sma(length=slow_period)
-    df["signal"] = df.apply(
-        lambda row: evaluate_signal(
-            row["rsi"], row["sma_fast"], row["sma_slow"], rsi_oversold, rsi_overbought
-        ),
-        axis=1,
-    )
-    if confirmation_bars is not None:
+    if confirmation_bars is None:
+        df["signal"] = df.apply(
+            lambda row: evaluate_signal(
+                row["rsi"], row["sma_fast"], row["sma_slow"], rsi_oversold, rsi_overbought
+            ),
+            axis=1,
+        )
+    else:
+        # apply_confirmation_filter only reads rsi/sma_fast/sma_slow, so
+        # the row-wise evaluate_signal() pass above (the slowest line in
+        # this function) would be computed only to be immediately
+        # overwritten -- skip straight to the filtered path instead.
         df["signal"] = apply_confirmation_filter(df, confirmation_bars, rsi_oversold, rsi_overbought)
     return df

@@ -3,6 +3,7 @@ from datetime import date, datetime
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from alpaca.trading.enums import OrderSide
 
 from graywind_strategy.pipeline import TradeDecision
@@ -556,3 +557,8 @@ def test_process_symbol_cycle_passes_confirmation_bars_to_compute_signals():
     assert mock_compute.call_count == len(live_loop.WATCHLIST)
     for call in mock_compute.call_args_list:
         assert "confirmation_bars" in call.kwargs
+        # Not just present -- a real per-bar Series, not e.g. None or a
+        # scalar fallback, which is exactly how a too-short SIGNAL_LOOKBACK
+        # (final-review Fix 1) could silently degrade the filter to K=1
+        # (unfiltered) without this test catching it.
+        assert isinstance(call.kwargs["confirmation_bars"], pd.Series)

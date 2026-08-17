@@ -17,11 +17,17 @@ def compute_atr_pct(df, period=ATR_PERIOD):
     """ATR(period) as a percentage of close price. Trailing/causal by
     construction -- bar i only ever depends on bars <= i.
     """
-    if len(df) < period:
+    if len(df) < period or not {"high", "low", "close"}.issubset(df.columns):
         # pandas_ta_classic's .ta.atr() doesn't return NaN for
         # insufficient history the way .ta.rsi()/.ta.sma() do -- it
         # silently returns the raw input DataFrame unchanged. Guard
         # explicitly instead of trusting that call for short DataFrames.
+        # Same silent-passthrough quirk applies when high/low/close
+        # columns are simply missing (e.g. a caller-supplied DataFrame
+        # that only has time/open/close) -- fail soft to the same all-NaN
+        # Series (-> confirmation_bars_series' safe K=1 fallback) rather
+        # than let a missing-columns bug surface downstream as a
+        # confusing "truth value of a Series is ambiguous" error.
         return pd.Series(float("nan"), index=df.index)
     atr = df.ta.atr(length=period)
     close = df["close"]

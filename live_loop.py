@@ -47,15 +47,24 @@ DASHBOARD_EXPORT_DIR = "dashboard_export"
 MARKET_OPEN = dt_time(9, 30)
 MARKET_CLOSE = dt_time(16, 0)
 ET = ZoneInfo("America/New_York")
-# 15 calendar days of 15-min bars (up from 6): the original 6-day figure
-# only needed to clear strategy_engine.compute_signals' own 30-bar
+# 21 calendar days of 15-min bars (up from 6, then 15): the original 6-day
+# figure only needed to clear strategy_engine.compute_signals' own 30-bar
 # indicator warm-up with a comfortable multi-session margin against
 # weekend/holiday gaps (see below) -- volatility.confirmation_bars_series'
-# 260-bar trailing percentile window (~10 trading sessions at ~26 bars/
-# session) is now the binding constraint. 15 calendar days comfortably
-# covers 10+ trading sessions even across a long weekend, so the
-# confirmation-bars filter actually leaves its K=1 (unfiltered) fallback
-# in live trading instead of running permanently unfiltered.
+# real binding constraint is now the true minimum, NOT the 260-bar
+# percentile window alone: compute_atr_pct burns ATR_PERIOD - 1 = 13
+# leading bars on ATR warmup before the rolling 260-bar percentile window
+# can even start counting toward its own PERCENTILE_WINDOW=260
+# requirement, so the true minimum is
+# volatility.ATR_PERIOD - 1 + volatility.PERCENTILE_WINDOW = 13 + 260 =
+# 273 bars, not 260. A 15-day lookback was sized against the wrong (260)
+# number and left thinner-tape symbols spending a meaningful fraction of
+# cycles under 273 bars, silently pinning confirmation-bars to K=1
+# (unfiltered). 21 calendar days is sized against the real 273-bar figure
+# instead, with comfortable headroom (~2 more trading weeks) even across a
+# long weekend, so the confirmation-bars filter actually leaves its K=1
+# (unfiltered) fallback in live trading instead of running permanently
+# unfiltered.
 #
 # Original 6-day reasoning, still true as a lower bound: worst case is a
 # 3-day weekend+holiday gap (e.g. the Tuesday after MLK Monday, itself
@@ -68,7 +77,7 @@ ET = ZoneInfo("America/New_York")
 # post-holiday session (26 bars), silently forcing every "buy" evaluation
 # to "hold" on those days -- indistinguishable in logs from a genuine
 # no-signal bar. See final-review Fix 1.
-SIGNAL_LOOKBACK = timedelta(days=15)
+SIGNAL_LOOKBACK = timedelta(days=21)
 
 
 def is_market_hours(now=None):

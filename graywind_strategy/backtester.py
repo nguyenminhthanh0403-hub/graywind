@@ -79,8 +79,10 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                   gates_always_pass=False, confirmation_bars_override=None):
     """Runs decide_trade() bar-by-bar for every symbol, in timestamp order
     across symbols so PDT/drawdown state is shared correctly. Assumes each
-    DataFrame in df_by_symbol already has 'time', 'open', and 'close'
-    columns (from Task 5's CSV format).
+    DataFrame in df_by_symbol already has 'time', 'open', 'close', 'high',
+    and 'low' columns (from Task 5's CSV format) -- 'high'/'low' are
+    required because volatility.confirmation_bars_series (for ATR) is now
+    called unconditionally for every symbol below.
 
     A signal or stop/target trigger is only knowable once a bar's close
     prints, so any resulting order is queued rather than filled immediately
