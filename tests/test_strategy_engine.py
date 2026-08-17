@@ -1,8 +1,9 @@
 import random
 
 import pandas as pd
+import pytest
 
-from graywind_strategy.strategy_engine import compute_signals, evaluate_signal
+from graywind_strategy.strategy_engine import compute_signals, evaluate_signal, apply_confirmation_filter
 
 
 def test_evaluate_signal_buy_when_fast_above_slow_and_not_overbought():
@@ -56,3 +57,57 @@ def test_compute_signals_produces_both_buy_and_sell_signals_on_an_oscillating_se
     signals_after_warmup = set(result["signal"].iloc[30:])
     assert "buy" in signals_after_warmup
     assert "sell" in signals_after_warmup
+
+
+def test_compute_signals_confirmation_bars_none_matches_omitting_it():
+    df = pd.DataFrame({"close": [100 + i * 0.5 for i in range(40)]})
+    assert compute_signals(df, confirmation_bars=None)["signal"].equals(
+        compute_signals(df)["signal"]
+    )
+
+
+def test_apply_confirmation_filter_holds_an_isolated_single_bar_condition():
+    # rsi=20 (oversold) keeps sell_condition false throughout, isolating
+    # this test to buy-side filtering only. buy_condition is true only at
+    # index 1 (fast > slow there, false everywhere else) -- K=2 requires
+    # it to hold for 2 consecutive bars, so it should never fire.
+    df = pd.DataFrame({
+        "rsi": [20, 20, 20, 20],
+        "sma_fast": [95, 105, 95, 95],
+        "sma_slow": [100, 100, 100, 100],
+    })
+    result = apply_confirmation_filter(df, confirmation_bars=2, rsi_oversold=30, rsi_overbought=70)
+    assert list(result) == ["hold", "hold", "hold", "hold"]
+
+
+def test_apply_confirmation_filter_fires_only_on_the_kth_consecutive_confirmed_bar():
+    df = pd.DataFrame({
+        "rsi": [20, 20, 20, 20],
+        "sma_fast": [95, 105, 106, 107],  # buy_condition: F, T, T, T
+        "sma_slow": [100, 100, 100, 100],
+    })
+    result = apply_confirmation_filter(df, confirmation_bars=3, rsi_oversold=30, rsi_overbought=70)
+    assert list(result) == ["hold", "hold", "hold", "buy"]
+
+
+def test_apply_confirmation_filter_uses_each_bars_own_k_from_a_series():
+    df = pd.DataFrame({
+        "rsi": [20, 20, 20, 20],
+        "sma_fast": [105, 105, 105, 105],  # buy_condition true at every bar
+        "sma_slow": [100, 100, 100, 100],
+    })
+    k = pd.Series([1, 3, 3, 3], index=df.index)
+    result = apply_confirmation_filter(df, confirmation_bars=k, rsi_oversold=30, rsi_overbought=70)
+    # index 0: K=1, fires immediately. index 1: K=3, only 2 bars of history
+    # so far -- not confirmed. index 2: K=3, 3 bars of history (0,1,2), all
+    # true -- confirmed. index 3: K=3, confirmed.
+    assert list(result) == ["buy", "hold", "buy", "buy"]
+
+
+def test_apply_confirmation_filter_raises_on_misaligned_series_index():
+    df = pd.DataFrame({
+        "rsi": [20, 20, 20], "sma_fast": [105, 105, 105], "sma_slow": [100, 100, 100],
+    })
+    k = pd.Series([1, 1, 1], index=[10, 20, 30])  # doesn't match df's default 0,1,2 index
+    with pytest.raises(ValueError):
+        apply_confirmation_filter(df, confirmation_bars=k, rsi_oversold=30, rsi_overbought=70)
