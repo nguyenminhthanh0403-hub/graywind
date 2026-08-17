@@ -5,7 +5,6 @@ import requests
 
 from graywind_strategy.gates.earnings_gate import EarningsDataUnavailable
 from graywind_strategy.gates.macro_gate import MacroDataUnavailable
-from graywind_strategy.gates.sector_gates import evaluate_sector_gates
 from graywind_strategy.gates.sentiment_gate import SentimentDataUnavailable
 from graywind_strategy.gates.vix_gate import VixDataUnavailable
 from graywind_strategy.pipeline import (

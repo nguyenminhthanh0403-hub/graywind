@@ -2,8 +2,10 @@
 non-volatility caveats (e.g. an energy oil-price gate, a tech
 earnings-surprise gate) -- not consumed by graywind_strategy.volatility or
 any confirmation-bars math (see
-docs/superpowers/specs/2026-08-17-graywind-sector-engine-design.md). This
-module has no dependents yet; it is scaffolding for later work.
+docs/superpowers/specs/2026-08-17-graywind-sector-engine-design.md).
+graywind_strategy.gates.sector_gates imports SYMBOL_SECTOR from this module
+to route symbols to their per-sector gate list; the tags themselves still
+don't drive the volatility/K math, only the gate registry.
 """
 
 SYMBOL_SECTOR = {

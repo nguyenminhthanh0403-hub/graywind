@@ -37,3 +37,13 @@ def test_evaluate_sector_gates_requires_all_gates_in_list_to_pass(monkeypatch):
     failing_gate = lambda symbol, as_of_date: False
     monkeypatch.setitem(SECTOR_GATES, "energy", [passing_gate, failing_gate])
     assert evaluate_sector_gates(symbol="XOM", as_of_date=date(2024, 1, 8)) is False
+
+
+def test_evaluate_sector_gates_short_circuits_after_first_failure(monkeypatch):
+    from unittest.mock import MagicMock
+
+    failing_gate = lambda symbol, as_of_date: False
+    never_called_gate = MagicMock()
+    monkeypatch.setitem(SECTOR_GATES, "energy", [failing_gate, never_called_gate])
+    assert evaluate_sector_gates(symbol="XOM", as_of_date=date(2024, 1, 8)) is False
+    never_called_gate.assert_not_called()

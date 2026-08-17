@@ -7,7 +7,11 @@ a self-contained evaluator -- same shape as evaluate_vix_gate/
 evaluate_macro_gate in pipeline.py. It performs its own I/O and catches its
 own XDataUnavailable exception internally, returning a plain bool.
 evaluate_sector_gates never sees a raw pure-logic function or an unhandled
-exception.
+exception. evaluate_sector_gates calls each registered gate as
+`gate(symbol=symbol, as_of_date=as_of_date)` -- by keyword, not
+positionally -- so a registered gate must accept `symbol` and `as_of_date`
+as keyword arguments with those exact parameter names, not merely two
+positional parameters in that order.
 
 No tag, no registered gate for a symbol's sector, or an empty list are all
 treated as "pass" -- a sector caveat is additive risk management, not a
