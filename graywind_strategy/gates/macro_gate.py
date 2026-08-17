@@ -1,16 +1,23 @@
 """Bullion macro-gate: blocks new trades when a vote-count of macro stress
-signals (VIX, NFCI, HY OAS, yield curve slope), sourced from Bullion's
-public daily-cron data.json, meets a configured breach threshold. Fails
-closed -- any fetch, parse, or staleness failure raises
-MacroDataUnavailable, which the caller (pipeline.py) must treat as a
-blocked trade, never as a skipped gate. Additive alongside vix_gate.py,
-which keeps its own direct FRED call unchanged.
+signals (NFCI, HY OAS, yield curve slope), sourced from Bullion's public
+daily-cron data.json, meets a configured breach threshold. Fails closed --
+any fetch, parse, or staleness failure raises MacroDataUnavailable, which
+the caller (pipeline.py) must treat as a blocked trade, never as a skipped
+gate. Additive alongside vix_gate.py, which keeps its own direct FRED call
+unchanged.
+
+vix is still fetched into the snapshot (Bullion publishes it, and the
+staleness-checked fetch walk treats it like any other field) but is
+deliberately excluded from the vote: evaluate_vix_gate already blocks
+outright on the identical FRED VIXCLS series at the identical 25.0
+threshold earlier in decide_trade, so counting it here too could only ever
+fire when it's wrong -- Bullion's forward-filled value reads stale-high
+while live FRED is actually fine.
 """
 from datetime import datetime
 
 import requests
 
-VIX_THRESHOLD = 25.0
 NFCI_THRESHOLD = 0.0
 HY_OAS_THRESHOLD = 5.0
 CURVE_SLOPE_THRESHOLD = 0.0
@@ -35,8 +42,6 @@ _FIELD_CEILINGS = {
 
 def macro_gate(snapshot, required_breaches=2):
     breaches = 0
-    if snapshot["vix"] >= VIX_THRESHOLD:
-        breaches += 1
     if snapshot["nfci"] >= NFCI_THRESHOLD:
         breaches += 1
     if snapshot["hy_oas"] >= HY_OAS_THRESHOLD:

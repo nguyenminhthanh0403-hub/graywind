@@ -25,21 +25,32 @@ def test_macro_gate_allows_when_no_fields_breach():
     assert macro_gate(snapshot) is True
 
 
+def test_macro_gate_ignores_vix_even_when_it_would_tip_the_old_vote():
+    # vix is still present in every real snapshot (fetch_bullion_macro_snapshot always
+    # includes it) but is no longer part of the vote: evaluate_vix_gate already blocks
+    # outright on the identical FRED VIXCLS series/threshold earlier in decide_trade, so
+    # counting it here too could only ever fire when it's wrong (Bullion's forward-filled
+    # value stale-high while live FRED is actually fine). Here vix and hy_oas both breach --
+    # under the old 4-field vote that was 2 of 4 (blocks); with vix excluded it's 1 of 3
+    # (allows). Pins the regression, not just a case both old and new code already agreed on.
+    snapshot = {"vix": 999.0, "nfci": -0.55, "hy_oas": 6.0, "curve_slope": 0.48}
+    assert macro_gate(snapshot) is True
+
+
 def test_macro_gate_allows_when_breaches_below_required_count():
-    # Only vix breaches (>= 25.0); default required_breaches=2, so 1 breach still allows.
-    snapshot = {"vix": 27.0, "nfci": -0.55, "hy_oas": 2.71, "curve_slope": 0.48}
+    # Only hy_oas breaches; default required_breaches=2, so 1 breach still allows.
+    snapshot = {"vix": 14.6, "nfci": -0.55, "hy_oas": 6.0, "curve_slope": 0.48}
     assert macro_gate(snapshot) is True
 
 
 def test_macro_gate_blocks_when_breaches_meet_required_count():
-    # vix and nfci both breach at their exact threshold boundary -- 2 of 4, meets default
-    # required_breaches=2.
-    snapshot = {"vix": 25.0, "nfci": 0.0, "hy_oas": 2.71, "curve_slope": 0.48}
+    # nfci and hy_oas both breach -- 2 of 3, meets default required_breaches=2.
+    snapshot = {"vix": 14.6, "nfci": 0.0, "hy_oas": 6.0, "curve_slope": 0.48}
     assert macro_gate(snapshot) is False
 
 
-def test_macro_gate_blocks_when_all_four_fields_breach():
-    snapshot = {"vix": 30.0, "nfci": 0.5, "hy_oas": 6.0, "curve_slope": -0.5}
+def test_macro_gate_blocks_when_all_three_fields_breach():
+    snapshot = {"vix": 14.6, "nfci": 0.5, "hy_oas": 6.0, "curve_slope": -0.5}
     assert macro_gate(snapshot) is False
 
 
@@ -51,9 +62,9 @@ def test_macro_gate_curve_slope_breach_is_less_than_not_greater_than():
 
 
 def test_macro_gate_respects_custom_required_breaches():
-    # 3 breaches, but required_breaches=4 means it takes all 4 to block.
-    snapshot = {"vix": 30.0, "nfci": 0.5, "hy_oas": 6.0, "curve_slope": 0.48}
-    assert macro_gate(snapshot, required_breaches=4) is True
+    # nfci and hy_oas breach (2 of 3), but required_breaches=3 means it takes all 3 to block.
+    snapshot = {"vix": 14.6, "nfci": 0.5, "hy_oas": 6.0, "curve_slope": 0.48}
+    assert macro_gate(snapshot, required_breaches=3) is True
 
 
 def test_fetch_bullion_macro_snapshot_parses_most_recent_value_per_field():

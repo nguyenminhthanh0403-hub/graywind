@@ -1,5 +1,14 @@
 # Graywind x Bullion Macro Gate — Design
 
+**Amendment (2026-08-17, post-ship):** the vote below shipped as "2 of 4" including `vix`, but
+`vix`'s vote turned out to be redundant with the pre-existing `evaluate_vix_gate` (same FRED
+VIXCLS series, same 25.0 threshold, runs first in `decide_trade`) — it could only ever fire when
+it was *wrong* (Bullion's forward-filled value stale-high while live FRED was actually fine). The
+user decided to drop `vix` from the vote; `macro_gate()` is now "2 of 3" over
+`nfci`/`hy_oas`/`curve_slope`. `vix` is still fetched into the snapshot (harmless, matches Bullion's
+data shape) but no longer counted. The rest of this document is the original, as-approved design —
+read the "2 of 4"/`vix`-vote language below as historical, not current behavior.
+
 **Date:** 2026-08-17
 **Status:** approved, not yet implemented
 **Prior art:** `graywind_strategy/gates/vix_gate.py` (the gate this design mirrors almost exactly —
