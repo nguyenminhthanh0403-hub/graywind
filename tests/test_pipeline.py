@@ -82,6 +82,7 @@ def _passing_gates():
         evaluate_sentiment_gate=lambda **kw: True,
         evaluate_earnings_gate=lambda **kw: True,
         evaluate_macro_gate=lambda **kw: True,
+        evaluate_sector_gates=lambda **kw: True,
     )
 
 
@@ -290,6 +291,25 @@ def test_decide_trade_blocks_on_macro_gate_failure():
     assert decision.reason == "macro_gate"
 
 
+def test_decide_trade_blocks_on_sector_gate_failure():
+    with patch.multiple(
+        "graywind_strategy.pipeline",
+        evaluate_vix_gate=MagicMock(return_value=True),
+        evaluate_sentiment_gate=MagicMock(return_value=True),
+        evaluate_earnings_gate=MagicMock(return_value=True),
+        evaluate_macro_gate=MagicMock(return_value=True),
+        evaluate_sector_gates=MagicMock(return_value=False),
+    ):
+        decision = decide_trade(
+            symbol="XOM", signal="buy", as_of_date=date(2024, 1, 8),
+            current_price=100.0, account_equity=10000.0,
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(risk_fraction=0.01),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        )
+    assert decision.action == "blocked"
+    assert decision.reason == "sector_gate"
+
+
 def test_decide_trade_short_circuits_before_later_gates_on_vix_block():
     vix_mock = MagicMock(return_value=False)
     sentiment_mock = MagicMock(return_value=True)
@@ -333,12 +353,14 @@ def test_decide_trade_gates_always_pass_bypasses_gates_and_reaches_risk_checks()
     sentiment_mock = MagicMock(return_value=False)
     earnings_mock = MagicMock(return_value=False)
     macro_mock = MagicMock(return_value=False)
+    sector_mock = MagicMock(return_value=False)
     with patch.multiple(
         "graywind_strategy.pipeline",
         evaluate_vix_gate=vix_mock,
         evaluate_sentiment_gate=sentiment_mock,
         evaluate_earnings_gate=earnings_mock,
         evaluate_macro_gate=macro_mock,
+        evaluate_sector_gates=sector_mock,
     ):
         decision = decide_trade(
             symbol="AAPL",
@@ -359,6 +381,7 @@ def test_decide_trade_gates_always_pass_bypasses_gates_and_reaches_risk_checks()
     sentiment_mock.assert_not_called()
     earnings_mock.assert_not_called()
     macro_mock.assert_not_called()
+    sector_mock.assert_not_called()
 
 
 def test_decide_trade_holds_on_degenerate_low_price_instead_of_raising():
