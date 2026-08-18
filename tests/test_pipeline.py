@@ -3,11 +3,13 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
+from graywind_strategy.gates.analyst_consensus import AnalystDataUnavailable
 from graywind_strategy.gates.earnings_gate import EarningsDataUnavailable
 from graywind_strategy.gates.macro_gate import MacroDataUnavailable
 from graywind_strategy.gates.sentiment_gate import SentimentDataUnavailable
 from graywind_strategy.gates.vix_gate import VixDataUnavailable
 from graywind_strategy.pipeline import (
+    evaluate_analyst_consensus_multiplier,
     evaluate_earnings_gate,
     evaluate_macro_gate,
     evaluate_sentiment_gate,
@@ -398,3 +400,49 @@ def test_decide_trade_holds_on_degenerate_low_price_instead_of_raising():
         )
     assert decision.action == "hold"
     assert decision.reason == "invalid price for sizing"
+
+
+def test_evaluate_analyst_consensus_multiplier_returns_neutral_for_non_today_date():
+    # Task 11/backtest dates are never date.today() in a real run; this proves the
+    # look-ahead-bias guard without needing to mock fetch or cache at all.
+    with patch("graywind_strategy.pipeline.fetch_analyst_consensus") as mock_fetch:
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date(2024, 1, 8), current_price=100.0
+        )
+    assert result == 1.0
+    mock_fetch.assert_not_called()
+
+
+def test_evaluate_analyst_consensus_multiplier_fails_open_on_fetch_error():
+    with patch("graywind_strategy.pipeline.load_cached_multiplier", return_value=None), \
+         patch("graywind_strategy.pipeline.fetch_analyst_consensus",
+               side_effect=AnalystDataUnavailable("boom")):
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date.today(), current_price=100.0
+        )
+    assert result == 1.0
+
+
+def test_evaluate_analyst_consensus_multiplier_uses_cache_hit_without_fetching():
+    with patch("graywind_strategy.pipeline.load_cached_multiplier", return_value=1.075), \
+         patch("graywind_strategy.pipeline.fetch_analyst_consensus") as mock_fetch:
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date.today(), current_price=100.0
+        )
+    assert result == 1.075
+    mock_fetch.assert_not_called()
+
+
+def test_evaluate_analyst_consensus_multiplier_fetches_scores_and_caches_on_a_miss():
+    with patch("graywind_strategy.pipeline.load_cached_multiplier", return_value=None), \
+         patch("graywind_strategy.pipeline.fetch_analyst_consensus",
+               return_value=(1.0, 100.0)) as mock_fetch, \
+         patch("graywind_strategy.pipeline.save_cached_multiplier") as mock_save:
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date.today(), current_price=100.0
+        )
+    assert result == 1.075  # Strong Buy, 0% upside
+    mock_fetch.assert_called_once_with("AAPL")
+    mock_save.assert_called_once_with(
+        "AAPL", date.today(), recommendation_mean=1.0, target_mean=100.0, multiplier=1.075,
+    )

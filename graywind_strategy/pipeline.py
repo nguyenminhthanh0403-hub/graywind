@@ -5,6 +5,7 @@ in one place is what guarantees backtest and live behavior can't drift
 apart.
 """
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional
 
 import requests
@@ -23,6 +24,13 @@ from graywind_strategy.gates.sentiment_gate import (
     fetch_recent_headlines,
     sentiment_gate,
     sentiment_score,
+)
+from graywind_strategy.gates.analyst_consensus import (
+    AnalystDataUnavailable,
+    analyst_consensus_multiplier,
+    fetch_analyst_consensus,
+    load_cached_multiplier,
+    save_cached_multiplier,
 )
 from graywind_strategy.gates.vix_gate import VIX_THRESHOLD, VixDataUnavailable, fetch_latest_vix, vix_gate
 
@@ -66,6 +74,31 @@ def evaluate_macro_gate(as_of_date, session=requests, required_breaches=2):
     except MacroDataUnavailable:
         return False
     return macro_gate(snapshot, required_breaches)
+
+
+def evaluate_analyst_consensus_multiplier(symbol, as_of_date, current_price):
+    if as_of_date != date.today():
+        # yfinance has no historical point-in-time query -- applying it to a
+        # backtest as_of_date would leak today's analyst opinions into a
+        # historical decision. Neutral is the honest answer for any date
+        # that isn't live "today".
+        return 1.0
+
+    cached = load_cached_multiplier(symbol, as_of_date)
+    if cached is not None:
+        return cached
+
+    try:
+        recommendation_mean, target_mean = fetch_analyst_consensus(symbol)
+    except AnalystDataUnavailable:
+        return 1.0
+
+    multiplier = analyst_consensus_multiplier(recommendation_mean, target_mean, current_price)
+    save_cached_multiplier(
+        symbol, as_of_date,
+        recommendation_mean=recommendation_mean, target_mean=target_mean, multiplier=multiplier,
+    )
+    return multiplier
 
 
 def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
