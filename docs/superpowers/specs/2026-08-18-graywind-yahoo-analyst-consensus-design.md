@@ -149,7 +149,15 @@ confirming it still applies under `gates_always_pass=True`.
 
 `test_backtester.py` needs one new case confirming a historical backtest run gets neutral
 (`1.0`) multipliers throughout — i.e. that the look-ahead-bias guard actually holds end-to-end
-through the real backtester call path, not just at the unit level.
+through the real backtester call path, not just at the unit level. **Implementation note
+(post-merge):** this case was deliberately not added during implementation — every existing
+`test_backtester.py` test mocks `decide_trade` out entirely, so a real end-to-end call would
+break that file's convention. The guard is unit-proven instead
+(`test_evaluate_analyst_consensus_multiplier_returns_neutral_for_non_today_date` in
+`tests/test_pipeline.py`), and every real `run_backtest` call site is confirmed to always pass
+a historical `as_of_date`, never `date.today()`. The final whole-branch review agreed this
+reasoning holds but flagged the missing end-to-end proof as real follow-up work worth closing,
+not a merge blocker — see "Known follow-ups" below.
 
 ## Deferred, not forgotten
 
@@ -157,3 +165,27 @@ through the real backtester call path, not just at the unit level.
 - Any interaction between this multiplier and the existing five gates beyond simple ordering
   (e.g. whether a very bearish consensus should ever escalate to a full block rather than just
   shrinking size) — not raised during brainstorming, not in scope here.
+
+## Known follow-ups (found in final whole-branch review, post-implementation)
+
+Two real issues surfaced only when reviewing the whole feature together — neither blocks this
+merge, both are tracked here so they aren't lost:
+
+- **Cache staleness — the cached multiplier is price-dependent but the cache key isn't.**
+  `multiplier_target` embeds `current_price`, which moves every ~15-minute cycle, but
+  `state/analyst_consensus.csv` is keyed only on `(symbol, date)` and returns the stored
+  multiplier verbatim for the rest of that trading day. Measured example: `recommendation_mean
+  =2.0, target_mean=115` at a 9:30am price of 100 caches `1.1125`; by 3:30pm with price at 114
+  the correct multiplier is `1.0419`, but the cache still returns `1.1125`. Bounded to the
+  `[0.85, 1.15]` sizing range (not a crash or safety issue), but a real sizing-accuracy defect
+  inherited from this spec's own caching design, not an implementation bug. **Fix direction:**
+  the cache already stores `recommendation_mean`/`target_mean` — have
+  `load_cached_multiplier` return those two instead of the precomputed multiplier, and have the
+  caller recompute `analyst_consensus_multiplier(...)` against the live `current_price` every
+  cycle. This still avoids the Yahoo refetch (the actual point of caching) while keeping the
+  price-dependent half live.
+- **Missing end-to-end backtester proof of the look-ahead-bias guard** (see the Testing section
+  note above) — a composition-level test is feasible without new fixtures:
+  `run_backtest(..., gates_always_pass=True)` over historical bars with
+  `graywind_strategy.pipeline.load_cached_multiplier` and `fetch_analyst_consensus` patched,
+  asserting `assert_not_called()` on both through the real `backtester.py` call path.
