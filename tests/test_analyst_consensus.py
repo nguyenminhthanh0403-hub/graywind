@@ -1,3 +1,4 @@
+from datetime import date
 from unittest.mock import MagicMock
 
 import pytest
@@ -6,6 +7,8 @@ from graywind_strategy.gates.analyst_consensus import (
     AnalystDataUnavailable,
     analyst_consensus_multiplier,
     fetch_analyst_consensus,
+    load_cached_multiplier,
+    save_cached_multiplier,
 )
 
 
@@ -105,3 +108,69 @@ def test_fetch_analyst_consensus_raises_on_missing_target_mean_price():
     fake_ticker_factory = MagicMock(return_value=fake_ticker)
     with pytest.raises(AnalystDataUnavailable):
         fetch_analyst_consensus("AAPL", ticker_factory=fake_ticker_factory)
+
+
+def test_load_cached_multiplier_returns_none_when_file_does_not_exist(tmp_path):
+    result = load_cached_multiplier("AAPL", date(2026, 8, 18), state_dir=str(tmp_path))
+    assert result is None
+
+
+def test_save_then_load_round_trips_the_multiplier(tmp_path):
+    save_cached_multiplier(
+        "AAPL", date(2026, 8, 18),
+        recommendation_mean=2.1, target_mean=210.5, multiplier=1.075,
+        state_dir=str(tmp_path),
+    )
+    result = load_cached_multiplier("AAPL", date(2026, 8, 18), state_dir=str(tmp_path))
+    assert result == 1.075
+
+
+def test_load_cached_multiplier_misses_on_a_different_date(tmp_path):
+    save_cached_multiplier(
+        "AAPL", date(2026, 8, 18),
+        recommendation_mean=2.1, target_mean=210.5, multiplier=1.075,
+        state_dir=str(tmp_path),
+    )
+    result = load_cached_multiplier("AAPL", date(2026, 8, 19), state_dir=str(tmp_path))
+    assert result is None
+
+
+def test_load_cached_multiplier_misses_on_a_different_symbol(tmp_path):
+    save_cached_multiplier(
+        "AAPL", date(2026, 8, 18),
+        recommendation_mean=2.1, target_mean=210.5, multiplier=1.075,
+        state_dir=str(tmp_path),
+    )
+    result = load_cached_multiplier("MSFT", date(2026, 8, 18), state_dir=str(tmp_path))
+    assert result is None
+
+
+def test_save_appends_rather_than_overwrites_other_symbols(tmp_path):
+    save_cached_multiplier(
+        "AAPL", date(2026, 8, 18),
+        recommendation_mean=2.1, target_mean=210.5, multiplier=1.075,
+        state_dir=str(tmp_path),
+    )
+    save_cached_multiplier(
+        "MSFT", date(2026, 8, 18),
+        recommendation_mean=1.8, target_mean=420.0, multiplier=1.1,
+        state_dir=str(tmp_path),
+    )
+    assert load_cached_multiplier("AAPL", date(2026, 8, 18), state_dir=str(tmp_path)) == 1.075
+    assert load_cached_multiplier("MSFT", date(2026, 8, 18), state_dir=str(tmp_path)) == 1.1
+
+
+def test_load_cached_multiplier_treats_malformed_row_as_a_miss(tmp_path):
+    os_makedirs_path = tmp_path / "analyst_consensus.csv"
+    os_makedirs_path.write_text(
+        "symbol,date,recommendation_mean,target_mean,multiplier\n"
+        "AAPL,2026-08-18,2.1,210.5,not-a-number\n"
+    )
+    result = load_cached_multiplier("AAPL", date(2026, 8, 18), state_dir=str(tmp_path))
+    assert result is None
+
+
+def test_load_cached_multiplier_treats_corrupt_file_as_a_miss(tmp_path):
+    (tmp_path / "analyst_consensus.csv").write_bytes(b"\xff\xfe\x00\x01not,csv,at,all")
+    result = load_cached_multiplier("AAPL", date(2026, 8, 18), state_dir=str(tmp_path))
+    assert result is None

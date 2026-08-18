@@ -7,7 +7,15 @@ yfinance has no historical point-in-time query and decide_trade is the
 single path both live_loop.py and backtester.py call (see pipeline.py's
 evaluate_analyst_consensus_multiplier for that guard).
 """
+import csv
+import os
+
 import yfinance as yf
+
+from graywind_strategy.state_store import DEFAULT_STATE_DIR
+
+CACHE_FILENAME = "analyst_consensus.csv"
+CACHE_FIELDS = ["symbol", "date", "recommendation_mean", "target_mean", "multiplier"]
 
 REC_MIN, REC_MAX = 1.0, 5.0
 MULTIPLIER_MIN, MULTIPLIER_MAX = 0.85, 1.15
@@ -44,3 +52,35 @@ def fetch_analyst_consensus(symbol, ticker_factory=yf.Ticker):
     if recommendation_mean is None or target_mean is None:
         raise AnalystDataUnavailable(f"missing analyst consensus fields for {symbol}")
     return float(recommendation_mean), float(target_mean)
+
+
+def load_cached_multiplier(symbol, as_of_date, state_dir=DEFAULT_STATE_DIR):
+    path = os.path.join(state_dir, CACHE_FILENAME)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("symbol") == symbol and row.get("date") == as_of_date.isoformat():
+                    return float(row["multiplier"])
+    except Exception:
+        return None
+    return None
+
+
+def save_cached_multiplier(symbol, as_of_date, recommendation_mean, target_mean, multiplier,
+                            state_dir=DEFAULT_STATE_DIR):
+    os.makedirs(state_dir, exist_ok=True)
+    path = os.path.join(state_dir, CACHE_FILENAME)
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CACHE_FIELDS, lineterminator="\n")
+        if write_header:
+            writer.writeheader()
+        writer.writerow({
+            "symbol": symbol,
+            "date": as_of_date.isoformat(),
+            "recommendation_mean": recommendation_mean,
+            "target_mean": target_mean,
+            "multiplier": multiplier,
+        })
