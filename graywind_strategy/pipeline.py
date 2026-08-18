@@ -166,6 +166,8 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
         return TradeDecision(action="hold", reason="invalid price for sizing")
     target_price = position_sizer.take_profit_price(current_price, take_profit_pct)
     shares = position_sizer.shares_to_buy(account_equity, current_price, stop_price)
+    shares = round(shares * evaluate_analyst_consensus_multiplier(
+        symbol=symbol, as_of_date=as_of_date, current_price=current_price))
     if shares <= 0:
         return TradeDecision(action="hold", reason="position size rounds to zero shares")
 

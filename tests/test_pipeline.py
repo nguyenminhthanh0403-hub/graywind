@@ -446,3 +446,51 @@ def test_evaluate_analyst_consensus_multiplier_fetches_scores_and_caches_on_a_mi
     mock_save.assert_called_once_with(
         "AAPL", date.today(), recommendation_mean=1.0, target_mean=100.0, multiplier=1.075,
     )
+
+
+def test_decide_trade_applies_analyst_consensus_multiplier_to_shares_on_a_live_date():
+    with _passing_gates(), \
+         patch("graywind_strategy.pipeline.evaluate_analyst_consensus_multiplier",
+               return_value=1.2) as mock_multiplier:
+        decision = decide_trade(
+            symbol="AAPL",
+            signal="buy",
+            as_of_date=date.today(),
+            current_price=100.0,
+            account_equity=10000.0,
+            pdt_throttle=PDTThrottle(),
+            position_sizer=PositionSizer(risk_fraction=0.01),
+            drawdown_breaker_ok=True,
+            fred_api_key="k",
+            news_client=object(),
+            finnhub_api_key="k",
+        )
+    base_shares = PositionSizer(risk_fraction=0.01).shares_to_buy(10000.0, 100.0, 98.0)
+    assert decision.action == "buy"
+    assert decision.shares == round(base_shares * 1.2)
+    mock_multiplier.assert_called_once_with(
+        symbol="AAPL", as_of_date=date.today(), current_price=100.0
+    )
+
+
+def test_decide_trade_applies_multiplier_even_when_gates_always_pass():
+    with patch("graywind_strategy.pipeline.evaluate_analyst_consensus_multiplier",
+               return_value=0.9) as mock_multiplier:
+        decision = decide_trade(
+            symbol="AAPL",
+            signal="buy",
+            as_of_date=date.today(),
+            current_price=100.0,
+            account_equity=10000.0,
+            pdt_throttle=PDTThrottle(),
+            position_sizer=PositionSizer(risk_fraction=0.01),
+            drawdown_breaker_ok=True,
+            fred_api_key="k",
+            news_client=object(),
+            finnhub_api_key="k",
+            gates_always_pass=True,
+        )
+    base_shares = PositionSizer(risk_fraction=0.01).shares_to_buy(10000.0, 100.0, 98.0)
+    assert decision.action == "buy"
+    assert decision.shares == round(base_shares * 0.9)
+    mock_multiplier.assert_called_once()
