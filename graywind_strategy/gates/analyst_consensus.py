@@ -8,6 +8,7 @@ single path both live_loop.py and backtester.py call (see pipeline.py's
 evaluate_analyst_consensus_multiplier for that guard).
 """
 import csv
+import math
 import os
 
 import yfinance as yf
@@ -47,11 +48,17 @@ def fetch_analyst_consensus(symbol, ticker_factory=yf.Ticker):
         info = ticker_factory(symbol).info
         recommendation_mean = info.get("recommendationMean")
         target_mean = info.get("targetMeanPrice")
+        if recommendation_mean is None or target_mean is None:
+            raise AnalystDataUnavailable(f"missing analyst consensus fields for {symbol}")
+        recommendation_mean = float(recommendation_mean)
+        target_mean = float(target_mean)
+        if not math.isfinite(recommendation_mean) or not math.isfinite(target_mean):
+            raise AnalystDataUnavailable(f"non-finite analyst consensus fields for {symbol}")
+    except AnalystDataUnavailable:
+        raise
     except Exception as exc:
         raise AnalystDataUnavailable(str(exc)) from exc
-    if recommendation_mean is None or target_mean is None:
-        raise AnalystDataUnavailable(f"missing analyst consensus fields for {symbol}")
-    return float(recommendation_mean), float(target_mean)
+    return recommendation_mean, target_mean
 
 
 def load_cached_multiplier(symbol, as_of_date, state_dir=DEFAULT_STATE_DIR):

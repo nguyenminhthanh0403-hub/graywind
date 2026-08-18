@@ -110,6 +110,38 @@ def test_fetch_analyst_consensus_raises_on_missing_target_mean_price():
         fetch_analyst_consensus("AAPL", ticker_factory=fake_ticker_factory)
 
 
+def test_fetch_analyst_consensus_raises_analyst_data_unavailable_on_non_numeric_field():
+    # A real possibility from an unofficial scraper library: Yahoo returns a
+    # non-numeric placeholder like "N/A" instead of omitting the field. The
+    # float() conversion must happen inside the try so this raises
+    # AnalystDataUnavailable, not an unhandled ValueError that would
+    # propagate out of decide_trade.
+    fake_ticker = MagicMock()
+    fake_ticker.info = {"recommendationMean": "N/A", "targetMeanPrice": 210.5}
+    fake_ticker_factory = MagicMock(return_value=fake_ticker)
+    with pytest.raises(AnalystDataUnavailable):
+        fetch_analyst_consensus("AAPL", ticker_factory=fake_ticker_factory)
+
+
+def test_fetch_analyst_consensus_raises_analyst_data_unavailable_on_nan_recommendation_mean():
+    # A NaN would pass the `is None` check and pass float() silently, then
+    # get clamped into an arbitrary extreme bound -- a confidently WRONG
+    # signal. math.isfinite() must catch this and fail open instead.
+    fake_ticker = MagicMock()
+    fake_ticker.info = {"recommendationMean": float("nan"), "targetMeanPrice": 210.5}
+    fake_ticker_factory = MagicMock(return_value=fake_ticker)
+    with pytest.raises(AnalystDataUnavailable):
+        fetch_analyst_consensus("AAPL", ticker_factory=fake_ticker_factory)
+
+
+def test_fetch_analyst_consensus_raises_analyst_data_unavailable_on_nan_target_mean():
+    fake_ticker = MagicMock()
+    fake_ticker.info = {"recommendationMean": 2.1, "targetMeanPrice": float("nan")}
+    fake_ticker_factory = MagicMock(return_value=fake_ticker)
+    with pytest.raises(AnalystDataUnavailable):
+        fetch_analyst_consensus("AAPL", ticker_factory=fake_ticker_factory)
+
+
 def test_load_cached_multiplier_returns_none_when_file_does_not_exist(tmp_path):
     result = load_cached_multiplier("AAPL", date(2026, 8, 18), state_dir=str(tmp_path))
     assert result is None

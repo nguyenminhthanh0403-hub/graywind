@@ -4,4 +4,4 @@ alpaca-py
 vaderSentiment
 requests
 pytest
-yfinance
+yfinance==1.6.0

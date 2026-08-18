@@ -10,6 +10,13 @@ from typing import Optional
 
 import requests
 
+from graywind_strategy.gates.analyst_consensus import (
+    AnalystDataUnavailable,
+    analyst_consensus_multiplier,
+    fetch_analyst_consensus,
+    load_cached_multiplier,
+    save_cached_multiplier,
+)
 from graywind_strategy.gates.earnings_gate import (
     EARNINGS_BLACKOUT_DAYS,
     EarningsDataUnavailable,
@@ -24,13 +31,6 @@ from graywind_strategy.gates.sentiment_gate import (
     fetch_recent_headlines,
     sentiment_gate,
     sentiment_score,
-)
-from graywind_strategy.gates.analyst_consensus import (
-    AnalystDataUnavailable,
-    analyst_consensus_multiplier,
-    fetch_analyst_consensus,
-    load_cached_multiplier,
-    save_cached_multiplier,
 )
 from graywind_strategy.gates.vix_gate import VIX_THRESHOLD, VixDataUnavailable, fetch_latest_vix, vix_gate
 
@@ -77,6 +77,13 @@ def evaluate_macro_gate(as_of_date, session=requests, required_breaches=2):
 
 
 def evaluate_analyst_consensus_multiplier(symbol, as_of_date, current_price):
+    # `as_of_date` is computed by live_loop.py as datetime.now(ET).date() (Eastern
+    # Time), but this guard compares it against date.today() (process-local
+    # timezone). Safe by construction in production: GitHub Actions runs in
+    # UTC, and the live-trading workflow's cron window only fires during
+    # 09:30-16:00 ET, which is always the same UTC calendar day. This would
+    # silently no-op the whole feature (not crash) if ever run from a
+    # differently-timezoned environment during specific hours.
     if as_of_date != date.today():
         # yfinance has no historical point-in-time query -- applying it to a
         # backtest as_of_date would leak today's analyst opinions into a
@@ -94,10 +101,17 @@ def evaluate_analyst_consensus_multiplier(symbol, as_of_date, current_price):
         return 1.0
 
     multiplier = analyst_consensus_multiplier(recommendation_mean, target_mean, current_price)
-    save_cached_multiplier(
-        symbol, as_of_date,
-        recommendation_mean=recommendation_mean, target_mean=target_mean, multiplier=multiplier,
-    )
+    try:
+        save_cached_multiplier(
+            symbol, as_of_date,
+            recommendation_mean=recommendation_mean, target_mean=target_mean, multiplier=multiplier,
+        )
+    except Exception:
+        # Best-effort cache write -- a cache-write failure (disk full,
+        # read-only filesystem, permissions) should cost this cycle's cache,
+        # not the whole trade evaluation. decide_trade must never propagate
+        # an exception.
+        pass
     return multiplier
 
 

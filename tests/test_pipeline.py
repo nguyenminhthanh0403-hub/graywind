@@ -404,13 +404,17 @@ def test_decide_trade_holds_on_degenerate_low_price_instead_of_raising():
 
 def test_evaluate_analyst_consensus_multiplier_returns_neutral_for_non_today_date():
     # Task 11/backtest dates are never date.today() in a real run; this proves the
-    # look-ahead-bias guard without needing to mock fetch or cache at all.
-    with patch("graywind_strategy.pipeline.fetch_analyst_consensus") as mock_fetch:
+    # look-ahead-bias guard without needing to mock fetch or cache at all. The
+    # spec's actual contract is that a non-today date touches NEITHER the
+    # fetcher NOR the cache, so both are asserted not-called here.
+    with patch("graywind_strategy.pipeline.fetch_analyst_consensus") as mock_fetch, \
+         patch("graywind_strategy.pipeline.load_cached_multiplier") as mock_load:
         result = evaluate_analyst_consensus_multiplier(
             symbol="AAPL", as_of_date=date(2024, 1, 8), current_price=100.0
         )
     assert result == 1.0
     mock_fetch.assert_not_called()
+    mock_load.assert_not_called()
 
 
 def test_evaluate_analyst_consensus_multiplier_fails_open_on_fetch_error():
@@ -446,6 +450,21 @@ def test_evaluate_analyst_consensus_multiplier_fetches_scores_and_caches_on_a_mi
     mock_save.assert_called_once_with(
         "AAPL", date.today(), recommendation_mean=1.0, target_mean=100.0, multiplier=1.075,
     )
+
+
+def test_evaluate_analyst_consensus_multiplier_returns_multiplier_when_cache_save_fails():
+    # A cache-write failure (disk full, read-only filesystem, permissions)
+    # must cost this cycle's cache, not the whole trade evaluation.
+    # decide_trade's contract is that it must never propagate an exception.
+    with patch("graywind_strategy.pipeline.load_cached_multiplier", return_value=None), \
+         patch("graywind_strategy.pipeline.fetch_analyst_consensus",
+               return_value=(1.0, 100.0)), \
+         patch("graywind_strategy.pipeline.save_cached_multiplier",
+               side_effect=OSError("disk full")):
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date.today(), current_price=100.0
+        )
+    assert result == 1.075  # Strong Buy, 0% upside -- computed multiplier still returned
 
 
 def test_decide_trade_applies_analyst_consensus_multiplier_to_shares_on_a_live_date():
