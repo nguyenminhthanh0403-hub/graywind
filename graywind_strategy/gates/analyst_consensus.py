@@ -7,15 +7,7 @@ yfinance has no historical point-in-time query and decide_trade is the
 single path both live_loop.py and backtester.py call (see pipeline.py's
 evaluate_analyst_consensus_multiplier for that guard).
 """
-import csv
-import os
-
 import yfinance as yf
-
-from graywind_strategy.state_store import DEFAULT_STATE_DIR
-
-CACHE_FILENAME = "analyst_consensus.csv"
-CACHE_FIELDS = ["symbol", "date", "recommendation_mean", "target_mean", "multiplier"]
 
 REC_MIN, REC_MAX = 1.0, 5.0
 MULTIPLIER_MIN, MULTIPLIER_MAX = 0.85, 1.15
