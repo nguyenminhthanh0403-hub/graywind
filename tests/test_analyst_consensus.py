@@ -174,3 +174,21 @@ def test_load_cached_multiplier_treats_corrupt_file_as_a_miss(tmp_path):
     (tmp_path / "analyst_consensus.csv").write_bytes(b"\xff\xfe\x00\x01not,csv,at,all")
     result = load_cached_multiplier("AAPL", date(2026, 8, 18), state_dir=str(tmp_path))
     assert result is None
+
+
+def test_load_cached_multiplier_skips_malformed_row_and_finds_later_valid_row(tmp_path):
+    # Manually create a malformed row for (AAPL, 2026-08-18)
+    csv_path = tmp_path / "analyst_consensus.csv"
+    csv_path.write_text(
+        "symbol,date,recommendation_mean,target_mean,multiplier\n"
+        "AAPL,2026-08-18,2.1,210.5,not-a-number\n"
+    )
+    # Then append a valid row for the same key
+    save_cached_multiplier(
+        "AAPL", date(2026, 8, 18),
+        recommendation_mean=2.1, target_mean=210.5, multiplier=1.075,
+        state_dir=str(tmp_path),
+    )
+    # The load should skip the malformed row and find the valid one
+    result = load_cached_multiplier("AAPL", date(2026, 8, 18), state_dir=str(tmp_path))
+    assert result == 1.075

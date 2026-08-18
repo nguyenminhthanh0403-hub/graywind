@@ -62,8 +62,13 @@ def load_cached_multiplier(symbol, as_of_date, state_dir=DEFAULT_STATE_DIR):
         with open(path, newline="") as f:
             for row in csv.DictReader(f):
                 if row.get("symbol") == symbol and row.get("date") == as_of_date.isoformat():
-                    return float(row["multiplier"])
+                    try:
+                        return float(row["multiplier"])
+                    except Exception:
+                        # Malformed row for this key; skip and keep scanning
+                        continue
     except Exception:
+        # File-level error (open, decode, or csv.DictReader parsing)
         return None
     return None
 
