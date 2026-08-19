@@ -32,3 +32,36 @@ def test_stop_loss_price():
 
 def test_take_profit_price():
     assert PositionSizer.take_profit_price(entry_price=100, take_profit_pct=0.03) == 103.0
+
+
+def test_shares_to_buy_caps_position_value_below_small_account_threshold():
+    sizer = PositionSizer(risk_fraction=0.01)
+    # Risk-based sizing alone would buy 200 shares ($1,000 = 100% of equity).
+    # Below the $2,000 threshold, the 50% cap should bring it down to 100 shares ($500).
+    shares = sizer.shares_to_buy(account_equity=1000, entry_price=5, stop_price=4.95)
+    assert shares == 100
+
+
+def test_shares_to_buy_leaves_risk_based_sizing_unchanged_when_under_cap():
+    sizer = PositionSizer(risk_fraction=0.01)
+    # Risk-based sizing alone buys 5 shares ($250 = 25% of equity) -- already
+    # under the 50% cap ($500 / $50 = 10 shares), so the cap must not bind.
+    shares = sizer.shares_to_buy(account_equity=1000, entry_price=50, stop_price=48)
+    assert shares == 5
+
+
+def test_shares_to_buy_cap_does_not_apply_exactly_at_threshold():
+    sizer = PositionSizer(risk_fraction=0.01)
+    # Equity exactly at the $2,000 threshold is NOT small-account mode (strict <).
+    # Risk-based sizing alone buys 400 shares ($2,000 = 100% of equity); if the
+    # cap wrongly applied here it would reduce this to 200 shares.
+    shares = sizer.shares_to_buy(account_equity=2000, entry_price=5, stop_price=4.95)
+    assert shares == 400
+
+
+def test_shares_to_buy_unaffected_far_above_threshold():
+    sizer = PositionSizer(risk_fraction=0.01)
+    # Equity far above the $2,000 threshold never enters small-account mode,
+    # regardless of what fraction of equity the resulting position is worth.
+    shares = sizer.shares_to_buy(account_equity=50000, entry_price=100, stop_price=99)
+    assert shares == 500
