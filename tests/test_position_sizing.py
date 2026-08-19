@@ -65,3 +65,18 @@ def test_shares_to_buy_unaffected_far_above_threshold():
     # regardless of what fraction of equity the resulting position is worth.
     shares = sizer.shares_to_buy(account_equity=50000, entry_price=100, stop_price=99)
     assert shares == 500
+
+
+def test_init_raises_on_negative_small_account_threshold():
+    with pytest.raises(ValueError):
+        PositionSizer(small_account_threshold=-100)
+
+
+def test_init_raises_on_zero_small_account_cap_fraction():
+    with pytest.raises(ValueError):
+        PositionSizer(small_account_cap_fraction=0.0)
+
+
+def test_init_raises_on_invalid_small_account_cap_fraction_above_one():
+    with pytest.raises(ValueError):
+        PositionSizer(small_account_cap_fraction=1.5)

@@ -11,6 +11,10 @@ class PositionSizer:
                  small_account_cap_fraction=0.50):
         if not 0 < risk_fraction < 1:
             raise ValueError("risk_fraction must be between 0 and 1")
+        if small_account_threshold < 0:
+            raise ValueError("small_account_threshold must be >= 0")
+        if not 0 < small_account_cap_fraction <= 1:
+            raise ValueError("small_account_cap_fraction must be between 0 and 1 (inclusive)")
         self.risk_fraction = risk_fraction
         self.small_account_threshold = small_account_threshold
         self.small_account_cap_fraction = small_account_cap_fraction

@@ -10,13 +10,18 @@ PDT is a separate, already-implemented risk control and is explicitly out of sco
 
 `PositionSizer.shares_to_buy` sizes purely off risk-to-stop (`account_equity * risk_fraction /
 risk_per_share`), with no cap tying the resulting position's dollar value back to
-`account_equity`. At the equity levels this pipeline has been tested/run against (accounts
-≥ $10,000), that never binds — a single position's value stays a small fraction of equity
-almost by construction. At low equity (e.g. a $500 account trading `AAPL`/`SPY`, both
-high-priced), it can produce a position worth more than the entire account.
+`account_equity`. Under this pipeline's standard config (`stop_pct=0.02`, `risk_fraction=0.01`),
+position value is independent of account size — it stabilizes at ~50% of equity across accounts
+from $500 to $500,000 (worst case ~69% on sub-$1 stocks due to `stop_loss_price`'s 2-decimal
+rounding). However, the formula can still produce positions worth more than the entire account
+when `stop_pct < risk_fraction` (e.g., a tighter stop like 0.5%) or on very cheap stocks ($0.20–$0.50)
+— failure modes that can occur at **any** equity level, not just low equity.
 
 Add a **small-account mode**: below a configured equity threshold, cap a position's value to a
-configured fraction of equity, in addition to the existing risk-based sizing.
+configured fraction of equity, in addition to the existing risk-based sizing. This is a
+deliberately narrow, equity-gated safety net that catches these edge cases specifically for
+smaller accounts, not a complete fix for the general case (which would require changing
+`risk_fraction` or `stop_pct` themselves).
 
 **Out of scope:** PDT (already handled unconditionally by `PDTThrottle`, independent of account
 size). Limiting concurrent open positions. Any change to `risk_fraction` itself or to the
@@ -67,11 +72,13 @@ def shares_to_buy(self, account_equity, entry_price, stop_price):
 `decide_trade` (`pipeline.py:182-186`) applies the Yahoo analyst-consensus multiplier
 *after* `shares_to_buy`, and that multiplier can scale shares up to `1.15x`
 (`docs/superpowers/specs/2026-08-18-graywind-yahoo-analyst-consensus-design.md`). A position
-capped at exactly 50% of equity can end up at up to ~57.5% of equity after the multiplier is
-applied. This design does not re-clamp post-multiplier — the cap is a coarse safety rail
-against the "position worth more than the whole account" failure mode, not a hard guarantee of
-an exact percentage, and re-clamping would add a second cap-application site for a ~7.5-point
-overshoot. Noted here explicitly so it isn't mistaken for an oversight later.
+capped at exactly 50% of equity can end up at up to ~62.5% of equity after the multiplier is
+applied, because `round()` on small integer share counts can exceed the raw 1.15x multiplier
+(e.g., 4 capped shares → `round(4 * 1.15) = round(4.6) = 5`, a 1.25x scale-up). This design
+does not re-clamp post-multiplier — the cap is a coarse safety rail against the "position
+worth more than the whole account" failure mode, not a hard guarantee of an exact percentage,
+and re-clamping would add a second cap-application site for overshoot. Noted here explicitly
+so it isn't mistaken for an oversight later.
 
 ## Testing
 
@@ -93,3 +100,6 @@ No changes needed to `tests/test_pipeline.py` or `tests/test_backtester.py` — 
 - Re-clamping position value after the analyst-consensus multiplier (see "Known interaction"
   above).
 - Any small-account-specific change to `risk_fraction` itself.
+- A value cap keyed to `risk_fraction/stop_pct` (or an unconditional cap) instead of to
+  account equity, which would target the actual failure mode identified in the corrected Goal
+  section above, rather than gating on account size.
