@@ -1,3 +1,4 @@
 timestamp,symbol,side,qty,price,reason
 2026-08-17T09:39:55.476224-04:00,AAPL,buy,163,305.395,all checks passed
 2026-08-19T09:45:17.009005-04:00,SPY,buy,65,770.15,all checks passed
+2026-08-19T10:19:10.984350-04:00,AAPL,sell,163,317.52,stop/target exit
