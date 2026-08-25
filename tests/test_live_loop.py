@@ -396,6 +396,10 @@ def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state") as mock_save_state, \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
          patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")) as mock_decide, \
@@ -444,6 +448,10 @@ def test_get_account_exception_leaves_day_and_starting_equity_unchanged():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state") as mock_save_state, \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
          patch("live_loop.write_cycle_export"):
         try:
             live_loop.main()
@@ -484,6 +492,10 @@ def test_successful_equity_read_updates_day_and_starting_equity_normally():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state") as mock_save_state, \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
          patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
@@ -517,6 +529,10 @@ def test_main_calls_write_cycle_export_after_save_state():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
          patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
@@ -549,6 +565,10 @@ def test_process_symbol_cycle_passes_confirmation_bars_to_compute_signals():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
          patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")) as mock_compute, \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
@@ -565,35 +585,88 @@ def test_process_symbol_cycle_passes_confirmation_bars_to_compute_signals():
         assert isinstance(call.kwargs["confirmation_bars"], pd.Series)
 
 
+def test_main_passes_loaded_tier_pools_to_process_symbol():
+    # Final-review CRITICAL fix: main()'s only real call site must thread
+    # tier_pools=tier_pools into process_symbol(), or Task 3's entire
+    # tier-scoped sizing/settlement path is unreachable in production no
+    # matter what SYMBOL_TIER ends up populated with. process_symbol itself
+    # is mocked here (its behavior when tier_pools IS passed is already
+    # fully covered by the tier-scoped tests below) -- this test pins only
+    # the wiring: that main() forwards the exact object load_tier_pools()
+    # returned, as a tier_pools= kwarg, to every WATCHLIST symbol's call.
+    fake_account = MagicMock()
+    fake_account.equity = "10000.0"
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+    fake_state = {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}
+    fake_tier_pools = {1: 700.0, 2: 200.0, 3: 100.0}
+
+    def fake_fetch_bars(client, symbol, start, end):
+        return [_FakeBar(100.0, datetime(2024, 1, 8, 10, 0, tzinfo=ET))]
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+         }), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.load_state", return_value=fake_state), \
+         patch("live_loop.save_state"), \
+         patch("live_loop.load_tier_pools", return_value=fake_tier_pools), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
+         patch("live_loop.should_rebalance_this_month", return_value=False), \
+         patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
+         patch("live_loop.process_symbol") as mock_process_symbol, \
+         patch("live_loop.write_cycle_export"):
+        live_loop.main()
+
+    assert mock_process_symbol.call_count == len(live_loop.WATCHLIST)
+    for call in mock_process_symbol.call_args_list:
+        assert call.kwargs["tier_pools"] is fake_tier_pools
+
+
 # --- tier-scoped equity/cash settlement (sub-project 2a/2b)
 
 def test_process_symbol_uses_tier_equity_for_sizing_when_tagged():
-    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 1}, clear=True):
+    # Tier 2 (not tier 1): tier 1 is spec'd to never reach process_symbol at
+    # all (buy-and-hold only, via run_tier1_rebalance) -- using tier 1 here
+    # would exercise/normalize exactly the double-routing the spec forbids.
+    # See tier_config.py's SYMBOL_TIER/TIER1_SYMBOL_WEIGHTS disjointness
+    # assertion (final-review Fix 4).
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True):
         mock_decide, _, _, _, _ = _call(
             symbol="AAPL", signal="buy", equity=10000.0,
-            tier_pools={1: 500.0, 2: 0.0, 3: 0.0},
+            tier_pools={1: 0.0, 2: 500.0, 3: 0.0},
         )
     assert mock_decide.call_args.kwargs["account_equity"] == 500.0
 
 
 def test_process_symbol_falls_back_to_global_equity_when_untagged():
+    # Deliberately untagged (not tier 1 or tier 2) -- this test exercises
+    # the "symbol absent from SYMBOL_TIER entirely" fallback path, distinct
+    # from the tier-2-tagged tests below.
     with patch.dict("live_loop.SYMBOL_TIER", {}, clear=True):
         mock_decide, _, _, _, _ = _call(
             symbol="AAPL", signal="buy", equity=10000.0,
-            tier_pools={1: 500.0, 2: 0.0, 3: 0.0},
+            tier_pools={1: 0.0, 2: 500.0, 3: 0.0},
         )
     assert mock_decide.call_args.kwargs["account_equity"] == 10000.0
 
 
 def test_process_symbol_falls_back_to_global_equity_when_tier_pools_not_passed():
-    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 1}, clear=True):
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True):
         mock_decide, _, _, _, _ = _call(symbol="AAPL", signal="buy", equity=10000.0)
     assert mock_decide.call_args.kwargs["account_equity"] == 10000.0
 
 
 def test_process_symbol_buy_decrements_tier_pool_cash():
-    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 1}, clear=True):
-        tier_pools = {1: 500.0, 2: 0.0, 3: 0.0}
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True):
+        tier_pools = {1: 0.0, 2: 500.0, 3: 0.0}
         _call(
             symbol="AAPL", signal="buy", current_price=100.0, equity=10000.0,
             tier_pools=tier_pools,
@@ -602,28 +675,28 @@ def test_process_symbol_buy_decrements_tier_pool_cash():
                 shares=2.0, stop_price=95.0, target_price=110.0,
             ),
         )
-    assert tier_pools[1] == 300.0  # 500.0 - 2.0 * 100.0
+    assert tier_pools[2] == 300.0  # 500.0 - 2.0 * 100.0
 
 
 def test_process_symbol_stop_exit_increments_tier_pool_cash():
-    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 1}, clear=True):
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True):
         open_positions = {"AAPL": _position(shares=2.0, stop=98.0, target=103.0)}
-        tier_pools = {1: 500.0, 2: 0.0, 3: 0.0}
+        tier_pools = {1: 0.0, 2: 500.0, 3: 0.0}
         _call(
             symbol="AAPL", current_price=97.0, open_positions=open_positions,
             tier_pools=tier_pools,
         )
-    assert tier_pools[1] == 694.0  # 500.0 + 2.0 * 97.0
+    assert tier_pools[2] == 694.0  # 500.0 + 2.0 * 97.0
 
 
 def test_process_symbol_tier_equity_includes_other_same_tier_positions():
-    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 1, "BND": 1}, clear=True):
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2, "BND": 2}, clear=True):
         open_positions = {
             "BND": {"entry_price": 50.0, "shares": 4.0, "stop": 45.0, "target": 60.0, "opened_date": "2024-01-08"},
         }
         mock_decide, _, _, _, _ = _call(
             symbol="AAPL", signal="buy", open_positions=open_positions,
-            tier_pools={1: 500.0, 2: 0.0, 3: 0.0},
+            tier_pools={1: 0.0, 2: 500.0, 3: 0.0},
         )
     assert mock_decide.call_args.kwargs["account_equity"] == 700.0  # 500.0 cash + 50.0*4.0 committed
 

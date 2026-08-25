@@ -19,6 +19,8 @@ class RebalanceOrder:
 
 def compute_rebalance_orders(tier1_equity, current_holdings, current_prices, target_weights,
                               drift_threshold=DRIFT_THRESHOLD):
+    if tier1_equity <= 0:
+        return []
     orders = []
     for symbol, weight in target_weights.items():
         if symbol not in current_prices:

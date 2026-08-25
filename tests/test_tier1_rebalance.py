@@ -78,6 +78,33 @@ def test_multiple_symbols_produce_independent_orders():
     ]
 
 
+def test_no_order_and_no_exception_when_tier1_equity_is_zero():
+    # tier1_equity == 0.0 is the actual shipped default (state/tier_pools.csv
+    # before a human manually seeds real starting cash) -- without a guard
+    # this raises ZeroDivisionError inside the drift computation, which
+    # main() silently swallows, producing a permanent no-op every month.
+    orders = compute_rebalance_orders(
+        tier1_equity=0.0,
+        current_holdings={"VTI": 0.0},
+        current_prices={"VTI": 100.0},
+        target_weights={"VTI": 1.0},
+    )
+    assert orders == []
+
+
+def test_no_order_and_no_exception_when_tier1_equity_is_negative():
+    # A negative tier1_equity would otherwise sign-flip the drift computation
+    # and corrupt the pool's cash in the wrong direction -- must be rejected
+    # outright, not "handled" by the normal drift math.
+    orders = compute_rebalance_orders(
+        tier1_equity=-100.0,
+        current_holdings={"VTI": 0.0},
+        current_prices={"VTI": 100.0},
+        target_weights={"VTI": 1.0},
+    )
+    assert orders == []
+
+
 # --- should_rebalance_this_month
 
 def test_should_rebalance_when_never_rebalanced():

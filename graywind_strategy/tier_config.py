@@ -15,3 +15,8 @@ SYMBOL_TIER = {}  # symbol -> 1 | 2 | 3
 TIER_TARGET_WEIGHTS = {1: 0.70, 2: 0.20, 3: 0.10}  # fraction of total account capital
 
 TIER1_SYMBOL_WEIGHTS = {}  # symbol -> target weight within tier 1 (should sum to 1.0 once populated)
+
+assert not (set(SYMBOL_TIER) & set(TIER1_SYMBOL_WEIGHTS)), (
+    "SYMBOL_TIER and TIER1_SYMBOL_WEIGHTS must be disjoint -- a symbol cannot be both "
+    "an intraday tier-2/3 symbol and a tier-1 buy-and-hold symbol"
+)

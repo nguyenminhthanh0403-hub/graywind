@@ -372,7 +372,7 @@ def main():
                     finnhub_api_key=finnhub_api_key, trading_client=trading_client,
                     drawdown_breaker=drawdown_breaker,
                     cycle_timestamp=cycle_timestamp, cycle_trades=cycle_trades,
-                    symbol_statuses=symbol_statuses,
+                    symbol_statuses=symbol_statuses, tier_pools=tier_pools,
                 )
             except Exception as exc:
                 print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)
