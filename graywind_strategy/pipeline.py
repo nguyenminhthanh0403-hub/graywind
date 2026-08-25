@@ -25,6 +25,7 @@ from graywind_strategy.gates.earnings_gate import (
 )
 from graywind_strategy.gates.macro_gate import MacroDataUnavailable, fetch_bullion_macro_snapshot, macro_gate
 from graywind_strategy.gates.sector_gates import evaluate_sector_gates
+from graywind_strategy.risk.position_sizing import QTY_DECIMALS
 from graywind_strategy.gates.sentiment_gate import (
     SENTIMENT_THRESHOLD,
     SentimentDataUnavailable,
@@ -39,7 +40,7 @@ from graywind_strategy.gates.vix_gate import VIX_THRESHOLD, VixDataUnavailable, 
 class TradeDecision:
     action: str  # "buy" | "hold" | "blocked"
     reason: str
-    shares: Optional[int] = None
+    shares: Optional[float] = None
     stop_price: Optional[float] = None
     target_price: Optional[float] = None
 
@@ -181,7 +182,7 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
     target_price = position_sizer.take_profit_price(current_price, take_profit_pct)
     shares = position_sizer.shares_to_buy(account_equity, current_price, stop_price)
     shares = round(shares * evaluate_analyst_consensus_multiplier(
-        symbol=symbol, as_of_date=as_of_date, current_price=current_price))
+        symbol=symbol, as_of_date=as_of_date, current_price=current_price), QTY_DECIMALS)
     if shares <= 0:
         return TradeDecision(action="hold", reason="position size rounds to zero shares")
 

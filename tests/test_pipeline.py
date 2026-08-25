@@ -97,7 +97,7 @@ def test_decide_trade_buys_when_signal_and_all_gates_and_risk_checks_pass():
             current_price=100.0,
             account_equity=10000.0,
             pdt_throttle=PDTThrottle(),
-            position_sizer=PositionSizer(risk_fraction=0.01),
+            position_sizer=PositionSizer(),
             drawdown_breaker_ok=True,
             fred_api_key="k",
             news_client=object(),
@@ -109,7 +109,7 @@ def test_decide_trade_buys_when_signal_and_all_gates_and_risk_checks_pass():
     assert decision.action == "buy"
     assert decision.stop_price == PositionSizer.stop_loss_price(100.0, 0.02) == 98.0
     assert decision.target_price == PositionSizer.take_profit_price(100.0, 0.03) == 103.0
-    assert decision.shares == PositionSizer(risk_fraction=0.01).shares_to_buy(10000.0, 100.0, 98.0) == 50
+    assert decision.shares == PositionSizer().shares_to_buy(10000.0, 100.0, 98.0) == 50
 
 
 def test_decide_trade_holds_on_non_buy_signal():
@@ -121,7 +121,7 @@ def test_decide_trade_holds_on_non_buy_signal():
             current_price=100.0,
             account_equity=10000.0,
             pdt_throttle=PDTThrottle(),
-            position_sizer=PositionSizer(risk_fraction=0.01),
+            position_sizer=PositionSizer(),
             drawdown_breaker_ok=True,
             fred_api_key="k",
             news_client=object(),
@@ -139,7 +139,7 @@ def test_decide_trade_blocks_when_drawdown_breaker_tripped():
             current_price=100.0,
             account_equity=10000.0,
             pdt_throttle=PDTThrottle(),
-            position_sizer=PositionSizer(risk_fraction=0.01),
+            position_sizer=PositionSizer(),
             drawdown_breaker_ok=False,
             fred_api_key="k",
             news_client=object(),
@@ -160,7 +160,7 @@ def test_decide_trade_blocks_when_drawdown_breaker_state_unknown():
             current_price=100.0,
             account_equity=10000.0,
             pdt_throttle=PDTThrottle(),
-            position_sizer=PositionSizer(risk_fraction=0.01),
+            position_sizer=PositionSizer(),
             drawdown_breaker_ok=None,
             fred_api_key="k",
             news_client=object(),
@@ -182,7 +182,7 @@ def test_decide_trade_blocks_when_pdt_throttle_exhausted():
             current_price=100.0,
             account_equity=10000.0,
             pdt_throttle=throttle,
-            position_sizer=PositionSizer(risk_fraction=0.01),
+            position_sizer=PositionSizer(),
             drawdown_breaker_ok=True,
             fred_api_key="k",
             news_client=object(),
@@ -211,7 +211,7 @@ def test_decide_trade_blocks_on_pdt_throttle_when_pending_same_day_trades_would_
             current_price=100.0,
             account_equity=10000.0,
             pdt_throttle=throttle,
-            position_sizer=PositionSizer(risk_fraction=0.01),
+            position_sizer=PositionSizer(),
             drawdown_breaker_ok=True,
             fred_api_key="k",
             news_client=object(),
@@ -232,7 +232,7 @@ def test_decide_trade_blocks_on_vix_gate_failure():
         decision = decide_trade(
             symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
             current_price=100.0, account_equity=10000.0,
-            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(risk_fraction=0.01),
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
         )
     assert decision.action == "blocked"
@@ -250,7 +250,7 @@ def test_decide_trade_blocks_on_sentiment_gate_failure():
         decision = decide_trade(
             symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
             current_price=100.0, account_equity=10000.0,
-            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(risk_fraction=0.01),
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
         )
     assert decision.action == "blocked"
@@ -268,7 +268,7 @@ def test_decide_trade_blocks_on_earnings_gate_failure():
         decision = decide_trade(
             symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
             current_price=100.0, account_equity=10000.0,
-            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(risk_fraction=0.01),
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
         )
     assert decision.action == "blocked"
@@ -286,7 +286,7 @@ def test_decide_trade_blocks_on_macro_gate_failure():
         decision = decide_trade(
             symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
             current_price=100.0, account_equity=10000.0,
-            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(risk_fraction=0.01),
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
         )
     assert decision.action == "blocked"
@@ -305,7 +305,7 @@ def test_decide_trade_blocks_on_sector_gate_failure():
         decision = decide_trade(
             symbol="XOM", signal="buy", as_of_date=date(2024, 1, 8),
             current_price=100.0, account_equity=10000.0,
-            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(risk_fraction=0.01),
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
         )
     assert decision.action == "blocked"
@@ -323,7 +323,7 @@ def test_decide_trade_short_circuits_before_later_gates_on_vix_block():
         decide_trade(
             symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
             current_price=100.0, account_equity=10000.0,
-            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(risk_fraction=0.01),
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
         )
     vix_mock.assert_called_once()
@@ -336,7 +336,7 @@ def test_decide_trade_holds_when_position_size_rounds_to_zero():
         decision = decide_trade(
             symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
             current_price=100.0, account_equity=1.0,  # tiny equity -> 0 shares
-            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(risk_fraction=0.01),
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
         )
     assert decision.action == "hold"
@@ -371,7 +371,7 @@ def test_decide_trade_gates_always_pass_bypasses_gates_and_reaches_risk_checks()
             current_price=100.0,
             account_equity=10000.0,
             pdt_throttle=PDTThrottle(),
-            position_sizer=PositionSizer(risk_fraction=0.01),
+            position_sizer=PositionSizer(),
             drawdown_breaker_ok=True,
             fred_api_key="k",
             news_client=object(),
@@ -395,7 +395,7 @@ def test_decide_trade_holds_on_degenerate_low_price_instead_of_raising():
         decision = decide_trade(
             symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
             current_price=0.10, account_equity=10000.0,
-            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(risk_fraction=0.01),
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
         )
     assert decision.action == "hold"
@@ -478,15 +478,15 @@ def test_decide_trade_applies_analyst_consensus_multiplier_to_shares_on_a_live_d
             current_price=100.0,
             account_equity=10000.0,
             pdt_throttle=PDTThrottle(),
-            position_sizer=PositionSizer(risk_fraction=0.01),
+            position_sizer=PositionSizer(),
             drawdown_breaker_ok=True,
             fred_api_key="k",
             news_client=object(),
             finnhub_api_key="k",
         )
-    base_shares = PositionSizer(risk_fraction=0.01).shares_to_buy(10000.0, 100.0, 98.0)
+    base_shares = PositionSizer().shares_to_buy(10000.0, 100.0, 98.0)
     assert decision.action == "buy"
-    assert decision.shares == round(base_shares * 1.2)
+    assert decision.shares == round(base_shares * 1.2, 4)
     mock_multiplier.assert_called_once_with(
         symbol="AAPL", as_of_date=date.today(), current_price=100.0
     )
@@ -502,14 +502,37 @@ def test_decide_trade_applies_multiplier_even_when_gates_always_pass():
             current_price=100.0,
             account_equity=10000.0,
             pdt_throttle=PDTThrottle(),
-            position_sizer=PositionSizer(risk_fraction=0.01),
+            position_sizer=PositionSizer(),
             drawdown_breaker_ok=True,
             fred_api_key="k",
             news_client=object(),
             finnhub_api_key="k",
             gates_always_pass=True,
         )
-    base_shares = PositionSizer(risk_fraction=0.01).shares_to_buy(10000.0, 100.0, 98.0)
+    base_shares = PositionSizer().shares_to_buy(10000.0, 100.0, 98.0)
     assert decision.action == "buy"
-    assert decision.shares == round(base_shares * 0.9)
+    assert decision.shares == round(base_shares * 0.9, 4)
     mock_multiplier.assert_called_once()
+
+
+def test_decide_trade_preserves_fractional_precision_through_multiplier():
+    # base_shares (10000 equity, $2 risk-per-share) = 50.0; a multiplier that
+    # isn't a clean divisor proves the result isn't silently collapsed to an
+    # integer the way round(x) with no ndigits would.
+    with _passing_gates(), \
+         patch("graywind_strategy.pipeline.evaluate_analyst_consensus_multiplier",
+               return_value=1.111):
+        decision = decide_trade(
+            symbol="AAPL",
+            signal="buy",
+            as_of_date=date.today(),
+            current_price=100.0,
+            account_equity=10000.0,
+            pdt_throttle=PDTThrottle(),
+            position_sizer=PositionSizer(),
+            drawdown_breaker_ok=True,
+            fred_api_key="k",
+            news_client=object(),
+            finnhub_api_key="k",
+        )
+    assert decision.shares == 55.55  # 50.0 * 1.111 = 55.55

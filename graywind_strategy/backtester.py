@@ -13,7 +13,7 @@ from graywind_strategy import volatility
 from graywind_strategy.pipeline import decide_trade
 from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
-from graywind_strategy.risk.position_sizing import PositionSizer
+from graywind_strategy.risk.position_sizing import QTY_DECIMALS, PositionSizer
 from graywind_strategy.strategy_engine import compute_signals
 
 # This project's bars are always 15-minute, ~6.5-hour-session bars (Task 5's
@@ -117,7 +117,7 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
             k = volatility.confirmation_bars_series(df)
         signals_by_symbol[symbol] = compute_signals(df, confirmation_bars=k)
     pdt_throttle = PDTThrottle()
-    position_sizer = PositionSizer(risk_fraction=0.01)
+    position_sizer = PositionSizer()
     drawdown_breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
 
     all_rows = []
@@ -198,7 +198,7 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                         p["entry_price"] * p["shares"] for p in open_positions.values()
                     )
                     available_cash = equity - committed_capital
-                    shares = min(decision.shares, int(available_cash // open_price)) if open_price > 0 else 0
+                    shares = min(decision.shares, round(available_cash / open_price, QTY_DECIMALS)) if open_price > 0 else 0
                     if shares > 0:
                         open_positions[symbol] = {
                             "entry_price": open_price, "shares": shares,

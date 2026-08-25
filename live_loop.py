@@ -249,7 +249,7 @@ def main():
     open_positions = state["open_positions"]
     open_positions = reconcile_positions(trading_client, open_positions)
     drawdown_breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
-    position_sizer = PositionSizer(risk_fraction=0.01)
+    position_sizer = PositionSizer()
     # Default to whatever was already persisted so the `finally` below has
     # something safe to write back even if get_account() itself raises
     # before a fresh starting_equity reading is ever computed -- in that

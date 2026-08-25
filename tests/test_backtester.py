@@ -308,6 +308,31 @@ def test_run_backtest_skips_a_buy_when_no_cash_is_left_after_earlier_same_bar_fi
     assert symbols_bought == {"AAPL"}  # SPY's buy had no cash left to fund it
 
 
+def test_run_backtest_clamp_preserves_fractional_shares_when_cash_is_not_an_exact_multiple():
+    # Same clamp as the two tests above, but the leftover cash ($400) doesn't
+    # divide evenly by SPY's price ($120) -- the clamp must keep the
+    # fractional remainder (3.3333 shares) instead of flooring it to 3,
+    # matching the fractional-share support added to PositionSizer.
+    t1 = pd.Timestamp("2024-01-08 09:30:00")
+    t2 = pd.Timestamp("2024-01-08 09:45:00")
+    df_by_symbol = {
+        "AAPL": pd.DataFrame({"time": [t1, t2], "open": [99.0, 100.0], "close": [100.0, 100.0]}),
+        "SPY": pd.DataFrame({"time": [t1, t2], "open": [99.0, 120.0], "close": [120.0, 120.0]}),
+    }
+
+    def fake_decide_trade(**kwargs):
+        return TradeDecision(
+            action="buy", reason="test", shares=6, stop_price=1.0, target_price=9999.0
+        )
+
+    with patch("graywind_strategy.backtester.decide_trade", side_effect=fake_decide_trade):
+        result = run_backtest(df_by_symbol, starting_equity=1000.0)
+
+    buys_by_symbol = {t["symbol"]: t for t in result.trades if t["action"] == "buy"}
+    assert buys_by_symbol["AAPL"]["shares"] == 6  # first mover: 6 @ $100 = $600, leaves $400
+    assert buys_by_symbol["SPY"]["shares"] == 3.3333  # $400 / $120 = 3.3333..., not floored to 3
+
+
 def test_run_backtest_passes_a_confirmation_bars_series_from_volatility_module():
     times = pd.to_datetime([
         "2024-01-08 09:30:00", "2024-01-08 09:45:00", "2024-01-08 10:00:00",

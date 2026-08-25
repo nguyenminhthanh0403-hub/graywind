@@ -37,7 +37,7 @@ def load_state(state_dir=DEFAULT_STATE_DIR):
             for row in csv.DictReader(f):
                 state["open_positions"][row["symbol"]] = {
                     "entry_price": float(row["entry_price"]),
-                    "shares": int(row["shares"]),
+                    "shares": float(row["shares"]),
                     "stop": float(row["stop"]),
                     "target": float(row["target"]),
                     "opened_date": row["opened_date"],

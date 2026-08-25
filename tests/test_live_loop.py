@@ -201,7 +201,7 @@ def test_pending_same_day_trades_real_decide_trade_blocks_when_reservation_hits_
         process_symbol(
             symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
             open_positions=open_positions, equity=10000.0,
-            pdt_throttle=throttle, position_sizer=PositionSizer(risk_fraction=0.01),
+            pdt_throttle=throttle, position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(),
             finnhub_api_key="k", trading_client=trading_client,
             drawdown_breaker=MagicMock(),
@@ -224,7 +224,7 @@ def test_pending_same_day_trades_real_decide_trade_allows_when_reservation_under
         process_symbol(
             symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
             open_positions=open_positions, equity=10000.0,
-            pdt_throttle=throttle, position_sizer=PositionSizer(risk_fraction=0.01),
+            pdt_throttle=throttle, position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(),
             finnhub_api_key="k", trading_client=trading_client,
             drawdown_breaker=MagicMock(),

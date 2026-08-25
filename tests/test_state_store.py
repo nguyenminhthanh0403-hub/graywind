@@ -52,6 +52,16 @@ def test_save_then_load_round_trips_multiple_open_positions(tmp_path):
     assert state["open_positions"]["SPY"]["shares"] == 5
 
 
+def test_save_then_load_round_trips_fractional_shares(tmp_path):
+    state_dir = str(tmp_path)
+    save_state({
+        "day_trade_dates": [], "day": "2024-01-08", "starting_equity": 1000.0,
+        "open_positions": {"AAPL": {"entry_price": 150.0, "shares": 3.4567, "stop": 147.0, "target": 154.5, "opened_date": "2024-01-08"}},
+    }, state_dir=state_dir)
+    state = load_state(state_dir=state_dir)
+    assert state["open_positions"]["AAPL"]["shares"] == 3.4567
+
+
 def test_save_then_load_round_trips_empty_open_positions(tmp_path):
     state_dir = str(tmp_path)
     save_state({
