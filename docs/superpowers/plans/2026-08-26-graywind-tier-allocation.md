@@ -783,5 +783,13 @@ execution, not by reading" discipline: after pushing to `main`, check the next l
 run log (`gh run view` or the GitHub Actions UI) for the line
 `ERROR: one or more required API keys` (should NOT appear — unrelated regression check) and
 confirm no new `tier1 rebalance: error` line appears in the log. `state/tier_pools.csv` and
-`state/tier1_rebalance.csv` should appear in that cycle's commit, both showing `0.0`/empty
-values, proving the new save calls are wired in without needing 2c's symbol picks first.
+`state/tier1_rebalance.csv` should appear in that cycle's commit, proving the new save calls
+are wired in without needing 2c's symbol picks first. **Correction found during Task 4's
+review:** `tier_pools.csv` will show `0.0` for all three tiers, but `tier1_rebalance.csv`
+will NOT be empty — an empty `TIER1_SYMBOL_WEIGHTS` still makes `run_tier1_rebalance` *succeed*
+(it returns `[]`, not an exception), so `last_rebalance_month` gets stamped with the real
+current month on the very first cycle. Seeing that stamp is the success signal, not a bug —
+an *empty* value there would actually mean the trigger never fired. (One real consequence,
+harmless but worth knowing: if 2c populates `TIER1_SYMBOL_WEIGHTS` mid-month, the first real
+rebalance is deferred to the following month, since the current month was already stamped by
+this inert run.)
