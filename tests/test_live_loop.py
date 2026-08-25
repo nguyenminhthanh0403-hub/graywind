@@ -10,7 +10,7 @@ from graywind_strategy.pipeline import TradeDecision
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 import live_loop
-from live_loop import is_market_hours, process_symbol
+from live_loop import is_market_hours, process_symbol, run_tier1_rebalance
 
 ET = ZoneInfo("America/New_York")
 
@@ -626,3 +626,45 @@ def test_process_symbol_tier_equity_includes_other_same_tier_positions():
             tier_pools={1: 500.0, 2: 0.0, 3: 0.0},
         )
     assert mock_decide.call_args.kwargs["account_equity"] == 700.0  # 500.0 cash + 50.0*4.0 committed
+
+
+# --- run_tier1_rebalance (sub-project 2b)
+
+def test_run_tier1_rebalance_returns_empty_when_no_tier1_symbols():
+    with patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {}, clear=True):
+        orders = run_tier1_rebalance(MagicMock(), MagicMock(), {1: 700.0, 2: 0.0, 3: 0.0})
+    assert orders == []
+
+
+def test_run_tier1_rebalance_submits_orders_and_updates_tier_pool_cash():
+    fake_bar = MagicMock(close=100.0)
+    trading_client = MagicMock()
+    trading_client.get_all_positions.return_value = [MagicMock(symbol="VTI", qty="5")]
+    tier_pools = {1: 200.0, 2: 0.0, 3: 0.0}
+    with patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"VTI": 1.0}, clear=True), \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]):
+        orders = run_tier1_rebalance(trading_client, MagicMock(), tier_pools)
+    # tier1_equity = 200.0 cash + 5.0 held * 100.0 price = 700.0
+    # target_value = 700.0 * 1.0 = 700.0; current_value = 5.0 * 100.0 = 500.0
+    # drift = (500.0 - 700.0) / 700.0 =~ -0.286 < -0.05 -> buy (700-500)/100 = 2.0 shares
+    assert len(orders) == 1
+    assert orders[0].symbol == "VTI"
+    assert orders[0].side == "buy"
+    assert orders[0].qty == 2.0
+    trading_client.submit_order.assert_called_once()
+    submitted = trading_client.submit_order.call_args[0][0]
+    assert submitted.symbol == "VTI"
+    assert submitted.side == OrderSide.BUY
+    assert tier_pools[1] == 0.0  # 200.0 - 2.0 * 100.0
+
+
+def test_run_tier1_rebalance_skips_symbol_with_no_recent_bars():
+    trading_client = MagicMock()
+    trading_client.get_all_positions.return_value = []
+    tier_pools = {1: 700.0, 2: 0.0, 3: 0.0}
+    with patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"VTI": 1.0}, clear=True), \
+         patch("live_loop.fetch_bars", return_value=[]):
+        orders = run_tier1_rebalance(trading_client, MagicMock(), tier_pools)
+    assert orders == []
+    trading_client.submit_order.assert_not_called()
+    assert tier_pools[1] == 700.0  # untouched
