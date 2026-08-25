@@ -1,7 +1,10 @@
 import csv
 import os
 
-from graywind_strategy.state_store import load_state, save_state
+from graywind_strategy.state_store import (
+    load_state, save_state, load_tier_pools, save_tier_pools,
+    load_rebalance_state, save_rebalance_state,
+)
 
 
 def test_load_state_returns_empty_defaults_when_no_files_exist(tmp_path):
@@ -139,3 +142,27 @@ def test_saved_csvs_use_bare_lf_not_crlf(tmp_path):
     for filename in ("operational.csv", "positions.csv"):
         content = open(os.path.join(state_dir, filename), "rb").read()
         assert b"\r\n" not in content, f"{filename} contains CRLF line endings"
+
+
+def test_load_tier_pools_returns_zero_defaults_when_no_file_exists(tmp_path):
+    tier_pools = load_tier_pools(state_dir=str(tmp_path / "nonexistent"))
+    assert tier_pools == {1: 0.0, 2: 0.0, 3: 0.0}
+
+
+def test_save_then_load_round_trips_tier_pools(tmp_path):
+    state_dir = str(tmp_path)
+    save_tier_pools({1: 700.0, 2: 200.0, 3: 100.0}, state_dir=state_dir)
+    tier_pools = load_tier_pools(state_dir=state_dir)
+    assert tier_pools == {1: 700.0, 2: 200.0, 3: 100.0}
+
+
+def test_load_rebalance_state_returns_none_when_no_file_exists(tmp_path):
+    rebalance_state = load_rebalance_state(state_dir=str(tmp_path / "nonexistent"))
+    assert rebalance_state == {"last_rebalance_month": None}
+
+
+def test_save_then_load_round_trips_rebalance_state(tmp_path):
+    state_dir = str(tmp_path)
+    save_rebalance_state({"last_rebalance_month": "2026-08"}, state_dir=state_dir)
+    rebalance_state = load_rebalance_state(state_dir=state_dir)
+    assert rebalance_state == {"last_rebalance_month": "2026-08"}

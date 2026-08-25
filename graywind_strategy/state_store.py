@@ -17,6 +17,10 @@ OPERATIONAL_FILENAME = "operational.csv"
 POSITIONS_FILENAME = "positions.csv"
 OPERATIONAL_FIELDS = ["day", "starting_equity", "day_trade_dates"]
 POSITIONS_FIELDS = ["symbol", "entry_price", "shares", "stop", "target", "opened_date"]
+TIER_POOLS_FILENAME = "tier_pools.csv"
+TIER_POOLS_FIELDS = ["tier", "cash"]
+REBALANCE_FILENAME = "tier1_rebalance.csv"
+REBALANCE_FIELDS = ["last_rebalance_month"]
 
 
 def load_state(state_dir=DEFAULT_STATE_DIR):
@@ -63,3 +67,40 @@ def save_state(state, state_dir=DEFAULT_STATE_DIR):
         writer.writeheader()
         for symbol, position in state["open_positions"].items():
             writer.writerow({"symbol": symbol, **position})
+
+
+def load_tier_pools(state_dir=DEFAULT_STATE_DIR):
+    tier_pools = {1: 0.0, 2: 0.0, 3: 0.0}
+    path = os.path.join(state_dir, TIER_POOLS_FILENAME)
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                tier_pools[int(row["tier"])] = float(row["cash"])
+    return tier_pools
+
+
+def save_tier_pools(tier_pools, state_dir=DEFAULT_STATE_DIR):
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, TIER_POOLS_FILENAME), "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=TIER_POOLS_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        for tier, cash in tier_pools.items():
+            writer.writerow({"tier": tier, "cash": cash})
+
+
+def load_rebalance_state(state_dir=DEFAULT_STATE_DIR):
+    path = os.path.join(state_dir, REBALANCE_FILENAME)
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            row = next(csv.DictReader(f), None)
+        if row is not None:
+            return {"last_rebalance_month": row["last_rebalance_month"] or None}
+    return {"last_rebalance_month": None}
+
+
+def save_rebalance_state(rebalance_state, state_dir=DEFAULT_STATE_DIR):
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, REBALANCE_FILENAME), "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=REBALANCE_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow({"last_rebalance_month": rebalance_state["last_rebalance_month"] or ""})
