@@ -38,7 +38,12 @@ from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 from graywind_strategy.dashboard_export import write_cycle_export
-from graywind_strategy.state_store import load_state, save_state
+from graywind_strategy.state_store import (
+    load_state, save_state, load_tier_pools, save_tier_pools,
+    load_rebalance_state, save_rebalance_state,
+)
+from graywind_strategy.tier_config import SYMBOL_TIER, TIER1_SYMBOL_WEIGHTS
+from graywind_strategy.tier1_rebalance import compute_rebalance_orders, should_rebalance_this_month
 from graywind_strategy import volatility
 from graywind_strategy.strategy_engine import compute_signals
 
@@ -119,7 +124,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                     pdt_throttle, position_sizer, drawdown_breaker_ok,
                     fred_api_key, news_client, finnhub_api_key, trading_client,
                     drawdown_breaker, cycle_timestamp=None, cycle_trades=None,
-                    symbol_statuses=None):
+                    symbol_statuses=None, tier_pools=None):
     """Resolves one symbol's decision for this cycle: sell-on-stop/target
     exit if a held position crossed its stop or target, otherwise
     decide_trade() for a fresh entry -- but only if the symbol isn't
@@ -145,6 +150,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         cycle_trades = []
     if symbol_statuses is None:
         symbol_statuses = {}
+    tier = SYMBOL_TIER.get(symbol)
 
     position = open_positions.get(symbol)
     if position is not None and (current_price <= position["stop"] or current_price >= position["target"]):
@@ -153,6 +159,8 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
             side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
         )
         trading_client.submit_order(order)
+        if tier is not None and tier_pools is not None:
+            tier_pools[tier] += position["shares"] * current_price
         cycle_trades.append({
             "timestamp": cycle_timestamp, "symbol": symbol, "side": "sell",
             "qty": position["shares"], "price": current_price, "reason": "stop/target exit",
@@ -176,12 +184,20 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         position = None  # eligible for a fresh same-cycle entry below, same as the backtester
 
     if position is None:
+        if tier is not None and tier_pools is not None:
+            committed = sum(
+                p["entry_price"] * p["shares"] for s, p in open_positions.items()
+                if SYMBOL_TIER.get(s) == tier
+            )
+            sizing_equity = tier_pools[tier] + committed
+        else:
+            sizing_equity = equity
         pending_today = sum(
             1 for p in open_positions.values() if p["opened_date"] == today.isoformat()
         )
         decision = decide_trade(
             symbol=symbol, signal=signal, as_of_date=today,
-            current_price=current_price, account_equity=equity,
+            current_price=current_price, account_equity=sizing_equity,
             pdt_throttle=pdt_throttle, position_sizer=position_sizer,
             drawdown_breaker_ok=drawdown_breaker_ok,
             fred_api_key=fred_api_key, news_client=news_client,
@@ -194,6 +210,8 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
             )
             trading_client.submit_order(order)
+            if tier is not None and tier_pools is not None:
+                tier_pools[tier] -= decision.shares * current_price
             open_positions[symbol] = {
                 "entry_price": current_price, "shares": decision.shares,
                 "stop": decision.stop_price, "target": decision.target_price,
@@ -223,6 +241,46 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         print(f"{symbol}: already holding {position['shares']} shares, skipping entry evaluation")
 
 
+def run_tier1_rebalance(trading_client, data_client, tier_pools):
+    """I/O wrapper around tier1_rebalance.compute_rebalance_orders(): fetches
+    each tier-1 symbol's latest bar and Alpaca's real current holdings,
+    computes the rebalance orders, submits them, and updates tier_pools[1]
+    in place to reflect the fills. No-ops entirely (zero I/O) when
+    TIER1_SYMBOL_WEIGHTS is empty -- see tier_config.py.
+    """
+    if not TIER1_SYMBOL_WEIGHTS:
+        return []
+
+    now = datetime.now(ET)
+    current_prices = {}
+    for symbol in TIER1_SYMBOL_WEIGHTS:
+        bars = fetch_bars(data_client, symbol, now - SIGNAL_LOOKBACK, now)
+        if bars:
+            current_prices[symbol] = bars[-1].close
+
+    real_positions = {p.symbol: float(p.qty) for p in trading_client.get_all_positions()}
+    current_holdings = {symbol: real_positions.get(symbol, 0.0) for symbol in TIER1_SYMBOL_WEIGHTS}
+
+    tier1_equity = tier_pools[1] + sum(
+        current_holdings[s] * current_prices[s] for s in current_holdings if s in current_prices
+    )
+    orders = compute_rebalance_orders(
+        tier1_equity=tier1_equity, current_holdings=current_holdings,
+        current_prices=current_prices, target_weights=TIER1_SYMBOL_WEIGHTS,
+    )
+    for order in orders:
+        market_order = MarketOrderRequest(
+            symbol=order.symbol, qty=order.qty,
+            side=OrderSide.BUY if order.side == "buy" else OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        )
+        trading_client.submit_order(market_order)
+        notional = order.qty * current_prices[order.symbol]
+        tier_pools[1] += notional if order.side == "sell" else -notional
+        print(f"{order.symbol}: submitted tier-1 rebalance {order.side} for {order.qty} shares")
+    return orders
+
+
 def main():
     if not is_market_hours():
         print("outside market hours, exiting")
@@ -245,6 +303,8 @@ def main():
     cycle_trades = []
     symbol_statuses = {}
     state = load_state()
+    tier_pools = load_tier_pools()
+    rebalance_state = load_rebalance_state()
     pdt_throttle = _restore_pdt_throttle(state)
     open_positions = state["open_positions"]
     open_positions = reconcile_positions(trading_client, open_positions)
@@ -276,6 +336,13 @@ def main():
         drawdown_breaker.start_new_day(today, starting_equity)
         drawdown_breaker.update_equity(equity)
 
+        if should_rebalance_this_month(rebalance_state["last_rebalance_month"], today):
+            try:
+                run_tier1_rebalance(trading_client, data_client, tier_pools)
+                rebalance_state["last_rebalance_month"] = today.strftime("%Y-%m")
+            except Exception as exc:
+                print(f"tier1 rebalance: error, will retry next cycle: {exc}", file=sys.stderr)
+
         now = datetime.now(ET)
         for symbol in WATCHLIST:
             # A single symbol's failure (a transient network error fetching
@@ -305,7 +372,7 @@ def main():
                     finnhub_api_key=finnhub_api_key, trading_client=trading_client,
                     drawdown_breaker=drawdown_breaker,
                     cycle_timestamp=cycle_timestamp, cycle_trades=cycle_trades,
-                    symbol_statuses=symbol_statuses,
+                    symbol_statuses=symbol_statuses, tier_pools=tier_pools,
                 )
             except Exception as exc:
                 print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)
@@ -327,6 +394,8 @@ def main():
             "starting_equity": starting_equity if baseline_established else state["starting_equity"],
             "open_positions": open_positions,
         })
+        save_tier_pools(tier_pools)
+        save_rebalance_state(rebalance_state)
         write_cycle_export(
             export_dir=DASHBOARD_EXPORT_DIR,
             timestamp=cycle_timestamp,

@@ -579,6 +579,18 @@ git add live_loop.py tests/test_live_loop.py
 git commit -m "feat: scope tiers 2/3 sizing and cash settlement to their own pool"
 ```
 
+**Correction found during the final whole-branch review:** this task, as originally written,
+never included a step wiring `tier_pools=tier_pools` into `main()`'s real
+`process_symbol(...)` call site (Steps 1-11 above only touch `process_symbol`'s own signature
+and body). That gap meant `tier_pools` defaulted to `None` in production regardless of what
+Task 3's tests proved about `process_symbol` in isolation, making all of this task's
+tier-scoped sizing/settlement logic unreachable no matter how a later sub-project populated
+`SYMBOL_TIER`. Fixed directly in the final-review fix wave (not re-run through Task 3's own
+loop) by adding `tier_pools=tier_pools` to the `process_symbol(...)` call inside `main()`'s
+`for symbol in WATCHLIST:` loop, plus a new `test_main_passes_loaded_tier_pools_to_process_symbol`
+test in `tests/test_live_loop.py` pinning the wiring itself (mocking `process_symbol` and
+asserting it's called with the exact object `load_tier_pools()` returned).
+
 ---
 
 ## Task 4: `live_loop.py` — tier-1 rebalance trigger and order placement
@@ -783,5 +795,13 @@ execution, not by reading" discipline: after pushing to `main`, check the next l
 run log (`gh run view` or the GitHub Actions UI) for the line
 `ERROR: one or more required API keys` (should NOT appear — unrelated regression check) and
 confirm no new `tier1 rebalance: error` line appears in the log. `state/tier_pools.csv` and
-`state/tier1_rebalance.csv` should appear in that cycle's commit, both showing `0.0`/empty
-values, proving the new save calls are wired in without needing 2c's symbol picks first.
+`state/tier1_rebalance.csv` should appear in that cycle's commit, proving the new save calls
+are wired in without needing 2c's symbol picks first. **Correction found during Task 4's
+review:** `tier_pools.csv` will show `0.0` for all three tiers, but `tier1_rebalance.csv`
+will NOT be empty — an empty `TIER1_SYMBOL_WEIGHTS` still makes `run_tier1_rebalance` *succeed*
+(it returns `[]`, not an exception), so `last_rebalance_month` gets stamped with the real
+current month on the very first cycle. Seeing that stamp is the success signal, not a bug —
+an *empty* value there would actually mean the trigger never fired. (One real consequence,
+harmless but worth knowing: if 2c populates `TIER1_SYMBOL_WEIGHTS` mid-month, the first real
+rebalance is deferred to the following month, since the current month was already stamped by
+this inert run.)
