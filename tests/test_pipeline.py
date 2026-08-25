@@ -3,11 +3,13 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
+from graywind_strategy.gates.analyst_consensus import AnalystDataUnavailable
 from graywind_strategy.gates.earnings_gate import EarningsDataUnavailable
 from graywind_strategy.gates.macro_gate import MacroDataUnavailable
 from graywind_strategy.gates.sentiment_gate import SentimentDataUnavailable
 from graywind_strategy.gates.vix_gate import VixDataUnavailable
 from graywind_strategy.pipeline import (
+    evaluate_analyst_consensus_multiplier,
     evaluate_earnings_gate,
     evaluate_macro_gate,
     evaluate_sentiment_gate,
@@ -398,3 +400,116 @@ def test_decide_trade_holds_on_degenerate_low_price_instead_of_raising():
         )
     assert decision.action == "hold"
     assert decision.reason == "invalid price for sizing"
+
+
+def test_evaluate_analyst_consensus_multiplier_returns_neutral_for_non_today_date():
+    # Task 11/backtest dates are never date.today() in a real run; this proves the
+    # look-ahead-bias guard without needing to mock fetch or cache at all. The
+    # spec's actual contract is that a non-today date touches NEITHER the
+    # fetcher NOR the cache, so both are asserted not-called here.
+    with patch("graywind_strategy.pipeline.fetch_analyst_consensus") as mock_fetch, \
+         patch("graywind_strategy.pipeline.load_cached_multiplier") as mock_load:
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date(2024, 1, 8), current_price=100.0
+        )
+    assert result == 1.0
+    mock_fetch.assert_not_called()
+    mock_load.assert_not_called()
+
+
+def test_evaluate_analyst_consensus_multiplier_fails_open_on_fetch_error():
+    with patch("graywind_strategy.pipeline.load_cached_multiplier", return_value=None), \
+         patch("graywind_strategy.pipeline.fetch_analyst_consensus",
+               side_effect=AnalystDataUnavailable("boom")):
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date.today(), current_price=100.0
+        )
+    assert result == 1.0
+
+
+def test_evaluate_analyst_consensus_multiplier_uses_cache_hit_without_fetching():
+    with patch("graywind_strategy.pipeline.load_cached_multiplier", return_value=1.075), \
+         patch("graywind_strategy.pipeline.fetch_analyst_consensus") as mock_fetch:
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date.today(), current_price=100.0
+        )
+    assert result == 1.075
+    mock_fetch.assert_not_called()
+
+
+def test_evaluate_analyst_consensus_multiplier_fetches_scores_and_caches_on_a_miss():
+    with patch("graywind_strategy.pipeline.load_cached_multiplier", return_value=None), \
+         patch("graywind_strategy.pipeline.fetch_analyst_consensus",
+               return_value=(1.0, 100.0)) as mock_fetch, \
+         patch("graywind_strategy.pipeline.save_cached_multiplier") as mock_save:
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date.today(), current_price=100.0
+        )
+    assert result == 1.075  # Strong Buy, 0% upside
+    mock_fetch.assert_called_once_with("AAPL")
+    mock_save.assert_called_once_with(
+        "AAPL", date.today(), recommendation_mean=1.0, target_mean=100.0, multiplier=1.075,
+    )
+
+
+def test_evaluate_analyst_consensus_multiplier_returns_multiplier_when_cache_save_fails():
+    # A cache-write failure (disk full, read-only filesystem, permissions)
+    # must cost this cycle's cache, not the whole trade evaluation.
+    # decide_trade's contract is that it must never propagate an exception.
+    with patch("graywind_strategy.pipeline.load_cached_multiplier", return_value=None), \
+         patch("graywind_strategy.pipeline.fetch_analyst_consensus",
+               return_value=(1.0, 100.0)), \
+         patch("graywind_strategy.pipeline.save_cached_multiplier",
+               side_effect=OSError("disk full")):
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date.today(), current_price=100.0
+        )
+    assert result == 1.075  # Strong Buy, 0% upside -- computed multiplier still returned
+
+
+def test_decide_trade_applies_analyst_consensus_multiplier_to_shares_on_a_live_date():
+    with _passing_gates(), \
+         patch("graywind_strategy.pipeline.evaluate_analyst_consensus_multiplier",
+               return_value=1.2) as mock_multiplier:
+        decision = decide_trade(
+            symbol="AAPL",
+            signal="buy",
+            as_of_date=date.today(),
+            current_price=100.0,
+            account_equity=10000.0,
+            pdt_throttle=PDTThrottle(),
+            position_sizer=PositionSizer(risk_fraction=0.01),
+            drawdown_breaker_ok=True,
+            fred_api_key="k",
+            news_client=object(),
+            finnhub_api_key="k",
+        )
+    base_shares = PositionSizer(risk_fraction=0.01).shares_to_buy(10000.0, 100.0, 98.0)
+    assert decision.action == "buy"
+    assert decision.shares == round(base_shares * 1.2)
+    mock_multiplier.assert_called_once_with(
+        symbol="AAPL", as_of_date=date.today(), current_price=100.0
+    )
+
+
+def test_decide_trade_applies_multiplier_even_when_gates_always_pass():
+    with patch("graywind_strategy.pipeline.evaluate_analyst_consensus_multiplier",
+               return_value=0.9) as mock_multiplier:
+        decision = decide_trade(
+            symbol="AAPL",
+            signal="buy",
+            as_of_date=date.today(),
+            current_price=100.0,
+            account_equity=10000.0,
+            pdt_throttle=PDTThrottle(),
+            position_sizer=PositionSizer(risk_fraction=0.01),
+            drawdown_breaker_ok=True,
+            fred_api_key="k",
+            news_client=object(),
+            finnhub_api_key="k",
+            gates_always_pass=True,
+        )
+    base_shares = PositionSizer(risk_fraction=0.01).shares_to_buy(10000.0, 100.0, 98.0)
+    assert decision.action == "buy"
+    assert decision.shares == round(base_shares * 0.9)
+    mock_multiplier.assert_called_once()

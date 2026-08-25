@@ -5,10 +5,18 @@ in one place is what guarantees backtest and live behavior can't drift
 apart.
 """
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional
 
 import requests
 
+from graywind_strategy.gates.analyst_consensus import (
+    AnalystDataUnavailable,
+    analyst_consensus_multiplier,
+    fetch_analyst_consensus,
+    load_cached_multiplier,
+    save_cached_multiplier,
+)
 from graywind_strategy.gates.earnings_gate import (
     EARNINGS_BLACKOUT_DAYS,
     EarningsDataUnavailable,
@@ -66,6 +74,45 @@ def evaluate_macro_gate(as_of_date, session=requests, required_breaches=2):
     except MacroDataUnavailable:
         return False
     return macro_gate(snapshot, required_breaches)
+
+
+def evaluate_analyst_consensus_multiplier(symbol, as_of_date, current_price):
+    # `as_of_date` is computed by live_loop.py as datetime.now(ET).date() (Eastern
+    # Time), but this guard compares it against date.today() (process-local
+    # timezone). Safe by construction in production: GitHub Actions runs in
+    # UTC, and the live-trading workflow's cron window only fires during
+    # 09:30-16:00 ET, which is always the same UTC calendar day. This would
+    # silently no-op the whole feature (not crash) if ever run from a
+    # differently-timezoned environment during specific hours.
+    if as_of_date != date.today():
+        # yfinance has no historical point-in-time query -- applying it to a
+        # backtest as_of_date would leak today's analyst opinions into a
+        # historical decision. Neutral is the honest answer for any date
+        # that isn't live "today".
+        return 1.0
+
+    cached = load_cached_multiplier(symbol, as_of_date)
+    if cached is not None:
+        return cached
+
+    try:
+        recommendation_mean, target_mean = fetch_analyst_consensus(symbol)
+    except AnalystDataUnavailable:
+        return 1.0
+
+    multiplier = analyst_consensus_multiplier(recommendation_mean, target_mean, current_price)
+    try:
+        save_cached_multiplier(
+            symbol, as_of_date,
+            recommendation_mean=recommendation_mean, target_mean=target_mean, multiplier=multiplier,
+        )
+    except Exception:
+        # Best-effort cache write -- a cache-write failure (disk full,
+        # read-only filesystem, permissions) should cost this cycle's cache,
+        # not the whole trade evaluation. decide_trade must never propagate
+        # an exception.
+        pass
+    return multiplier
 
 
 def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
@@ -133,6 +180,8 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
         return TradeDecision(action="hold", reason="invalid price for sizing")
     target_price = position_sizer.take_profit_price(current_price, take_profit_pct)
     shares = position_sizer.shares_to_buy(account_equity, current_price, stop_price)
+    shares = round(shares * evaluate_analyst_consensus_multiplier(
+        symbol=symbol, as_of_date=as_of_date, current_price=current_price))
     if shares <= 0:
         return TradeDecision(action="hold", reason="position size rounds to zero shares")
 
