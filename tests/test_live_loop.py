@@ -42,7 +42,7 @@ def _position(shares=10, stop=98.0, target=103.0, opened_date="2024-01-08"):
 
 def _call(symbol="AAPL", signal="hold", current_price=100.0, today=date(2024, 1, 8),
           open_positions=None, trading_client=None, pdt_throttle=None, decide_return=None,
-          drawdown_breaker=None):
+          drawdown_breaker=None, equity=10000.0, tier_pools=None):
     open_positions = {} if open_positions is None else open_positions
     trading_client = MagicMock() if trading_client is None else trading_client
     pdt_throttle = MagicMock() if pdt_throttle is None else pdt_throttle
@@ -53,11 +53,11 @@ def _call(symbol="AAPL", signal="hold", current_price=100.0, today=date(2024, 1,
     ) as mock_decide:
         process_symbol(
             symbol=symbol, signal=signal, current_price=current_price, today=today,
-            open_positions=open_positions, equity=10000.0,
+            open_positions=open_positions, equity=equity,
             pdt_throttle=pdt_throttle, position_sizer=MagicMock(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(),
             finnhub_api_key="k", trading_client=trading_client,
-            drawdown_breaker=drawdown_breaker,
+            drawdown_breaker=drawdown_breaker, tier_pools=tier_pools,
         )
     return mock_decide, trading_client, pdt_throttle, open_positions, drawdown_breaker
 
@@ -563,3 +563,66 @@ def test_process_symbol_cycle_passes_confirmation_bars_to_compute_signals():
         # (final-review Fix 1) could silently degrade the filter to K=1
         # (unfiltered) without this test catching it.
         assert isinstance(call.kwargs["confirmation_bars"], pd.Series)
+
+
+# --- tier-scoped equity/cash settlement (sub-project 2a/2b)
+
+def test_process_symbol_uses_tier_equity_for_sizing_when_tagged():
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 1}, clear=True):
+        mock_decide, _, _, _, _ = _call(
+            symbol="AAPL", signal="buy", equity=10000.0,
+            tier_pools={1: 500.0, 2: 0.0, 3: 0.0},
+        )
+    assert mock_decide.call_args.kwargs["account_equity"] == 500.0
+
+
+def test_process_symbol_falls_back_to_global_equity_when_untagged():
+    with patch.dict("live_loop.SYMBOL_TIER", {}, clear=True):
+        mock_decide, _, _, _, _ = _call(
+            symbol="AAPL", signal="buy", equity=10000.0,
+            tier_pools={1: 500.0, 2: 0.0, 3: 0.0},
+        )
+    assert mock_decide.call_args.kwargs["account_equity"] == 10000.0
+
+
+def test_process_symbol_falls_back_to_global_equity_when_tier_pools_not_passed():
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 1}, clear=True):
+        mock_decide, _, _, _, _ = _call(symbol="AAPL", signal="buy", equity=10000.0)
+    assert mock_decide.call_args.kwargs["account_equity"] == 10000.0
+
+
+def test_process_symbol_buy_decrements_tier_pool_cash():
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 1}, clear=True):
+        tier_pools = {1: 500.0, 2: 0.0, 3: 0.0}
+        _call(
+            symbol="AAPL", signal="buy", current_price=100.0, equity=10000.0,
+            tier_pools=tier_pools,
+            decide_return=TradeDecision(
+                action="buy", reason="all checks passed",
+                shares=2.0, stop_price=95.0, target_price=110.0,
+            ),
+        )
+    assert tier_pools[1] == 300.0  # 500.0 - 2.0 * 100.0
+
+
+def test_process_symbol_stop_exit_increments_tier_pool_cash():
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 1}, clear=True):
+        open_positions = {"AAPL": _position(shares=2.0, stop=98.0, target=103.0)}
+        tier_pools = {1: 500.0, 2: 0.0, 3: 0.0}
+        _call(
+            symbol="AAPL", current_price=97.0, open_positions=open_positions,
+            tier_pools=tier_pools,
+        )
+    assert tier_pools[1] == 694.0  # 500.0 + 2.0 * 97.0
+
+
+def test_process_symbol_tier_equity_includes_other_same_tier_positions():
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 1, "BND": 1}, clear=True):
+        open_positions = {
+            "BND": {"entry_price": 50.0, "shares": 4.0, "stop": 45.0, "target": 60.0, "opened_date": "2024-01-08"},
+        }
+        mock_decide, _, _, _, _ = _call(
+            symbol="AAPL", signal="buy", open_positions=open_positions,
+            tier_pools={1: 500.0, 2: 0.0, 3: 0.0},
+        )
+    assert mock_decide.call_args.kwargs["account_equity"] == 700.0  # 500.0 cash + 50.0*4.0 committed

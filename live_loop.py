@@ -39,6 +39,7 @@ from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 from graywind_strategy.dashboard_export import write_cycle_export
 from graywind_strategy.state_store import load_state, save_state
+from graywind_strategy.tier_config import SYMBOL_TIER
 from graywind_strategy import volatility
 from graywind_strategy.strategy_engine import compute_signals
 
@@ -119,7 +120,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                     pdt_throttle, position_sizer, drawdown_breaker_ok,
                     fred_api_key, news_client, finnhub_api_key, trading_client,
                     drawdown_breaker, cycle_timestamp=None, cycle_trades=None,
-                    symbol_statuses=None):
+                    symbol_statuses=None, tier_pools=None):
     """Resolves one symbol's decision for this cycle: sell-on-stop/target
     exit if a held position crossed its stop or target, otherwise
     decide_trade() for a fresh entry -- but only if the symbol isn't
@@ -145,6 +146,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         cycle_trades = []
     if symbol_statuses is None:
         symbol_statuses = {}
+    tier = SYMBOL_TIER.get(symbol)
 
     position = open_positions.get(symbol)
     if position is not None and (current_price <= position["stop"] or current_price >= position["target"]):
@@ -153,6 +155,8 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
             side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
         )
         trading_client.submit_order(order)
+        if tier is not None and tier_pools is not None:
+            tier_pools[tier] += position["shares"] * current_price
         cycle_trades.append({
             "timestamp": cycle_timestamp, "symbol": symbol, "side": "sell",
             "qty": position["shares"], "price": current_price, "reason": "stop/target exit",
@@ -176,12 +180,20 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         position = None  # eligible for a fresh same-cycle entry below, same as the backtester
 
     if position is None:
+        if tier is not None and tier_pools is not None:
+            committed = sum(
+                p["entry_price"] * p["shares"] for s, p in open_positions.items()
+                if SYMBOL_TIER.get(s) == tier
+            )
+            sizing_equity = tier_pools[tier] + committed
+        else:
+            sizing_equity = equity
         pending_today = sum(
             1 for p in open_positions.values() if p["opened_date"] == today.isoformat()
         )
         decision = decide_trade(
             symbol=symbol, signal=signal, as_of_date=today,
-            current_price=current_price, account_equity=equity,
+            current_price=current_price, account_equity=sizing_equity,
             pdt_throttle=pdt_throttle, position_sizer=position_sizer,
             drawdown_breaker_ok=drawdown_breaker_ok,
             fred_api_key=fred_api_key, news_client=news_client,
@@ -194,6 +206,8 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
             )
             trading_client.submit_order(order)
+            if tier is not None and tier_pools is not None:
+                tier_pools[tier] -= decision.shares * current_price
             open_positions[symbol] = {
                 "entry_price": current_price, "shares": decision.shares,
                 "stop": decision.stop_price, "target": decision.target_price,
