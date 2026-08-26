@@ -209,6 +209,17 @@ tbody tr:hover td { background: var(--bg-2); }
 .pnl-cell.neg { color: var(--neg); }
 #trade-scroll { max-height: 380px; overflow-y: auto; }
 
+/* ---------- Accounts grid ---------- */
+.accounts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+@media (max-width: 900px) {
+  .accounts-grid { grid-template-columns: 1fr; }
+}
+.account-label { margin-top: 0; }
+
 /* ---------- Footer ---------- */
 footer {
   margin-top: clamp(36px,6vw,52px);
@@ -258,15 +269,19 @@ footer strong { color: var(--txt-2); font-weight: 500; }
       <h1>Graywind</h1>
       <span class="tagline">Rule-based intraday equities strategy</span>
     </div>
-    <div class="freshness" id="freshness">
-      <span class="dot" id="freshness-dot"></span>
-      <span id="freshness-text">Loading…</span>
-    </div>
   </div>
 
-  <main id="app" aria-busy="true">
-    <section class="empty-state">Loading live data…</section>
+  <main id="app" aria-busy="true" class="accounts-grid">
+    <section id="account-100k" class="account-col"><div class="empty-state">Loading live data…</div></section>
+    <section id="account-small" class="account-col"><div class="empty-state">Loading live data…</div></section>
   </main>
+
+  <footer>
+    <strong>Graywind</strong> — RSI(14) + SMA(10/30) crossover strategy, gated on VIX, news
+    sentiment, earnings blackout, and cross-project macro-stress signals before every trade.
+    Running against a real Alpaca <strong>paper-trading</strong> account during its live
+    burn-in period. Not investment advice; nothing here is real capital.
+  </footer>
 
 </div>
 
@@ -306,9 +321,9 @@ const moneyCompact = v => "$" + (Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "
 const pct = v => (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
 const fmtTime = d => d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
-function renderFreshness(lastCycleDate) {
-  const dot = document.getElementById("freshness-dot");
-  const text = document.getElementById("freshness-text");
+function renderFreshness(accountId, lastCycleDate) {
+  const dot = document.getElementById(`freshness-dot-${accountId}`);
+  const text = document.getElementById(`freshness-text-${accountId}`);
   const mins = Math.max(0, Math.round((Date.now() - lastCycleDate.getTime()) / 60000));
   let ago;
   if (mins < 1) ago = "just now";
@@ -432,9 +447,9 @@ function buildTradeLog(tradeRows) {
     </section>`;
 }
 
-function renderEquityChart(equityRows) {
-  const svg = d3.select("#chart");
-  const wrap = document.getElementById("chart-wrap");
+function renderEquityChart(accountId, equityRows) {
+  const svg = d3.select(`#chart-${accountId}`);
+  const wrap = document.getElementById(`chart-wrap-${accountId}`);
   const width = wrap.clientWidth;
   const height = 300;
   const margin = { top: 16, right: 16, bottom: 26, left: 58 };
@@ -508,52 +523,61 @@ function renderEquityChart(equityRows) {
     });
 }
 
-function renderApp(statusRows, equityRows, tradeRows) {
-  const app = document.getElementById("app");
-  app.setAttribute("aria-busy", "false");
-
+function renderAccount(accountId, label, containerEl, statusRows, equityRows, tradeRows) {
   if (statusRows.length === 0) {
-    app.innerHTML = `<div class="load-error">No status data yet — the live cycle hasn't run.</div>`;
+    renderAccountUnavailable(accountId, label, containerEl, "the live cycle hasn't run yet");
     return;
   }
 
-  app.innerHTML = `
+  containerEl.innerHTML = `
+    <h2 class="account-label">${label}</h2>
+    <div class="freshness" id="freshness-${accountId}">
+      <span class="dot" id="freshness-dot-${accountId}"></span>
+      <span id="freshness-text-${accountId}">Loading…</span>
+    </div>
     ${buildHero(statusRows, equityRows, tradeRows)}
-    <section aria-labelledby="equity-head">
-      <div class="section-head"><h2 id="equity-head">Equity Curve</h2></div>
-      <div id="chart-wrap"><svg id="chart"></svg></div>
+    <section aria-labelledby="equity-head-${accountId}">
+      <div class="section-head"><h2 id="equity-head-${accountId}">Equity Curve</h2></div>
+      <div id="chart-wrap-${accountId}"><svg id="chart-${accountId}"></svg></div>
     </section>
     ${buildPositions(statusRows)}
-    ${buildTradeLog(tradeRows)}
-    <footer>
-      <strong>Graywind</strong> — RSI(14) + SMA(10/30) crossover strategy, gated on VIX, news
-      sentiment, earnings blackout, and cross-project macro-stress signals before every trade.
-      Running against a real Alpaca <strong>paper-trading</strong> account during its live
-      burn-in period. Not investment advice; nothing here is real capital.
-    </footer>`;
+    ${buildTradeLog(tradeRows)}`;
 
-  renderFreshness(parseTimestamp(statusRows[0].last_cycle_timestamp));
-  renderEquityChart(equityRows);
-  window.addEventListener("resize", () => renderEquityChart(equityRows), { passive: true });
+  renderFreshness(accountId, parseTimestamp(statusRows[0].last_cycle_timestamp));
+  renderEquityChart(accountId, equityRows);
+  window.addEventListener("resize", () => renderEquityChart(accountId, equityRows), { passive: true });
 }
 
-async function main() {
+function renderAccountUnavailable(accountId, label, containerEl, message) {
+  containerEl.innerHTML = `
+    <h2 class="account-label">${label}</h2>
+    <div class="load-error">
+      Couldn't load this account's data (${message}).
+      <br><button id="retry-btn-${accountId}">Retry</button>
+    </div>`;
+}
+
+async function loadAccount(accountId, label, dataDir, containerEl) {
   try {
     const [equityRows, tradeRows, statusRows] = await Promise.all([
-      loadCSV("dashboard-data/equity_curve.csv"),
-      loadCSV("dashboard-data/trade_log.csv"),
-      loadCSV("dashboard-data/status.csv"),
+      loadCSV(`${dataDir}/equity_curve.csv`),
+      loadCSV(`${dataDir}/trade_log.csv`),
+      loadCSV(`${dataDir}/status.csv`),
     ]);
-    renderApp(statusRows, equityRows, tradeRows);
+    renderAccount(accountId, label, containerEl, statusRows, equityRows, tradeRows);
   } catch (err) {
-    document.getElementById("freshness-text").textContent = "Unavailable";
-    document.getElementById("app").innerHTML = `
-      <div class="load-error">
-        Couldn't load live data (${err.message}).
-        <br><button id="retry-btn">Retry</button>
-      </div>`;
-    document.getElementById("retry-btn").addEventListener("click", main);
+    renderAccountUnavailable(accountId, label, containerEl, err.message);
+    document.getElementById(`retry-btn-${accountId}`).addEventListener(
+      "click", () => loadAccount(accountId, label, dataDir, containerEl)
+    );
+  } finally {
+    document.getElementById("app").setAttribute("aria-busy", "false");
   }
+}
+
+function main() {
+  loadAccount("100k", "$100k Account", "dashboard-data", document.getElementById("account-100k"));
+  loadAccount("small", "$2k Account", "dashboard-data/small", document.getElementById("account-small"));
 }
 
 main();
