@@ -47,7 +47,7 @@ from graywind_strategy.tier1_rebalance import compute_rebalance_orders, should_r
 from graywind_strategy import volatility
 from graywind_strategy.strategy_engine import compute_signals
 
-WATCHLIST = ["AAPL", "SPY"]
+WATCHLIST = ["AAPL", "SERV"]
 DASHBOARD_EXPORT_DIR = "dashboard_export"
 MARKET_OPEN = dt_time(9, 30)
 MARKET_CLOSE = dt_time(16, 0)
@@ -294,6 +294,8 @@ def main():
         print("ERROR: one or more required API keys are not set in the environment", file=sys.stderr)
         return 1
 
+    state_dir = os.environ.get("GRAYWIND_STATE_DIR", "state")
+
     trading_client = TradingClient(api_key, api_secret, paper=True)
     data_client = StockHistoricalDataClient(api_key, api_secret)
     news_client = NewsClient(api_key, api_secret)
@@ -302,9 +304,9 @@ def main():
     cycle_timestamp = datetime.now(ET).isoformat()
     cycle_trades = []
     symbol_statuses = {}
-    state = load_state()
-    tier_pools = load_tier_pools()
-    rebalance_state = load_rebalance_state()
+    state = load_state(state_dir=state_dir)
+    tier_pools = load_tier_pools(state_dir=state_dir)
+    rebalance_state = load_rebalance_state(state_dir=state_dir)
     pdt_throttle = _restore_pdt_throttle(state)
     open_positions = state["open_positions"]
     open_positions = reconcile_positions(trading_client, open_positions)
@@ -393,9 +395,9 @@ def main():
             "day": today.isoformat() if baseline_established else state["day"],
             "starting_equity": starting_equity if baseline_established else state["starting_equity"],
             "open_positions": open_positions,
-        })
-        save_tier_pools(tier_pools)
-        save_rebalance_state(rebalance_state)
+        }, state_dir=state_dir)
+        save_tier_pools(tier_pools, state_dir=state_dir)
+        save_rebalance_state(rebalance_state, state_dir=state_dir)
         write_cycle_export(
             export_dir=DASHBOARD_EXPORT_DIR,
             timestamp=cycle_timestamp,

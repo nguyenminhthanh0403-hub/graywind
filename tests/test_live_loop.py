@@ -338,12 +338,12 @@ def test_reconcile_positions_does_not_fabricate_broker_only_position(capsys):
     # bot has no record of that position's real entry_price/stop/target, so
     # guessing values for it would be worse than leaving it unmanaged.
     trading_client = MagicMock()
-    trading_client.get_all_positions.return_value = [_fake_broker_position("SPY")]
+    trading_client.get_all_positions.return_value = [_fake_broker_position("SERV")]
     open_positions = {}
     result = live_loop.reconcile_positions(trading_client, open_positions)
-    assert "SPY" not in result
+    assert "SERV" not in result
     err = capsys.readouterr().err
-    assert "SPY" in err and "WARNING" in err
+    assert "SERV" in err and "WARNING" in err
 
 
 def test_reconcile_positions_leaves_matching_position_completely_unchanged(capsys):
@@ -407,10 +407,10 @@ def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
         result = live_loop.main()
 
     assert result == 0
-    # AAPL's fetch_bars raised -> AAPL never reaches decide_trade, but SPY
+    # AAPL's fetch_bars raised -> AAPL never reaches decide_trade, but SERV
     # (processed next) still does -- the exception didn't abort the cycle.
     mock_decide.assert_called_once()
-    assert mock_decide.call_args.kwargs["symbol"] == "SPY"
+    assert mock_decide.call_args.kwargs["symbol"] == "SERV"
     # save_state still ran despite AAPL's exception, with the real
     # accumulated state (no open positions were opened this cycle since
     # decide_trade was mocked to always hold).
@@ -418,6 +418,75 @@ def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
     saved_state = mock_save_state.call_args[0][0]
     assert saved_state["open_positions"] == {}
     assert saved_state["day_trade_dates"] == []
+
+
+def test_main_threads_graywind_state_dir_env_var_into_every_state_call():
+    fake_account = MagicMock()
+    fake_account.equity = "2000.0"
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+    fake_trading_client.get_all_positions.return_value = []
+
+    fake_state = {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "GRAYWIND_STATE_DIR": "state/small",
+         }), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.load_state", return_value=fake_state) as mock_load_state, \
+         patch("live_loop.save_state") as mock_save_state, \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}) as mock_load_tier_pools, \
+         patch("live_loop.save_tier_pools") as mock_save_tier_pools, \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}) as mock_load_rebalance, \
+         patch("live_loop.save_rebalance_state") as mock_save_rebalance, \
+         patch("live_loop.fetch_bars", return_value=[]), \
+         patch("live_loop.write_cycle_export"):
+        result = live_loop.main()
+
+    assert result == 0
+    assert mock_load_state.call_args.kwargs["state_dir"] == "state/small"
+    assert mock_save_state.call_args.kwargs["state_dir"] == "state/small"
+    assert mock_load_tier_pools.call_args.kwargs["state_dir"] == "state/small"
+    assert mock_save_tier_pools.call_args.kwargs["state_dir"] == "state/small"
+    assert mock_load_rebalance.call_args.kwargs["state_dir"] == "state/small"
+    assert mock_save_rebalance.call_args.kwargs["state_dir"] == "state/small"
+
+
+def test_main_defaults_graywind_state_dir_to_state_when_env_var_unset():
+    fake_account = MagicMock()
+    fake_account.equity = "100000.0"
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+    fake_trading_client.get_all_positions.return_value = []
+
+    fake_state = {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+         }, clear=False), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.load_state", return_value=fake_state) as mock_load_state, \
+         patch("live_loop.save_state"), \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
+         patch("live_loop.fetch_bars", return_value=[]), \
+         patch("live_loop.write_cycle_export"):
+        os.environ.pop("GRAYWIND_STATE_DIR", None)
+        result = live_loop.main()
+
+    assert result == 0
+    assert mock_load_state.call_args.kwargs["state_dir"] == "state"
 
 
 def test_get_account_exception_leaves_day_and_starting_equity_unchanged():
