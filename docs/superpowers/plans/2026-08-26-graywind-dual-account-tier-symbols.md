@@ -66,7 +66,7 @@ verification, matching this project's existing precedent for dashboard changes).
   doing Task 1 first is preferred; either order works since the two files don't import each
   other's test-time state).
 
-- [ ] **Step 1: Write the failing tests for the pure guardrail logic**
+- [x] **Step 1: Write the failing tests for the pure guardrail logic**
 
 Create `tests/test_tier_config.py`:
 
@@ -223,12 +223,12 @@ def test_validate_symbol_addition_raises_on_first_failing_check():
         )
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_tier_config.py -v`
 Expected: FAIL — `ImportError` (none of these names exist in `tier_config.py` yet).
 
-- [ ] **Step 3: Implement the guardrail module and populate the tier dicts**
+- [x] **Step 3: Implement the guardrail module and populate the tier dicts**
 
 Replace the full contents of `graywind_strategy/tier_config.py` with:
 
@@ -337,18 +337,18 @@ def validate_symbol_addition(symbol, tier, finnhub_api_key, data_client, sector,
     check_guardrail(tier, market_cap, avg_volume, sector, existing_sector_counts)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_tier_config.py -v`
 Expected: PASS (all tests green).
 
-- [ ] **Step 5: Run the full suite to check for regressions**
+- [x] **Step 5: Run the full suite to check for regressions**
 
 Run: `.venv/bin/python -m pytest tests/ -q`
 Expected: PASS. (`tests/test_state_store.py`/`tests/test_tier1_rebalance.py` are unaffected by
 this task; if anything unrelated breaks, stop and investigate before continuing.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add graywind_strategy/tier_config.py tests/test_tier_config.py
@@ -367,7 +367,7 @@ git commit -m "feat: populate tier_config with guardrail-vetted starter symbols"
 - Produces: `SYMBOL_SECTOR["SERV"] == "robotics"`.
 - Consumes: nothing new.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_sector_config.py`:
 
@@ -380,12 +380,12 @@ def test_symbols_in_sector_returns_serv_for_robotics():
     assert symbols_in_sector("robotics") == ["SERV"]
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_sector_config.py -v`
 Expected: FAIL — `KeyError: 'SERV'` on the first new test.
 
-- [ ] **Step 3: Add the tag**
+- [x] **Step 3: Add the tag**
 
 In `graywind_strategy/sector_config.py`, add one line to the `SYMBOL_SECTOR` dict (after the
 existing `"UNH": "health",` line, before the SPY comment):
@@ -394,12 +394,12 @@ existing `"UNH": "health",` line, before the SPY comment):
     "SERV": "robotics",
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_sector_config.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add graywind_strategy/sector_config.py tests/test_sector_config.py
@@ -423,7 +423,7 @@ git commit -m "feat: tag SERV as a new robotics sector"
   `state_dir=`, per Task 1's context-gathering — no changes needed to `state_store.py`
   itself).
 
-- [ ] **Step 1: Write the failing test for GRAYWIND_STATE_DIR threading**
+- [x] **Step 1: Write the failing test for GRAYWIND_STATE_DIR threading**
 
 Add to `tests/test_live_loop.py` (near the other `main()` tests — reuse the same mocking style
 as `test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs`):
@@ -517,13 +517,13 @@ and:
     assert mock_decide.call_args.kwargs["symbol"] == "SERV"
 ```
 
-- [ ] **Step 2: Run tests to verify the new ones fail**
+- [x] **Step 2: Run tests to verify the new ones fail**
 
 Run: `.venv/bin/python -m pytest tests/test_live_loop.py -v -k "graywind_state_dir"`
 Expected: FAIL — `AssertionError` (`state_dir` kwarg is currently absent/wrong since `main()`
 doesn't pass it yet).
 
-- [ ] **Step 3: Implement the change in live_loop.py**
+- [x] **Step 3: Implement the change in live_loop.py**
 
 Change the `WATCHLIST` line near the top of `live_loop.py`:
 
@@ -562,17 +562,17 @@ and in the `finally` block:
 (`write_cycle_export`'s `DASHBOARD_EXPORT_DIR` stays unchanged — it's per-job scratch space,
 not account-specific state; see the spec's "State and dashboard-data layout" section.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_live_loop.py -v`
 Expected: PASS (all tests in the file, including the updated SERV assertion).
 
-- [ ] **Step 5: Run the full suite to check for regressions**
+- [x] **Step 5: Run the full suite to check for regressions**
 
 Run: `.venv/bin/python -m pytest tests/ -q`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add live_loop.py tests/test_live_loop.py
@@ -596,7 +596,7 @@ No test framework covers this file (matches this project's existing precedent �
 in the codebase unit-tests workflow YAML). Validate syntactically, then verify behaviorally
 post-merge via a manual `workflow_dispatch` run.
 
-- [ ] **Step 1: Add the second job**
+- [x] **Step 1: Add the second job**
 
 In `.github/workflows/live-trading.yml`, rename the existing `live-cycle` job's steps are
 unchanged — add a new job **after** it (same `jobs:` block):
@@ -705,14 +705,14 @@ means this job is skipped entirely (not run with a failure) if `live-cycle` itse
 accepted trade-off from the spec: a missed cycle for one account on a bad run is not
 catastrophic given the 15-minute cadence.
 
-- [ ] **Step 2: Validate YAML syntax**
+- [x] **Step 2: Validate YAML syntax**
 
 Run: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/live-trading.yml'))"`
 Expected: no output, exit code 0 (valid YAML). If `yaml` isn't installed in the system
 Python, run `.venv/bin/python -c "..."` instead — either interpreter's YAML parser validates
 syntax identically for this purpose.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add .github/workflows/live-trading.yml
@@ -745,7 +745,7 @@ unchecked until that manual verification has actually happened.
 No test framework covers `index.html` (matches this project's existing precedent). Verify
 manually in a browser after this change (see Step 5).
 
-- [ ] **Step 1: Parameterize the render functions by an `accountId` suffix**
+- [x] **Step 1: Parameterize the render functions by an `accountId` suffix**
 
 `buildHero`, `renderFreshness`, and `renderEquityChart` currently query fixed DOM ids
 (`#chart`, `#chart-wrap`, `#freshness-dot`, `#freshness-text`). Each needs an `accountId`
@@ -769,7 +769,7 @@ function renderEquityChart(accountId, equityRows) {
 ```
 (keep the rest of the function body unchanged, just the two lines above)
 
-- [ ] **Step 2: Add a per-account wrapper that renders one column**
+- [x] **Step 2: Add a per-account wrapper that renders one column**
 
 Replace the existing `renderApp(statusRows, equityRows, tradeRows)` function with a function
 that renders into a specific container, plus a thin top-level orchestrator:
@@ -802,7 +802,7 @@ function renderAccountUnavailable(accountId, label, containerEl, message) {
 }
 ```
 
-- [ ] **Step 3: Replace the top-level layout and `main()`**
+- [x] **Step 3: Replace the top-level layout and `main()`**
 
 Replace the existing `<main id="app" aria-busy="true">...</main>` block (around line 267) with
 two side-by-side containers, and drop the now-redundant page-level freshness indicator (each
@@ -861,14 +861,14 @@ The footer (`<strong>Graywind</strong> — RSI(14) + SMA(10/30) crossover strate
 where it is, outside `#app`, as shared page-level content below both columns — no change
 needed there.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add index.html
 git commit -m "feat: render both accounts side by side on the dashboard"
 ```
 
-- [ ] **Step 5: Manual browser verification (not automatable here)**
+- [x] **Step 5: Manual browser verification (not automatable here)**
 
 Serve the repo locally (e.g. `python3 -m http.server` from the repo root) and open
 `index.html` in a browser. Confirm: the existing $100k account still renders correctly in the
