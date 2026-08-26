@@ -184,3 +184,94 @@ jobs:
                 state: 'closed',
               });
             }
+
+  live-cycle-small:
+    needs: live-cycle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out graywind
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the live trading cycle
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY_SMALL }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET_SMALL }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          GRAYWIND_STATE_DIR: state/small
+        run: python3 live_loop.py
+
+      - name: Check whether this cycle actually ran
+        id: cycle
+        if: always()
+        run: |
+          if [ -d dashboard_export ]; then echo "ran=true" >> "$GITHUB_OUTPUT"; else echo "ran=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Merge this cycle's export into dashboard-data/small
+        if: always() && steps.cycle.outputs.ran == 'true'
+        run: python3 merge_dashboard_export.py dashboard_export dashboard-data/small
+
+      - name: Commit and push state + dashboard data
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A state 2>/dev/null || true
+          git add -A dashboard-data 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes this cycle; nothing to commit."
+          else
+            git commit -m "Update live state and dashboard data (small account) for $(date -u +%FT%H:%M)"
+            git push
+          fi
+
+      - name: Report failure to the alarm issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { data: jobsResponse } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            const failedStep = jobsResponse.jobs
+              .flatMap(j => j.steps || [])
+              .find(s => s.conclusion === 'failure');
+            const stepName = failedStep ? failedStep.name : 'unknown step';
+            const now = new Date().toISOString();
+            const body = `**${now}** — failing step: **${stepName}** (small account)\nRun: ${runUrl}`;
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'pipeline-alarm',
+            });
+
+            if (issues.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'Live trading cycle is failing',
+                body,
+                labels: ['pipeline-alarm'],
+                assignees: [context.repo.owner],
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues[0].number,
+                body,
+              });
+            }
