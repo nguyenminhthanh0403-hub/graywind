@@ -22,3 +22,11 @@ def test_symbols_in_sector_returns_expected_tech_symbols():
 
 def test_symbols_in_sector_returns_empty_list_for_unknown_sector():
     assert symbols_in_sector("nonexistent") == []
+
+
+def test_symbol_sector_tags_serv_as_robotics():
+    assert SYMBOL_SECTOR["SERV"] == "robotics"
+
+
+def test_symbols_in_sector_returns_serv_for_robotics():
+    assert symbols_in_sector("robotics") == ["SERV"]

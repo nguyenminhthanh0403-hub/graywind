@@ -16,6 +16,7 @@ SYMBOL_SECTOR = {
     "CVX": "energy",
     "JNJ": "health",
     "UNH": "health",
+    "SERV": "robotics",
     # SPY is a broad-market index, not sector-specific -- deliberately
     # left out of this mapping rather than tagged with an arbitrary sector.
 }
