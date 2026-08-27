@@ -144,3 +144,28 @@ def deflated_sharpe_ratio(sharpe, n_trials, n_returns, skew, kurtosis):
     sr_std = denom / math.sqrt(n_returns - 1)
     sr0 = sr_std * expected_max_z(n_trials)
     return probabilistic_sharpe_ratio(sharpe, sr0, n_returns, skew, kurtosis)
+
+
+def _load_trial_log(path=TRIAL_LOG_PATH):
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return json.load(f)
+
+
+def _trial_count(path=TRIAL_LOG_PATH):
+    return len(_load_trial_log(path))
+
+
+def _append_trial(symbol, tier, passed, sharpe, path=TRIAL_LOG_PATH):
+    trials = _load_trial_log(path)
+    trials.append({
+        "symbol": symbol,
+        "tier": tier,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "passed": passed,
+        "sharpe": sharpe,
+    })
+    with open(path, "w") as f:
+        json.dump(trials, f, indent=2)
+        f.write("\n")

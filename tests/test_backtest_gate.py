@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -5,9 +6,9 @@ import pandas as pd
 import pytest
 
 from graywind_strategy.backtest_gate import (
-    MIN_HISTORY_DAYS, _kurtosis, _period_returns, _skewness, check_fold_thresholds,
-    deflated_sharpe_ratio, expected_max_z, fetch_backtest_bars, probabilistic_sharpe_ratio,
-    split_into_folds,
+    MIN_HISTORY_DAYS, _append_trial, _kurtosis, _load_trial_log, _period_returns, _skewness,
+    _trial_count, check_fold_thresholds, deflated_sharpe_ratio, expected_max_z,
+    fetch_backtest_bars, probabilistic_sharpe_ratio, split_into_folds,
 )
 from graywind_strategy.backtester import BacktestResult
 from graywind_strategy.guardrails import GuardrailViolation
@@ -169,3 +170,32 @@ def test_deflated_sharpe_ratio_crosses_below_threshold_as_trials_pile_up():
     assert deflated_sharpe_ratio(sharpe, 1000, n_returns, skew, kurt) == pytest.approx(
         0.927783097961449
     )
+
+
+def test_trial_count_is_zero_for_a_fresh_log(tmp_path):
+    path = tmp_path / "trials.json"
+    assert _trial_count(path=path) == 0
+
+
+def test_append_trial_creates_the_file_if_missing(tmp_path):
+    path = tmp_path / "trials.json"
+    _append_trial("SERV", tier=3, passed=True, sharpe=0.08, path=path)
+    rows = json.loads(path.read_text())
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "SERV"
+    assert rows[0]["tier"] == 3
+    assert rows[0]["passed"] is True
+    assert rows[0]["sharpe"] == 0.08
+    assert "timestamp" in rows[0]
+
+
+def test_append_trial_preserves_prior_rows_and_increments_count(tmp_path):
+    path = tmp_path / "trials.json"
+    _append_trial("AAPL", tier=2, passed=True, sharpe=0.10, path=path)
+    _append_trial("SERV", tier=3, passed=False, sharpe=None, path=path)
+
+    rows = json.loads(path.read_text())
+    assert [r["symbol"] for r in rows] == ["AAPL", "SERV"]
+    assert rows[1]["passed"] is False
+    assert rows[1]["sharpe"] is None
+    assert _trial_count(path=path) == 2
