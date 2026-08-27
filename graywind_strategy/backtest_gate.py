@@ -69,3 +69,25 @@ def split_into_folds(df, n_folds=N_FOLDS):
         folds.append(df.iloc[start:end].reset_index(drop=True))
         start = end
     return folds
+
+
+def check_fold_thresholds(result, fold_index):
+    if result.sharpe < FOLD_MIN_SHARPE:
+        raise GuardrailViolation(
+            f"fold {fold_index}: sharpe {result.sharpe:.3f} below minimum {FOLD_MIN_SHARPE}"
+        )
+    if result.max_drawdown > FOLD_MAX_DRAWDOWN:
+        raise GuardrailViolation(
+            f"fold {fold_index}: max drawdown {result.max_drawdown:.1%} exceeds cap "
+            f"{FOLD_MAX_DRAWDOWN:.0%}"
+        )
+    if result.win_rate < FOLD_MIN_WIN_RATE:
+        raise GuardrailViolation(
+            f"fold {fold_index}: win rate {result.win_rate:.1%} below minimum "
+            f"{FOLD_MIN_WIN_RATE:.0%}"
+        )
+    if len(result.trades) < FOLD_MIN_TRADES:
+        raise GuardrailViolation(
+            f"fold {fold_index}: only {len(result.trades)} trades, need at least "
+            f"{FOLD_MIN_TRADES}"
+        )

@@ -4,7 +4,10 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from graywind_strategy.backtest_gate import MIN_HISTORY_DAYS, fetch_backtest_bars, split_into_folds
+from graywind_strategy.backtest_gate import (
+    MIN_HISTORY_DAYS, check_fold_thresholds, fetch_backtest_bars, split_into_folds,
+)
+from graywind_strategy.backtester import BacktestResult
 from graywind_strategy.guardrails import GuardrailViolation
 
 
@@ -77,3 +80,36 @@ def test_split_into_folds_covers_every_row_exactly_once_in_order():
     folds = split_into_folds(df, n_folds=4)
     reassembled = pd.concat(folds, ignore_index=True)
     assert reassembled["value"].tolist() == list(range(37))
+
+
+def _passing_result(**overrides):
+    defaults = dict(
+        equity_curve=[10000.0, 10100.0], trades=[{"x": 1}] * 30,
+        sharpe=1.5, max_drawdown=0.10, win_rate=0.50, pdt_compliant=True,
+    )
+    defaults.update(overrides)
+    return BacktestResult(**defaults)
+
+
+def test_check_fold_thresholds_passes_when_every_metric_clears():
+    check_fold_thresholds(_passing_result(), fold_index=0)  # no exception == pass
+
+
+def test_check_fold_thresholds_rejects_low_sharpe():
+    with pytest.raises(GuardrailViolation, match="fold 2.*sharpe"):
+        check_fold_thresholds(_passing_result(sharpe=0.5), fold_index=2)
+
+
+def test_check_fold_thresholds_rejects_excessive_drawdown():
+    with pytest.raises(GuardrailViolation, match="fold 1.*drawdown"):
+        check_fold_thresholds(_passing_result(max_drawdown=0.30), fold_index=1)
+
+
+def test_check_fold_thresholds_rejects_low_win_rate():
+    with pytest.raises(GuardrailViolation, match="fold 0.*win rate"):
+        check_fold_thresholds(_passing_result(win_rate=0.30), fold_index=0)
+
+
+def test_check_fold_thresholds_rejects_too_few_trades():
+    with pytest.raises(GuardrailViolation, match="fold 3.*trades"):
+        check_fold_thresholds(_passing_result(trades=[{"x": 1}] * 10), fold_index=3)
