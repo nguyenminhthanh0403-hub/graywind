@@ -1,4 +1,5 @@
 import json
+import random
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -138,6 +139,14 @@ def test_kurtosis_of_flat_returns_is_normal_default():
     assert _kurtosis([0.0, 0.0, 0.0]) == pytest.approx(3.0)
 
 
+def test_skewness_of_empty_returns_is_zero():
+    assert _skewness([]) == 0.0
+
+
+def test_kurtosis_of_empty_returns_is_normal_default():
+    assert _kurtosis([]) == 3.0
+
+
 def test_expected_max_z_is_zero_for_a_single_trial():
     assert expected_max_z(1) == 0.0
 
@@ -199,6 +208,16 @@ def test_append_trial_preserves_prior_rows_and_increments_count(tmp_path):
     assert rows[1]["passed"] is False
     assert rows[1]["sharpe"] is None
     assert _trial_count(path=path) == 2
+
+
+def test_append_trial_writes_atomically_leaving_no_stray_temp_file(tmp_path):
+    path = tmp_path / "trials.json"
+    _append_trial("AAPL", tier=2, passed=True, sharpe=0.10, path=path)
+    _append_trial("SERV", tier=3, passed=False, sharpe=None, path=path)
+
+    rows = json.loads(path.read_text())
+    assert [r["symbol"] for r in rows] == ["AAPL", "SERV"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["trials.json"]
 
 
 def _fake_history_df(n_rows=8):
@@ -270,6 +289,23 @@ def test_validate_symbol_backtest_rejects_on_a_failing_fold(tmp_path):
     assert rows[0]["sharpe"] is not None  # full-period sharpe was already computed by this point
 
 
+def test_validate_symbol_backtest_rejects_on_a_failing_fold_that_is_not_the_first(tmp_path):
+    log_path = tmp_path / "trials.json"
+    full_result = _result()
+    good_fold = _result(trades=[{"x": 1}] * 30)
+    bad_fold = _result(sharpe=0.2)
+
+    with patch("graywind_strategy.backtest_gate.fetch_backtest_bars", return_value=_fake_history_df()), \
+         patch("graywind_strategy.backtest_gate.run_backtest",
+               side_effect=[full_result, good_fold, good_fold, good_fold, bad_fold]):
+        with pytest.raises(GuardrailViolation, match="fold 3"):
+            validate_symbol_backtest("SERV", tier=3, data_client=MagicMock(), trial_log_path=log_path)
+
+    rows = json.loads(log_path.read_text())
+    assert len(rows) == 1
+    assert rows[0]["passed"] is False
+
+
 def test_validate_symbol_backtest_rejects_on_low_deflated_sharpe(tmp_path):
     log_path = tmp_path / "trials.json"
     full_result = _result()
@@ -284,6 +320,52 @@ def test_validate_symbol_backtest_rejects_on_low_deflated_sharpe(tmp_path):
 
     rows = json.loads(log_path.read_text())
     assert rows[0]["passed"] is False
+
+
+def _dsr_test_equity_curve():
+    # Deterministic (seeded) near-normal return series: mean/stdev sharpe ~0.149,
+    # skew ~-0.045, kurtosis ~2.99 with 1000 return observations -- verified by hand
+    # against the real (unpatched) deflated_sharpe_ratio() before writing this test.
+    # See the docstring below for the exact values.
+    random.seed(13)
+    returns = [random.gauss(0.00018, 0.0012) for _ in range(1000)]
+    equity = [10000.0]
+    for r in returns:
+        equity.append(equity[-1] * (1 + r))
+    return equity
+
+
+def test_validate_symbol_backtest_rejects_via_the_real_deflated_sharpe_formula(tmp_path):
+    """Exercises the real (unpatched) deflated_sharpe_ratio() end-to-end through
+    validate_symbol_backtest, so a swapped skew/kurtosis argument order at the call
+    site would fail this test even though every other DSR-related test in this file
+    mocks deflated_sharpe_ratio() away.
+
+    Verified by hand (see graywind_strategy/backtest_gate.py's _period_returns /
+    _skewness / _kurtosis / deflated_sharpe_ratio applied to this exact equity curve):
+    sharpe ~= 0.1491, skew ~= -0.0451, kurtosis ~= 2.9900, n_returns = 1000.
+    deflated_sharpe_ratio(...) at n_trials=1 is ~0.99999850 (comfortably above 0.95);
+    at n_trials=1000 it drops to ~0.92157 (below 0.95). 999 prior passing rows are
+    seeded into the trial log so this candidate's n_trials is 1000.
+    """
+    log_path = tmp_path / "trials.json"
+    log_path.write_text(json.dumps([
+        {"symbol": f"SYM{i}", "tier": 2, "timestamp": "2020-01-01T00:00:00+00:00",
+         "passed": True, "sharpe": 0.05}
+        for i in range(999)
+    ]))
+    full_result = _result(equity_curve=_dsr_test_equity_curve(), trades=[{"x": 1}] * 300)
+    fold_result = _result(trades=[{"x": 1}] * 30)
+
+    with patch("graywind_strategy.backtest_gate.fetch_backtest_bars", return_value=_fake_history_df()), \
+         patch("graywind_strategy.backtest_gate.run_backtest",
+               side_effect=[full_result, fold_result, fold_result, fold_result, fold_result]):
+        with pytest.raises(GuardrailViolation, match="deflated Sharpe"):
+            validate_symbol_backtest("SERV", tier=3, data_client=MagicMock(), trial_log_path=log_path)
+
+    rows = json.loads(log_path.read_text())
+    assert len(rows) == 1000
+    assert rows[-1]["passed"] is False
 
 
 def test_validate_symbol_backtest_rejects_before_any_backtest_when_history_too_short(tmp_path):
@@ -321,3 +403,22 @@ def test_validate_symbol_backtest_passes_growing_n_trials_into_deflated_sharpe_r
 
     # 4 prior rows + this candidate itself == 5
     assert mock_dsr.call_args.args[1] == 5
+
+
+def test_validate_symbol_backtest_logs_and_reraises_a_non_guardrail_exception(tmp_path):
+    # A real failure mode this guards against: fetch_alpaca_data.fetch_bars's underlying
+    # Alpaca call raises KeyError (via BarSet.__getitem__) rather than returning an empty
+    # list when a symbol has zero bars, so `if not bars:` in fetch_backtest_bars is
+    # unreachable for that case. Any non-GuardrailViolation exception raised anywhere in
+    # the gate must still append exactly one failed trial row and then propagate unchanged.
+    log_path = tmp_path / "trials.json"
+
+    with patch("graywind_strategy.backtest_gate.fetch_backtest_bars", return_value=_fake_history_df()), \
+         patch("graywind_strategy.backtest_gate.run_backtest", side_effect=RuntimeError("alpaca blew up")):
+        with pytest.raises(RuntimeError, match="alpaca blew up"):
+            validate_symbol_backtest("SERV", tier=3, data_client=MagicMock(), trial_log_path=log_path)
+
+    rows = json.loads(log_path.read_text())
+    assert len(rows) == 1
+    assert rows[0]["passed"] is False
+    assert rows[0]["sharpe"] is None

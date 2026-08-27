@@ -143,11 +143,16 @@ def test_validate_symbol_addition_raises_on_first_failing_check():
     fake_session.get.return_value = fake_response
     fake_data_client = MagicMock()
 
-    with pytest.raises(GuardrailViolation, match="market cap"):
-        validate_symbol_addition(
-            "PENNY", tier=3, finnhub_api_key="k", data_client=fake_data_client,
-            sector="tech", session=fake_session,
-        )
+    # This test passes today only because the market-cap check raises before
+    # backtest_gate.validate_symbol_backtest would ever be called. Patched here so it
+    # stays robust to check-ordering changes -- without this, a reorder would make this
+    # test attempt a real 10-year Alpaca historical-data fetch inside the test suite.
+    with patch("graywind_strategy.backtest_gate.validate_symbol_backtest"):
+        with pytest.raises(GuardrailViolation, match="market cap"):
+            validate_symbol_addition(
+                "PENNY", tier=3, finnhub_api_key="k", data_client=fake_data_client,
+                sector="tech", session=fake_session,
+            )
 
 
 def test_validate_symbol_addition_calls_backtest_gate_after_guardrail_checks_pass():

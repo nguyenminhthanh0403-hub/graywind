@@ -1,11 +1,26 @@
 """Historical-backtest gate a new tier-2/3 symbol must clear before it can be
 added to SYMBOL_TIER, on top of tier_config.py's market-cap/volume/sector
 guardrail (docs/superpowers/specs/2026-08-26-graywind-backtest-gate-design.md).
+
+Deflated Sharpe Ratio (DSR) gets strictly harder over time, by design:
+`probabilistic_sharpe_ratio`'s denominator (a function of skew, kurtosis, and
+sharpe) cancels out of `sr_std`, so the gate's real binding constraint reduces
+to roughly `required annualized Sharpe ~= (1.645 + E[maxZ(N_trials)]) /
+sqrt(years_of_history)` -- it scales with the trial count, not with the fixed
+`FOLD_MIN_SHARPE` threshold alone. Concretely, at 2 years of history the
+required annualized Sharpe is ~1.16 at 1 trial, ~2.28 at 10 trials, and climbs
+past 2.7 by 50 trials. This means `FOLD_MIN_SHARPE = 1.0` significantly
+understates what's actually required once more than a handful of candidates
+have been run through this gate, and the gate becomes very hard to clear
+after roughly a dozen candidates. That is the intended consequence of the
+spec's "trial counter never resets, err stricter over time" design decision
+(see the spec's Deflated Sharpe Ratio section) -- not a bug.
 """
 import json
 import math
 import os
 import statistics
+import tempfile
 from datetime import datetime, timedelta, timezone
 from statistics import NormalDist
 
@@ -101,6 +116,8 @@ def _period_returns(equity_curve):
 
 
 def _skewness(returns):
+    if len(returns) < 2:
+        return 0.0
     n = len(returns)
     mean = statistics.mean(returns)
     stdev = statistics.pstdev(returns)
@@ -110,6 +127,8 @@ def _skewness(returns):
 
 
 def _kurtosis(returns):
+    if len(returns) < 2:
+        return 3.0
     n = len(returns)
     mean = statistics.mean(returns)
     stdev = statistics.pstdev(returns)
@@ -166,9 +185,18 @@ def _append_trial(symbol, tier, passed, sharpe, path=TRIAL_LOG_PATH):
         "passed": passed,
         "sharpe": sharpe,
     })
-    with open(path, "w") as f:
-        json.dump(trials, f, indent=2)
-        f.write("\n")
+    path = str(path)
+    directory = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".backtest_gate_trials_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(trials, f, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
 
 def validate_symbol_backtest(symbol, tier, data_client, trial_log_path=TRIAL_LOG_PATH):
@@ -203,7 +231,13 @@ def validate_symbol_backtest(symbol, tier, data_client, trial_log_path=TRIAL_LOG
                 f"{symbol}: deflated Sharpe ratio {dsr:.3f} below {DSR_THRESHOLD} threshold "
                 f"with {n_trials} trials counted"
             )
-    except GuardrailViolation:
+    except Exception:
+        # Broadened past GuardrailViolation deliberately: any exception (e.g. a
+        # non-GuardrailViolation error like fetch_alpaca_data.fetch_bars's underlying
+        # Alpaca call raising KeyError from BarSet.__getitem__ when a symbol has zero
+        # bars) must still be logged as a failed trial, or n_trials would undercount
+        # for every future candidate. The original exception is always re-raised
+        # unchanged -- never swallowed or wrapped.
         _append_trial(symbol, tier, passed=False, sharpe=sharpe_for_log, path=trial_log_path)
         raise
     else:
