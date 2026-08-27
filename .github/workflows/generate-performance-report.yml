@@ -1,0 +1,51 @@
+# .github/workflows/generate-performance-report.yml
+name: Generate Performance Report
+
+# Manual only -- a quarterly-cadence artifact doesn't need to regenerate
+# every 15-minute live-trading cycle; workflow_dispatch is a deliberate
+# button click (or `gh workflow run`), not a schedule.
+on:
+  workflow_dispatch:
+
+# Lets the built-in GITHUB_TOKEN push graywind's own dashboard-data/*.json.
+# No PAT needed -- dashboard data lives in this same repo.
+permissions:
+  contents: write
+
+# Shares live-trading.yml's own concurrency group: both workflows commit
+# and push to the same dashboard-data/ tree on main, so a report run
+# overlapping a live-trading cycle's push must queue behind it (or vice
+# versa), not race it into a rejected non-fast-forward push.
+concurrency:
+  group: live-cycle
+  cancel-in-progress: false
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out graywind
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate performance report
+        run: python3 scripts/generate_performance_report.py
+
+      - name: Commit and push report
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A dashboard-data
+          if git diff --cached --quiet; then
+            echo "No changes; nothing to commit."
+          else
+            git commit -m "Generate performance report ($(date -u +%FT%H:%M))"
+            git push
+          fi
