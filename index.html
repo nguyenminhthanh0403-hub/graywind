@@ -309,6 +309,12 @@ async function loadCSV(path) {
   return parseCSV(await res.text());
 }
 
+async function loadJSON(path) {
+  const res = await fetch(path);
+  if (!res.ok) return null;
+  return res.json();
+}
+
 // Python's isoformat() emits 6-digit microseconds; JS Date only parses
 // millisecond precision. Truncate before parsing so timestamps like
 // "...T09:39:55.476224-04:00" don't silently become Invalid Date.
@@ -447,6 +453,79 @@ function buildTradeLog(tradeRows) {
     </section>`;
 }
 
+function buildPerformanceReport(report) {
+  if (!report) {
+    return `
+      <section aria-labelledby="perf-head">
+        <div class="section-head"><h2 id="perf-head">Performance Report</h2></div>
+        <div class="table-wrap"><div class="empty-state">No performance report has been generated yet.</div></div>
+      </section>`;
+  }
+
+  const pnlClass = report.total_pnl > 0.005 ? "pos" : report.total_pnl < -0.005 ? "neg" : "flat";
+
+  const symbolEntries = Object.entries(report.per_symbol);
+  const symbolRows = symbolEntries.length === 0
+    ? `<tr><td colspan="3" style="color:var(--txt-3)">No round-trip trades yet.</td></tr>`
+    : symbolEntries.map(([symbol, s]) => `
+        <tr>
+          <td class="symbol-tag">${symbol}</td>
+          <td class="num">${s.trades}</td>
+          <td class="num"><span class="${s.pnl >= 0 ? "pos" : "neg"}">${s.pnl >= 0 ? "+" : ""}${money.format(s.pnl)}</span></td>
+        </tr>`).join("");
+
+  const narrativeRows = report.trade_narratives.length === 0
+    ? `<tr><td colspan="4" style="color:var(--txt-3)">No trades yet.</td></tr>`
+    : report.trade_narratives.slice().reverse().map(n => `
+        <tr>
+          <td>${fmtTime(parseTimestamp(n.timestamp))}</td>
+          <td class="symbol-tag">${n.symbol}</td>
+          <td><span class="side-tag ${n.side === "buy" ? "buy" : "sell"}">${n.side}</span></td>
+          <td style="color:var(--txt-2)">${n.gate_summary}</td>
+        </tr>`).join("");
+
+  const noteItems = report.block_frequency_notes.map(note => `<li>${note}</li>`).join("");
+
+  return `
+    <section aria-labelledby="perf-head">
+      <div class="section-head">
+        <h2 id="perf-head">Performance Report</h2>
+        <span class="section-note">Generated ${fmtTime(parseTimestamp(report.generated_at))}</span>
+      </div>
+      <div class="hero-stats">
+        <div class="stat">
+          <div class="stat-label">Total P&amp;L</div>
+          <div class="stat-val ${pnlClass}">${report.total_pnl >= 0 ? "+" : ""}${money.format(report.total_pnl)}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Win Rate</div>
+          <div class="stat-val">${(report.win_rate * 100).toFixed(1)}%</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Sharpe</div>
+          <div class="stat-val">${report.sharpe.toFixed(2)}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Max Drawdown</div>
+          <div class="stat-val">${(report.max_drawdown * 100).toFixed(1)}%</div>
+        </div>
+      </div>
+      ${noteItems ? `<ul class="section-note" style="margin-top:12px; padding-left:16px;">${noteItems}</ul>` : ""}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Symbol</th><th class="num">Round Trips</th><th class="num">P&amp;L</th></tr></thead>
+          <tbody>${symbolRows}</tbody>
+        </table>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Why</th></tr></thead>
+          <tbody>${narrativeRows}</tbody>
+        </table>
+      </div>
+    </section>`;
+}
+
 function renderEquityChart(accountId, equityRows) {
   const svg = d3.select(`#chart-${accountId}`);
   const wrap = document.getElementById(`chart-wrap-${accountId}`);
@@ -523,7 +602,7 @@ function renderEquityChart(accountId, equityRows) {
     });
 }
 
-function renderAccount(accountId, label, containerEl, statusRows, equityRows, tradeRows) {
+function renderAccount(accountId, label, containerEl, statusRows, equityRows, tradeRows, performanceReport) {
   if (statusRows.length === 0) {
     renderAccountUnavailable(accountId, label, containerEl, "the live cycle hasn't run yet");
     return;
@@ -541,7 +620,8 @@ function renderAccount(accountId, label, containerEl, statusRows, equityRows, tr
       <div id="chart-wrap-${accountId}"><svg id="chart-${accountId}"></svg></div>
     </section>
     ${buildPositions(statusRows)}
-    ${buildTradeLog(tradeRows)}`;
+    ${buildTradeLog(tradeRows)}
+    ${buildPerformanceReport(performanceReport)}`;
 
   renderFreshness(accountId, parseTimestamp(statusRows[0].last_cycle_timestamp));
   renderEquityChart(accountId, equityRows);
@@ -564,7 +644,10 @@ async function loadAccount(accountId, label, dataDir, containerEl) {
       loadCSV(`${dataDir}/trade_log.csv`),
       loadCSV(`${dataDir}/status.csv`),
     ]);
-    renderAccount(accountId, label, containerEl, statusRows, equityRows, tradeRows);
+    // Best-effort, non-blocking: a missing/not-yet-generated report must
+    // not prevent the rest of the account from rendering.
+    const performanceReport = await loadJSON(`${dataDir}/performance_report.json`);
+    renderAccount(accountId, label, containerEl, statusRows, equityRows, tradeRows, performanceReport);
   } catch (err) {
     renderAccountUnavailable(accountId, label, containerEl, err.message);
     document.getElementById(`retry-btn-${accountId}`).addEventListener(
