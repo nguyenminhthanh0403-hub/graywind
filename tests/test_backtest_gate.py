@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -8,7 +8,7 @@ import pytest
 from graywind_strategy.backtest_gate import (
     MIN_HISTORY_DAYS, _append_trial, _kurtosis, _load_trial_log, _period_returns, _skewness,
     _trial_count, check_fold_thresholds, deflated_sharpe_ratio, expected_max_z,
-    fetch_backtest_bars, probabilistic_sharpe_ratio, split_into_folds,
+    fetch_backtest_bars, probabilistic_sharpe_ratio, split_into_folds, validate_symbol_backtest,
 )
 from graywind_strategy.backtester import BacktestResult
 from graywind_strategy.guardrails import GuardrailViolation
@@ -199,3 +199,125 @@ def test_append_trial_preserves_prior_rows_and_increments_count(tmp_path):
     assert rows[1]["passed"] is False
     assert rows[1]["sharpe"] is None
     assert _trial_count(path=path) == 2
+
+
+def _fake_history_df(n_rows=8):
+    return pd.DataFrame({
+        "time": pd.date_range("2020-01-01", periods=n_rows, freq="6h"),
+        "open": [100.0] * n_rows, "high": [101.0] * n_rows,
+        "low": [99.0] * n_rows, "close": [100.0] * n_rows, "volume": [1000] * n_rows,
+    })
+
+
+def _result(**overrides):
+    defaults = dict(
+        equity_curve=[10000.0] + [10000.0 + i for i in range(1, 400)],
+        trades=[{"x": 1}] * 300,
+        sharpe=1.5, max_drawdown=0.10, win_rate=0.50, pdt_compliant=True,
+    )
+    defaults.update(overrides)
+    return BacktestResult(**defaults)
+
+
+def test_validate_symbol_backtest_passes_and_logs_when_every_check_clears(tmp_path):
+    log_path = tmp_path / "trials.json"
+    full_result = _result()
+    fold_result = _result(trades=[{"x": 1}] * 30)
+
+    with patch("graywind_strategy.backtest_gate.fetch_backtest_bars", return_value=_fake_history_df()), \
+         patch("graywind_strategy.backtest_gate.run_backtest",
+               side_effect=[full_result, fold_result, fold_result, fold_result, fold_result]), \
+         patch("graywind_strategy.backtest_gate.deflated_sharpe_ratio", return_value=0.99):
+        validate_symbol_backtest("SERV", tier=3, data_client=MagicMock(), trial_log_path=log_path)
+
+    rows = json.loads(log_path.read_text())
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "SERV"
+    assert rows[0]["tier"] == 3
+    assert rows[0]["passed"] is True
+    assert rows[0]["sharpe"] is not None
+
+
+def test_validate_symbol_backtest_rejects_and_logs_on_full_period_trade_count_floor(tmp_path):
+    log_path = tmp_path / "trials.json"
+    thin_result = _result(trades=[{"x": 1}] * 5)  # below MIN_TOTAL_TRADES
+
+    with patch("graywind_strategy.backtest_gate.fetch_backtest_bars", return_value=_fake_history_df()), \
+         patch("graywind_strategy.backtest_gate.run_backtest", return_value=thin_result):
+        with pytest.raises(GuardrailViolation, match="total trades"):
+            validate_symbol_backtest("SERV", tier=3, data_client=MagicMock(), trial_log_path=log_path)
+
+    rows = json.loads(log_path.read_text())
+    assert len(rows) == 1
+    assert rows[0]["passed"] is False
+    assert rows[0]["sharpe"] is None  # rejected before a raw sharpe was ever computed
+
+
+def test_validate_symbol_backtest_rejects_on_a_failing_fold(tmp_path):
+    log_path = tmp_path / "trials.json"
+    full_result = _result()
+    bad_fold = _result(sharpe=0.2)
+
+    with patch("graywind_strategy.backtest_gate.fetch_backtest_bars", return_value=_fake_history_df()), \
+         patch("graywind_strategy.backtest_gate.run_backtest",
+               side_effect=[full_result, bad_fold]):
+        with pytest.raises(GuardrailViolation, match="fold 0.*sharpe"):
+            validate_symbol_backtest("SERV", tier=3, data_client=MagicMock(), trial_log_path=log_path)
+
+    rows = json.loads(log_path.read_text())
+    assert len(rows) == 1
+    assert rows[0]["passed"] is False
+    assert rows[0]["sharpe"] is not None  # full-period sharpe was already computed by this point
+
+
+def test_validate_symbol_backtest_rejects_on_low_deflated_sharpe(tmp_path):
+    log_path = tmp_path / "trials.json"
+    full_result = _result()
+    fold_result = _result(trades=[{"x": 1}] * 30)
+
+    with patch("graywind_strategy.backtest_gate.fetch_backtest_bars", return_value=_fake_history_df()), \
+         patch("graywind_strategy.backtest_gate.run_backtest",
+               side_effect=[full_result, fold_result, fold_result, fold_result, fold_result]), \
+         patch("graywind_strategy.backtest_gate.deflated_sharpe_ratio", return_value=0.40):
+        with pytest.raises(GuardrailViolation, match="deflated Sharpe"):
+            validate_symbol_backtest("SERV", tier=3, data_client=MagicMock(), trial_log_path=log_path)
+
+    rows = json.loads(log_path.read_text())
+    assert rows[0]["passed"] is False
+
+
+def test_validate_symbol_backtest_rejects_before_any_backtest_when_history_too_short(tmp_path):
+    log_path = tmp_path / "trials.json"
+
+    with patch("graywind_strategy.backtest_gate.fetch_backtest_bars",
+               side_effect=GuardrailViolation("SERV has only 90 days of history, "
+                                               "backtest gate requires at least 730")), \
+         patch("graywind_strategy.backtest_gate.run_backtest") as mock_run_backtest:
+        with pytest.raises(GuardrailViolation, match="90 days"):
+            validate_symbol_backtest("SERV", tier=3, data_client=MagicMock(), trial_log_path=log_path)
+
+    mock_run_backtest.assert_not_called()
+    rows = json.loads(log_path.read_text())
+    assert len(rows) == 1
+    assert rows[0]["passed"] is False
+    assert rows[0]["sharpe"] is None
+
+
+def test_validate_symbol_backtest_passes_growing_n_trials_into_deflated_sharpe_ratio(tmp_path):
+    log_path = tmp_path / "trials.json"
+    log_path.write_text(json.dumps([
+        {"symbol": f"SYM{i}", "tier": 2, "timestamp": "2020-01-01T00:00:00+00:00",
+         "passed": True, "sharpe": 0.05}
+        for i in range(4)
+    ]))
+    full_result = _result()
+    fold_result = _result(trades=[{"x": 1}] * 30)
+
+    with patch("graywind_strategy.backtest_gate.fetch_backtest_bars", return_value=_fake_history_df()), \
+         patch("graywind_strategy.backtest_gate.run_backtest",
+               side_effect=[full_result, fold_result, fold_result, fold_result, fold_result]), \
+         patch("graywind_strategy.backtest_gate.deflated_sharpe_ratio", return_value=0.99) as mock_dsr:
+        validate_symbol_backtest("SERV", tier=3, data_client=MagicMock(), trial_log_path=log_path)
+
+    # 4 prior rows + this candidate itself == 5
+    assert mock_dsr.call_args.args[1] == 5

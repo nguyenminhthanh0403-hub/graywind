@@ -169,3 +169,42 @@ def _append_trial(symbol, tier, passed, sharpe, path=TRIAL_LOG_PATH):
     with open(path, "w") as f:
         json.dump(trials, f, indent=2)
         f.write("\n")
+
+
+def validate_symbol_backtest(symbol, tier, data_client, trial_log_path=TRIAL_LOG_PATH):
+    n_trials = _trial_count(trial_log_path) + 1
+    sharpe_for_log = None
+    try:
+        df = fetch_backtest_bars(data_client, symbol)
+
+        full_result = run_backtest({symbol: df}, starting_equity=10000.0, gates_always_pass=True)
+        if len(full_result.trades) < MIN_TOTAL_TRADES:
+            raise GuardrailViolation(
+                f"{symbol}: only {len(full_result.trades)} total trades, need at least "
+                f"{MIN_TOTAL_TRADES}"
+            )
+
+        full_returns = _period_returns(full_result.equity_curve)
+        stdev = statistics.pstdev(full_returns) if len(full_returns) >= 2 else 0.0
+        raw_sharpe = (statistics.mean(full_returns) / stdev) if stdev else 0.0
+        sharpe_for_log = raw_sharpe
+
+        for i, fold_df in enumerate(split_into_folds(df)):
+            fold_result = run_backtest(
+                {symbol: fold_df}, starting_equity=10000.0, gates_always_pass=True
+            )
+            check_fold_thresholds(fold_result, i)
+
+        skew = _skewness(full_returns)
+        kurtosis = _kurtosis(full_returns)
+        dsr = deflated_sharpe_ratio(raw_sharpe, n_trials, len(full_returns), skew, kurtosis)
+        if dsr < DSR_THRESHOLD:
+            raise GuardrailViolation(
+                f"{symbol}: deflated Sharpe ratio {dsr:.3f} below {DSR_THRESHOLD} threshold "
+                f"with {n_trials} trials counted"
+            )
+    except GuardrailViolation:
+        _append_trial(symbol, tier, passed=False, sharpe=sharpe_for_log, path=trial_log_path)
+        raise
+    else:
+        _append_trial(symbol, tier, passed=True, sharpe=sharpe_for_log, path=trial_log_path)
