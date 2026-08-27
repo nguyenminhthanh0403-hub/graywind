@@ -4,6 +4,8 @@ import os
 
 from scripts.generate_performance_report import (
     ACCOUNTS,
+    NO_DECISION_LOG_MATCH,
+    SELL_EXIT_NARRATIVE,
     build_account_report,
     generate_report,
     load_account_data,
@@ -11,6 +13,7 @@ from scripts.generate_performance_report import (
     build_block_frequency_notes,
     build_trade_narratives,
 )
+from graywind_strategy.backtester import sharpe_ratio
 
 
 def _write_csv(path, fieldnames, rows):
@@ -86,8 +89,23 @@ def test_build_account_report_computes_metrics_and_narrative(tmp_path):
     assert len(report["trade_narratives"]) == 2
     buy_narrative = next(n for n in report["trade_narratives"] if n["side"] == "buy")
     assert buy_narrative["rsi"] == "45.2"
+    assert buy_narrative["sma_fast"] == "101.0"
+    assert buy_narrative["sma_slow"] == "99.0"
     assert "vix=15.0" in buy_narrative["gate_summary"]
     assert any("vix_gate" in note for note in report["block_frequency_notes"])
+    # The sell leg has no real decision-log counterpart (decision_log.csv
+    # never logs exits) -- it must get the honest exit-specific narrative,
+    # not be matched against the buy-evaluation row above.
+    sell_narrative = next(n for n in report["trade_narratives"] if n["side"] == "sell")
+    assert sell_narrative["gate_summary"] == SELL_EXIT_NARRATIVE
+    assert sell_narrative["rsi"] is None
+    assert sell_narrative["sma_fast"] is None
+    assert sell_narrative["sma_slow"] is None
+    # Sharpe is reported unannualized (periods_per_year=1), not inflated by
+    # the backtester's 15-minute-bar constant -- see I2.
+    assert report["sharpe"] == sharpe_ratio(
+        [10000.0, 9800.0, 10050.0], periods_per_year=1
+    )
 
 
 def test_per_symbol_pnl_pairs_buy_and_sell_round_trips():
@@ -114,7 +132,73 @@ def test_build_block_frequency_notes_summarizes_by_reason():
 def test_build_trade_narratives_falls_back_when_no_decision_log_match():
     trades = [{"timestamp": "t1", "symbol": "AAPL", "side": "buy", "qty": 10, "price": 100.0, "reason": "all checks passed"}]
     narratives = build_trade_narratives(trades, decision_rows=[])
-    assert narratives[0]["gate_summary"] == "no decision-log detail available for this trade"
+    assert narratives[0]["gate_summary"] == NO_DECISION_LOG_MATCH
+    assert narratives[0]["rsi"] is None
+    assert narratives[0]["sma_fast"] is None
+    assert narratives[0]["sma_slow"] is None
+
+
+def test_build_trade_narratives_falls_back_when_nearest_match_is_days_away():
+    # C1: an unbounded nearest-neighbor match could pair a trade with a
+    # decision_log row from days away -- e.g. a much earlier (possibly
+    # blocked) cycle's evaluation -- and present it as this trade's "why".
+    # A row outside the same-day tolerance must be treated as no match at
+    # all, falling back to the honest generic message instead of the
+    # distant row's fabricated-looking detail.
+    trades = [{
+        "timestamp": "2026-08-10T10:00:00-04:00", "symbol": "AAPL", "side": "buy",
+        "qty": 10, "price": 100.0, "reason": "all checks passed",
+    }]
+    decision_rows = [{
+        "timestamp": "2026-08-01T10:00:00-04:00", "symbol": "AAPL", "action": "blocked",
+        "reason": "vix_gate", "rsi": "99.9", "sma_fast": "1.0", "sma_slow": "2.0",
+        "vix": "40.0", "sentiment": "-0.9", "days_to_earnings": "1",
+        "macro_breaches": "3", "sector_gates": "['blocked']",
+    }]
+    narratives = build_trade_narratives(trades, decision_rows)
+    assert narratives[0]["gate_summary"] == NO_DECISION_LOG_MATCH
+    assert narratives[0]["rsi"] is None
+    assert narratives[0]["sma_fast"] is None
+    assert narratives[0]["sma_slow"] is None
+    assert "99.9" not in str(narratives[0])
+    assert "40.0" not in str(narratives[0])
+
+
+def test_build_trade_narratives_gives_sells_exit_specific_treatment():
+    # decision_log.csv structurally never has rows for sells (only the
+    # buy-evaluation path logs). A sell must never be matched against a
+    # nearby buy-evaluation row, even one from the very same timestamp.
+    trades = [{
+        "timestamp": "2026-08-10T10:00:00-04:00", "symbol": "AAPL", "side": "sell",
+        "qty": 10, "price": 105.0, "reason": "stop/target exit",
+    }]
+    decision_rows = [{
+        "timestamp": "2026-08-10T10:00:00-04:00", "symbol": "AAPL", "action": "buy",
+        "reason": "all checks passed", "rsi": "45.2", "sma_fast": "101.0", "sma_slow": "99.0",
+        "vix": "15.0", "sentiment": "0.1", "days_to_earnings": "12",
+        "macro_breaches": "0", "sector_gates": "[]",
+    }]
+    narratives = build_trade_narratives(trades, decision_rows)
+    assert narratives[0]["gate_summary"] == SELL_EXIT_NARRATIVE
+    assert narratives[0]["rsi"] is None
+    assert narratives[0]["sma_fast"] is None
+    assert narratives[0]["sma_slow"] is None
+
+
+def test_build_trade_narratives_includes_sma_fast_and_slow_on_a_real_match():
+    trades = [{
+        "timestamp": "2026-08-10T10:00:00-04:00", "symbol": "AAPL", "side": "buy",
+        "qty": 10, "price": 100.0, "reason": "all checks passed",
+    }]
+    decision_rows = [{
+        "timestamp": "2026-08-10T10:00:05-04:00", "symbol": "AAPL", "action": "buy",
+        "reason": "all checks passed", "rsi": "45.2", "sma_fast": "101.0", "sma_slow": "99.0",
+        "vix": "15.0", "sentiment": "0.1", "days_to_earnings": "12",
+        "macro_breaches": "0", "sector_gates": "[]",
+    }]
+    narratives = build_trade_narratives(trades, decision_rows)
+    assert narratives[0]["sma_fast"] == "101.0"
+    assert narratives[0]["sma_slow"] == "99.0"
 
 
 def test_generate_report_skips_account_with_no_dashboard_data(tmp_path, monkeypatch):

@@ -91,10 +91,28 @@ def _fmt_decision_value(value):
     return "" if value is None else str(value)
 
 
+def _fmt_earnings_value(value, reached):
+    # evaluate_earnings_gate (pipeline.py) legitimately returns value=None
+    # when it actually ran and found no earnings scheduled -- a real,
+    # meaningful reading. That's indistinguishable from `earnings` never
+    # having run at all (an earlier gate in DECISION_GATE_ORDER
+    # short-circuited first) once both collapse to the same blank ""
+    # through _fmt_decision_value. Final-review finding I5: emit a distinct
+    # sentinel ("none") for the genuinely-evaluated case so the two
+    # situations are no longer indistinguishable in decision_log.csv.
+    # GateResult/pipeline.py are unchanged -- this is purely a live_loop.py
+    # CSV-formatting distinction.
+    if not reached:
+        return ""
+    return "none" if value is None else str(value)
+
+
 def _decision_log_row(cycle_timestamp, symbol, decision, rsi, sma_fast, sma_slow):
     gate_values = {name: None for name in DECISION_GATE_ORDER}
+    reached_gates = set()
     for name, result in zip(DECISION_GATE_ORDER, decision.gate_readings):
         gate_values[name] = result.value
+        reached_gates.add(name)
     return {
         "timestamp": cycle_timestamp,
         "symbol": symbol,
@@ -105,7 +123,7 @@ def _decision_log_row(cycle_timestamp, symbol, decision, rsi, sma_fast, sma_slow
         "sma_slow": _fmt_decision_value(sma_slow),
         "vix": _fmt_decision_value(gate_values["vix"]),
         "sentiment": _fmt_decision_value(gate_values["sentiment"]),
-        "days_to_earnings": _fmt_decision_value(gate_values["earnings"]),
+        "days_to_earnings": _fmt_earnings_value(gate_values["earnings"], "earnings" in reached_gates),
         "macro_breaches": _fmt_decision_value(gate_values["macro"]),
         "sector_gates": _fmt_decision_value(gate_values["sector"]),
     }

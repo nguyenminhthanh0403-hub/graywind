@@ -312,7 +312,17 @@ async function loadCSV(path) {
 async function loadJSON(path) {
   const res = await fetch(path);
   if (!res.ok) return null;
-  return res.json();
+  try {
+    return await res.json();
+  } catch (err) {
+    // A malformed/partial JSON response must degrade to the "no report
+    // generated yet" empty state, not throw up through loadAccount's
+    // outer try/catch and wipe the ENTIRE account's render (chart,
+    // positions, trade log) -- the adjacent comment in loadAccount already
+    // promises a missing/failed report can't take down the rest of the
+    // dashboard; this closes the gap where "failed" meant "404" only.
+    return null;
+  }
 }
 
 // Python's isoformat() emits 6-digit microseconds; JS Date only parses
@@ -476,13 +486,23 @@ function buildPerformanceReport(report) {
 
   const narrativeRows = report.trade_narratives.length === 0
     ? `<tr><td colspan="4" style="color:var(--txt-3)">No trades yet.</td></tr>`
-    : report.trade_narratives.slice().reverse().map(n => `
+    : report.trade_narratives.slice().reverse().map(n => {
+        // rsi/sma_fast/sma_slow are only present when the trade matched a
+        // real decision-log row (see C1/I4 fix) -- fabricating them for a
+        // sell exit or an out-of-tolerance match is exactly what the
+        // final review flagged, so only render them when genuinely there.
+        const hasIndicators = n.rsi !== null && n.rsi !== undefined;
+        const why = (hasIndicators
+          ? `rsi=${n.rsi}, sma_fast=${n.sma_fast}, sma_slow=${n.sma_slow}, `
+          : "") + n.gate_summary;
+        return `
         <tr>
           <td>${fmtTime(parseTimestamp(n.timestamp))}</td>
           <td class="symbol-tag">${n.symbol}</td>
           <td><span class="side-tag ${n.side === "buy" ? "buy" : "sell"}">${n.side}</span></td>
-          <td style="color:var(--txt-2)">${n.gate_summary}</td>
-        </tr>`).join("");
+          <td style="color:var(--txt-2)">${why}</td>
+        </tr>`;
+      }).join("");
 
   const noteItems = report.block_frequency_notes.map(note => `<li>${note}</li>`).join("");
 
@@ -494,7 +514,7 @@ function buildPerformanceReport(report) {
       </div>
       <div class="hero-stats">
         <div class="stat">
-          <div class="stat-label">Total P&amp;L</div>
+          <div class="stat-label">Total P&amp;L (incl. open positions)</div>
           <div class="stat-val ${pnlClass}">${report.total_pnl >= 0 ? "+" : ""}${money.format(report.total_pnl)}</div>
         </div>
         <div class="stat">
@@ -502,7 +522,7 @@ function buildPerformanceReport(report) {
           <div class="stat-val">${(report.win_rate * 100).toFixed(1)}%</div>
         </div>
         <div class="stat">
-          <div class="stat-label">Sharpe</div>
+          <div class="stat-label">Sharpe (period)</div>
           <div class="stat-val">${report.sharpe.toFixed(2)}</div>
         </div>
         <div class="stat">
@@ -513,7 +533,7 @@ function buildPerformanceReport(report) {
       ${noteItems ? `<ul class="section-note" style="margin-top:12px; padding-left:16px;">${noteItems}</ul>` : ""}
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Symbol</th><th class="num">Round Trips</th><th class="num">P&amp;L</th></tr></thead>
+          <thead><tr><th>Symbol</th><th class="num">Round Trips</th><th class="num">Realized P&amp;L</th></tr></thead>
           <tbody>${symbolRows}</tbody>
         </table>
       </div>

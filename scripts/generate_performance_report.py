@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from graywind_strategy.backtester import PERIODS_PER_YEAR_15MIN, max_drawdown, sharpe_ratio, win_rate
+from graywind_strategy.backtester import max_drawdown, sharpe_ratio, win_rate
 
 ACCOUNTS = [
     {"label": "100k", "state_dir": "state", "dashboard_dir": "dashboard-data"},
@@ -67,12 +67,30 @@ def per_symbol_pnl(trades):
     return breakdown
 
 
+NO_DECISION_LOG_MATCH = "no decision-log detail available for this trade"
+SELL_EXIT_NARRATIVE = "stop/target exit — no gated decision to explain (exits aren't gated)"
+
+
 def _nearest_decision_row(rows_for_symbol, trade_timestamp):
+    """Nearest decision_log.csv row for this symbol, bounded to the same
+    calendar day as the trade. An unbounded nearest-neighbor match can pair
+    a trade with a completely unrelated (and possibly *blocked*) cycle's
+    decision from days away, fabricating a "why" that never actually
+    applied to this trade -- see final-review finding C1. A row from a
+    different day is treated the same as no match at all: the caller falls
+    back to the generic "no decision-log detail available" narrative.
+    """
     if not rows_for_symbol:
         return None
     trade_dt = datetime.fromisoformat(trade_timestamp)
+    same_day_rows = [
+        row for row in rows_for_symbol
+        if datetime.fromisoformat(row["timestamp"]).date() == trade_dt.date()
+    ]
+    if not same_day_rows:
+        return None
     return min(
-        rows_for_symbol,
+        same_day_rows,
         key=lambda row: abs((datetime.fromisoformat(row["timestamp"]) - trade_dt).total_seconds()),
     )
 
@@ -84,16 +102,35 @@ def build_trade_narratives(trades, decision_rows):
 
     narratives = []
     for trade in trades:
-        match = _nearest_decision_row(by_symbol.get(trade["symbol"], []), trade["timestamp"])
         narrative = {
             "timestamp": trade["timestamp"], "symbol": trade["symbol"], "side": trade["side"],
             "qty": trade["qty"], "price": trade["price"], "reason": trade["reason"],
         }
+        if trade["side"] == "sell":
+            # decision_log.csv only ever gets rows from the buy-evaluation
+            # path (decide_trade()) -- the live loop's stop/target exit
+            # path never writes one. Matching a sell against the nearest
+            # buy-evaluation row would present an unrelated cycle's
+            # (possibly blocked) buy decision as the "why" for this exit,
+            # which is exactly the fabrication C1 flagged. Sells get their
+            # own honest, non-gated narrative instead of any match attempt.
+            narrative["rsi"] = None
+            narrative["sma_fast"] = None
+            narrative["sma_slow"] = None
+            narrative["gate_summary"] = SELL_EXIT_NARRATIVE
+            narratives.append(narrative)
+            continue
+
+        match = _nearest_decision_row(by_symbol.get(trade["symbol"], []), trade["timestamp"])
         if match is None:
             narrative["rsi"] = None
-            narrative["gate_summary"] = "no decision-log detail available for this trade"
+            narrative["sma_fast"] = None
+            narrative["sma_slow"] = None
+            narrative["gate_summary"] = NO_DECISION_LOG_MATCH
         else:
             narrative["rsi"] = match["rsi"]
+            narrative["sma_fast"] = match["sma_fast"]
+            narrative["sma_slow"] = match["sma_slow"]
             narrative["gate_summary"] = (
                 f"vix={match['vix']}, sentiment={match['sentiment']}, "
                 f"days_to_earnings={match['days_to_earnings']}, "
@@ -120,7 +157,17 @@ def build_block_frequency_notes(decision_rows):
 
 def build_account_report(data):
     equity_curve = [float(row["equity"]) for row in data["equity_points"] if row["equity"]]
-    sharpe = sharpe_ratio(equity_curve, periods_per_year=PERIODS_PER_YEAR_15MIN)
+    # PERIODS_PER_YEAR_15MIN (backtester.py) assumes a uniform 15-minute bar
+    # cadence, which holds for the backtester's synthetic data but NOT for
+    # the live equity_curve.csv -- its points are one per cycle that
+    # actually ran (median real gap ~41 minutes, with multi-day gaps across
+    # weekends), so annualizing with that constant inflated the published
+    # Sharpe by roughly 1.6x on real data (final-review finding I2). Report
+    # the unannualized, per-observation Sharpe instead (periods_per_year=1)
+    # rather than half-implement a timestamp-spacing-derived annualization
+    # -- index.html labels this field "Sharpe (period)" to make clear it
+    # isn't a standard annualized figure.
+    sharpe = sharpe_ratio(equity_curve, periods_per_year=1)
     max_dd = max_drawdown(equity_curve) if equity_curve else 0.0
     mapped_trades = [
         {"symbol": t["symbol"], "action": t["side"], "price": float(t["price"]), "shares": float(t["qty"])}

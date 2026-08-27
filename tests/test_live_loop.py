@@ -358,6 +358,65 @@ def test_process_symbol_decision_row_includes_gate_values_from_gate_readings():
     assert row["sector_gates"] == ""  # never reached -- blocked before the sector gate ran
 
 
+def test_process_symbol_decision_row_shows_none_sentinel_when_earnings_gate_ran_and_found_no_earnings():
+    # I5: evaluate_earnings_gate legitimately returns value=None when it
+    # actually ran and found no earnings scheduled -- a real, meaningful
+    # reading, distinct from the gate never having run at all (an earlier
+    # gate short-circuited first). Both used to collapse to the same blank
+    # "" in decision_log.csv; the earnings-ran-with-no-earnings case must
+    # now show the "none" sentinel instead.
+    from graywind_strategy.gate_result import GateResult
+
+    decision_rows = []
+    decision = TradeDecision(
+        action="blocked", reason="macro_gate",
+        gate_readings=[
+            GateResult(passed=True, value=15.0),   # vix
+            GateResult(passed=True, value=0.05),   # sentiment
+            GateResult(passed=True, value=None),   # earnings -- ran, no earnings scheduled
+            GateResult(passed=False, value=2),     # macro -- blocked here, sector never ran
+        ],
+    )
+    with patch("live_loop.decide_trade", return_value=decision):
+        process_symbol(
+            symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+            open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+            trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+            cycle_timestamp="t1", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+            decision_rows=decision_rows,
+        )
+    row = decision_rows[0]
+    assert row["days_to_earnings"] == "none"
+
+
+def test_process_symbol_decision_row_shows_blank_when_earnings_gate_never_ran():
+    # Contrast case: earnings never reached (blocked earlier, e.g. by
+    # sentiment_gate) must still show blank "", not the "none" sentinel --
+    # that sentinel means "ran and found nothing," not "didn't run."
+    from graywind_strategy.gate_result import GateResult
+
+    decision_rows = []
+    decision = TradeDecision(
+        action="blocked", reason="sentiment_gate",
+        gate_readings=[
+            GateResult(passed=True, value=15.0),    # vix
+            GateResult(passed=False, value=-0.5),   # sentiment -- blocked here, earnings never ran
+        ],
+    )
+    with patch("live_loop.decide_trade", return_value=decision):
+        process_symbol(
+            symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+            open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+            trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+            cycle_timestamp="t1", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+            decision_rows=decision_rows,
+        )
+    row = decision_rows[0]
+    assert row["days_to_earnings"] == ""
+
+
 def test_process_symbol_does_not_append_decision_row_when_skipping_via_held_position():
     decision_rows = []
     symbol_statuses = {}
