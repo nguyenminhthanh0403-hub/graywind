@@ -21,6 +21,11 @@ TIER_POOLS_FILENAME = "tier_pools.csv"
 TIER_POOLS_FIELDS = ["tier", "cash"]
 REBALANCE_FILENAME = "tier1_rebalance.csv"
 REBALANCE_FIELDS = ["last_rebalance_month"]
+DECISION_LOG_FILENAME = "decision_log.csv"
+DECISION_LOG_FIELDS = [
+    "timestamp", "symbol", "action", "reason", "rsi", "sma_fast", "sma_slow",
+    "vix", "sentiment", "days_to_earnings", "macro_breaches", "sector_gates",
+]
 
 
 def load_state(state_dir=DEFAULT_STATE_DIR):
@@ -104,3 +109,27 @@ def save_rebalance_state(rebalance_state, state_dir=DEFAULT_STATE_DIR):
         writer = csv.DictWriter(f, fieldnames=REBALANCE_FIELDS, lineterminator="\n")
         writer.writeheader()
         writer.writerow({"last_rebalance_month": rebalance_state["last_rebalance_month"] or ""})
+
+
+def append_decision_log(rows, state_dir=DEFAULT_STATE_DIR):
+    """Appends one cycle's decision rows to <state_dir>/decision_log.csv,
+    accumulating across every cycle ever run (same append-forever semantics
+    as dashboard-data's equity_curve.csv/trade_log.csv, not an overwritten
+    snapshot like operational.csv/positions.csv). A no-op on an empty list
+    -- most cycles evaluate at least one symbol, but a cycle where every
+    symbol is already held (the skip-if-holding guard in live_loop.py)
+    legitimately produces zero rows. Any write failure (permissions, full
+    disk) propagates -- a missing decision row would produce a misleading
+    report later (a trade with no explainable "why"), so this must never
+    fail silently.
+    """
+    if not rows:
+        return
+    os.makedirs(state_dir, exist_ok=True)
+    path = os.path.join(state_dir, DECISION_LOG_FILENAME)
+    file_exists = os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=DECISION_LOG_FIELDS, lineterminator="\n")
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(rows)

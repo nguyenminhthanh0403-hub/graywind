@@ -3,7 +3,7 @@ import os
 
 from graywind_strategy.state_store import (
     load_state, save_state, load_tier_pools, save_tier_pools,
-    load_rebalance_state, save_rebalance_state,
+    load_rebalance_state, save_rebalance_state, append_decision_log,
 )
 
 
@@ -166,3 +166,51 @@ def test_save_then_load_round_trips_rebalance_state(tmp_path):
     save_rebalance_state({"last_rebalance_month": "2026-08"}, state_dir=state_dir)
     rebalance_state = load_rebalance_state(state_dir=state_dir)
     assert rebalance_state == {"last_rebalance_month": "2026-08"}
+
+
+def test_append_decision_log_writes_header_and_row_on_first_call(tmp_path):
+    state_dir = str(tmp_path)
+    append_decision_log([{
+        "timestamp": "2026-01-08T09:35:00-05:00", "symbol": "AAPL", "action": "buy",
+        "reason": "all checks passed", "rsi": 45.2, "sma_fast": 101.0, "sma_slow": 99.0,
+        "vix": 15.0, "sentiment": 0.1, "days_to_earnings": 12, "macro_breaches": 0, "sector_gates": "[]",
+    }], state_dir=state_dir)
+    with open(os.path.join(state_dir, "decision_log.csv"), newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "AAPL"
+    assert rows[0]["action"] == "buy"
+    assert rows[0]["rsi"] == "45.2"
+
+
+def test_append_decision_log_appends_across_multiple_calls(tmp_path):
+    state_dir = str(tmp_path)
+    row = {
+        "timestamp": "t1", "symbol": "AAPL", "action": "hold", "reason": "no buy signal",
+        "rsi": "", "sma_fast": "", "sma_slow": "", "vix": "", "sentiment": "",
+        "days_to_earnings": "", "macro_breaches": "", "sector_gates": "",
+    }
+    append_decision_log([row], state_dir=state_dir)
+    append_decision_log([{**row, "timestamp": "t2"}], state_dir=state_dir)
+    with open(os.path.join(state_dir, "decision_log.csv"), newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [r["timestamp"] for r in rows] == ["t1", "t2"]
+
+
+def test_append_decision_log_writes_multiple_rows_from_one_call(tmp_path):
+    state_dir = str(tmp_path)
+    row = {
+        "timestamp": "t1", "symbol": "AAPL", "action": "hold", "reason": "no buy signal",
+        "rsi": "", "sma_fast": "", "sma_slow": "", "vix": "", "sentiment": "",
+        "days_to_earnings": "", "macro_breaches": "", "sector_gates": "",
+    }
+    append_decision_log([row, {**row, "symbol": "SERV"}], state_dir=state_dir)
+    with open(os.path.join(state_dir, "decision_log.csv"), newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [r["symbol"] for r in rows] == ["AAPL", "SERV"]
+
+
+def test_append_decision_log_is_a_noop_on_empty_rows(tmp_path):
+    state_dir = str(tmp_path)
+    append_decision_log([], state_dir=state_dir)
+    assert not os.path.exists(os.path.join(state_dir, "decision_log.csv"))
