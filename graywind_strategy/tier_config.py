@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from fetch_alpaca_data import fetch_bars
+from graywind_strategy.guardrails import GuardrailViolation
 from graywind_strategy.sector_config import SYMBOL_SECTOR
 
 ET = ZoneInfo("America/New_York")
@@ -26,10 +27,6 @@ TIER_GUARDRAILS = {
     3: {"market_cap_floor": 300_000_000, "min_avg_volume": 100_000},
 }
 MAX_SYMBOLS_PER_SECTOR = 3
-
-
-class GuardrailViolation(Exception):
-    pass
 
 
 SYMBOL_TIER = {"AAPL": 2, "SERV": 3}  # symbol -> 1 | 2 | 3
