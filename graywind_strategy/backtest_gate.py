@@ -57,3 +57,15 @@ def fetch_backtest_bars(data_client, symbol, lookback_years=10):
             f"at least {MIN_HISTORY_DAYS}"
         )
     return df
+
+
+def split_into_folds(df, n_folds=N_FOLDS):
+    df = df.reset_index(drop=True)
+    fold_size = len(df) // n_folds
+    folds = []
+    start = 0
+    for i in range(n_folds):
+        end = start + fold_size if i < n_folds - 1 else len(df)
+        folds.append(df.iloc[start:end].reset_index(drop=True))
+        start = end
+    return folds

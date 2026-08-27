@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from graywind_strategy.backtest_gate import MIN_HISTORY_DAYS, fetch_backtest_bars
+from graywind_strategy.backtest_gate import MIN_HISTORY_DAYS, fetch_backtest_bars, split_into_folds
 from graywind_strategy.guardrails import GuardrailViolation
 
 
@@ -58,3 +58,22 @@ def test_fetch_backtest_bars_returns_dataframe_when_span_clears_minimum():
     assert list(df.columns) == ["time", "open", "high", "low", "close", "volume"]
     assert len(df) == len(bars)
     assert df["close"].iloc[-1] == bars[-1].close
+
+
+def test_split_into_folds_divides_evenly_when_divisible():
+    df = pd.DataFrame({"time": pd.date_range("2020-01-01", periods=100, freq="15min")})
+    folds = split_into_folds(df, n_folds=4)
+    assert [len(f) for f in folds] == [25, 25, 25, 25]
+
+
+def test_split_into_folds_gives_remainder_to_last_fold():
+    df = pd.DataFrame({"time": pd.date_range("2020-01-01", periods=101, freq="15min")})
+    folds = split_into_folds(df, n_folds=4)
+    assert [len(f) for f in folds] == [25, 25, 25, 26]
+
+
+def test_split_into_folds_covers_every_row_exactly_once_in_order():
+    df = pd.DataFrame({"value": range(37)})
+    folds = split_into_folds(df, n_folds=4)
+    reassembled = pd.concat(folds, ignore_index=True)
+    assert reassembled["value"].tolist() == list(range(37))
