@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from graywind_strategy.tier_config import (
     GuardrailViolation, TIER_GUARDRAILS, MAX_SYMBOLS_PER_SECTOR,
@@ -148,3 +148,50 @@ def test_validate_symbol_addition_raises_on_first_failing_check():
             "PENNY", tier=3, finnhub_api_key="k", data_client=fake_data_client,
             sector="tech", session=fake_session,
         )
+
+
+def test_validate_symbol_addition_calls_backtest_gate_after_guardrail_checks_pass():
+    fake_response = MagicMock()
+    fake_response.json.return_value = {"marketCapitalization": 3_000_000.0}  # clears tier 2
+    fake_response.raise_for_status.return_value = None
+    fake_session = MagicMock()
+    fake_session.get.return_value = fake_response
+    fake_data_client = MagicMock()
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(
+            "graywind_strategy.tier_config.fetch_bars",
+            lambda client, symbol, start, end: [MagicMock(volume=1_000_000)],
+        )
+        with patch("graywind_strategy.backtest_gate.validate_symbol_backtest") as mock_gate:
+            validate_symbol_addition(
+                "AAPL", tier=2, finnhub_api_key="k", data_client=fake_data_client,
+                sector="tech", session=fake_session,
+            )
+    mock_gate.assert_called_once_with("AAPL", 2, fake_data_client)
+
+
+def test_validate_symbol_addition_propagates_backtest_gate_rejection():
+    fake_response = MagicMock()
+    fake_response.json.return_value = {"marketCapitalization": 3_000_000.0}
+    fake_response.raise_for_status.return_value = None
+    fake_session = MagicMock()
+    fake_session.get.return_value = fake_response
+    fake_data_client = MagicMock()
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(
+            "graywind_strategy.tier_config.fetch_bars",
+            lambda client, symbol, start, end: [MagicMock(volume=1_000_000)],
+        )
+        with patch(
+            "graywind_strategy.backtest_gate.validate_symbol_backtest",
+            side_effect=GuardrailViolation(
+                "SERV: deflated Sharpe ratio 0.400 below 0.95 threshold with 5 trials counted"
+            ),
+        ):
+            with pytest.raises(GuardrailViolation, match="deflated Sharpe"):
+                validate_symbol_addition(
+                    "SERV", tier=3, finnhub_api_key="k", data_client=fake_data_client,
+                    sector="robotics", session=fake_session,
+                )

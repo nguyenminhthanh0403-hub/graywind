@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from fetch_alpaca_data import fetch_bars
+from graywind_strategy import backtest_gate
 from graywind_strategy.guardrails import GuardrailViolation
 from graywind_strategy.sector_config import SYMBOL_SECTOR
 
@@ -102,3 +103,4 @@ def validate_symbol_addition(symbol, tier, finnhub_api_key, data_client, sector,
     avg_volume = fetch_avg_volume(data_client, symbol)
     existing_sector_counts = sector_counts_for_tier(tier, symbol_tier=symbol_tier, sector_map=sector_map)
     check_guardrail(tier, market_cap, avg_volume, sector, existing_sector_counts)
+    backtest_gate.validate_symbol_backtest(symbol, tier, data_client)
