@@ -23,7 +23,10 @@ from graywind_strategy.gates.earnings_gate import (
     earnings_gate,
     fetch_next_earnings_date,
 )
-from graywind_strategy.gates.macro_gate import MacroDataUnavailable, fetch_bullion_macro_snapshot, macro_gate
+from graywind_strategy.gate_result import GateResult
+from graywind_strategy.gates.macro_gate import (
+    MacroDataUnavailable, count_macro_breaches, fetch_bullion_macro_snapshot,
+)
 from graywind_strategy.gates.sector_gates import evaluate_sector_gates
 from graywind_strategy.risk.position_sizing import QTY_DECIMALS
 from graywind_strategy.gates.sentiment_gate import (
@@ -49,32 +52,35 @@ def evaluate_vix_gate(fred_api_key, as_of_date=None, threshold=VIX_THRESHOLD):
     try:
         vix_value = fetch_latest_vix(fred_api_key, today=as_of_date)
     except VixDataUnavailable:
-        return False
-    return vix_gate(vix_value, threshold)
+        return GateResult(passed=False, detail="VixDataUnavailable")
+    return GateResult(passed=vix_gate(vix_value, threshold), value=vix_value)
 
 
 def evaluate_sentiment_gate(news_client, symbol, as_of_date=None, threshold=SENTIMENT_THRESHOLD):
     try:
         headlines = fetch_recent_headlines(news_client, symbol, as_of=as_of_date)
     except SentimentDataUnavailable:
-        return False
-    return sentiment_gate(sentiment_score(headlines), threshold)
+        return GateResult(passed=False, detail="SentimentDataUnavailable")
+    score = sentiment_score(headlines)
+    return GateResult(passed=sentiment_gate(score, threshold), value=score)
 
 
 def evaluate_earnings_gate(symbol, finnhub_api_key, as_of_date, blackout_days=EARNINGS_BLACKOUT_DAYS):
     try:
         next_date = fetch_next_earnings_date(symbol, finnhub_api_key, as_of_date)
     except EarningsDataUnavailable:
-        return False
-    return earnings_gate(next_date, as_of_date, blackout_days)
+        return GateResult(passed=False, detail="EarningsDataUnavailable")
+    days_until = (next_date - as_of_date).days if next_date is not None else None
+    return GateResult(passed=earnings_gate(next_date, as_of_date, blackout_days), value=days_until)
 
 
 def evaluate_macro_gate(as_of_date, session=requests, required_breaches=2):
     try:
         snapshot = fetch_bullion_macro_snapshot(as_of_date, session=session)
     except MacroDataUnavailable:
-        return False
-    return macro_gate(snapshot, required_breaches)
+        return GateResult(passed=False, detail="MacroDataUnavailable")
+    breaches = count_macro_breaches(snapshot)
+    return GateResult(passed=breaches < required_breaches, value=breaches)
 
 
 def evaluate_analyst_consensus_multiplier(symbol, as_of_date, current_price):

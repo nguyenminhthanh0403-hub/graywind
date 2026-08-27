@@ -8,6 +8,7 @@ from graywind_strategy.gates.earnings_gate import EarningsDataUnavailable
 from graywind_strategy.gates.macro_gate import MacroDataUnavailable
 from graywind_strategy.gates.sentiment_gate import SentimentDataUnavailable
 from graywind_strategy.gates.vix_gate import VixDataUnavailable
+from graywind_strategy.gate_result import GateResult
 from graywind_strategy.pipeline import (
     evaluate_analyst_consensus_multiplier,
     evaluate_earnings_gate,
@@ -22,12 +23,18 @@ from graywind_strategy.risk.position_sizing import PositionSizer
 
 def test_evaluate_vix_gate_fails_closed_on_fetch_error():
     with patch("graywind_strategy.pipeline.fetch_latest_vix", side_effect=VixDataUnavailable("boom")):
-        assert evaluate_vix_gate(fred_api_key="k", as_of_date=date(2024, 1, 8)) is False
+        result = evaluate_vix_gate(fred_api_key="k", as_of_date=date(2024, 1, 8))
+    assert result.passed is False
+    assert bool(result) is False
+    assert result.detail == "VixDataUnavailable"
 
 
 def test_evaluate_vix_gate_passes_through_on_success():
     with patch("graywind_strategy.pipeline.fetch_latest_vix", return_value=15.0) as mock_fetch:
-        assert evaluate_vix_gate(fred_api_key="k", as_of_date=date(2024, 1, 8)) is True
+        result = evaluate_vix_gate(fred_api_key="k", as_of_date=date(2024, 1, 8))
+    assert result.passed is True
+    assert bool(result) is True
+    assert result.value == 15.0
     mock_fetch.assert_called_once_with("k", today=date(2024, 1, 8))
 
 
@@ -36,17 +43,17 @@ def test_evaluate_sentiment_gate_fails_closed_on_fetch_error():
         "graywind_strategy.pipeline.fetch_recent_headlines",
         side_effect=SentimentDataUnavailable("boom"),
     ):
-        assert evaluate_sentiment_gate(
-            news_client=object(), symbol="AAPL", as_of_date=date(2024, 1, 8)
-        ) is False
+        result = evaluate_sentiment_gate(news_client=object(), symbol="AAPL", as_of_date=date(2024, 1, 8))
+    assert result.passed is False
+    assert result.detail == "SentimentDataUnavailable"
 
 
 def test_evaluate_sentiment_gate_forwards_as_of_date_to_fetch():
     news_client = object()
     with patch("graywind_strategy.pipeline.fetch_recent_headlines", return_value=[]) as mock_fetch:
-        assert evaluate_sentiment_gate(
-            news_client=news_client, symbol="AAPL", as_of_date=date(2024, 1, 8)
-        ) is True
+        result = evaluate_sentiment_gate(news_client=news_client, symbol="AAPL", as_of_date=date(2024, 1, 8))
+    assert result.passed is True
+    assert result.value == 0.0  # sentiment_score([]) == 0.0 (neutral, no headlines)
     mock_fetch.assert_called_once_with(news_client, "AAPL", as_of=date(2024, 1, 8))
 
 
@@ -55,9 +62,23 @@ def test_evaluate_earnings_gate_fails_closed_on_fetch_error():
         "graywind_strategy.pipeline.fetch_next_earnings_date",
         side_effect=EarningsDataUnavailable("boom"),
     ):
-        assert evaluate_earnings_gate(
-            symbol="AAPL", finnhub_api_key="k", as_of_date=date(2024, 1, 8)
-        ) is False
+        result = evaluate_earnings_gate(symbol="AAPL", finnhub_api_key="k", as_of_date=date(2024, 1, 8))
+    assert result.passed is False
+    assert result.detail == "EarningsDataUnavailable"
+
+
+def test_evaluate_earnings_gate_value_is_none_when_no_earnings_scheduled():
+    with patch("graywind_strategy.pipeline.fetch_next_earnings_date", return_value=None):
+        result = evaluate_earnings_gate(symbol="AAPL", finnhub_api_key="k", as_of_date=date(2024, 1, 8))
+    assert result.passed is True
+    assert result.value is None
+
+
+def test_evaluate_earnings_gate_value_is_days_until_next_earnings():
+    with patch("graywind_strategy.pipeline.fetch_next_earnings_date", return_value=date(2024, 1, 20)):
+        result = evaluate_earnings_gate(symbol="AAPL", finnhub_api_key="k", as_of_date=date(2024, 1, 8))
+    assert result.passed is True  # 12 days > EARNINGS_BLACKOUT_DAYS (3)
+    assert result.value == 12
 
 
 def test_evaluate_macro_gate_fails_closed_on_fetch_error():
@@ -65,7 +86,9 @@ def test_evaluate_macro_gate_fails_closed_on_fetch_error():
         "graywind_strategy.pipeline.fetch_bullion_macro_snapshot",
         side_effect=MacroDataUnavailable("boom"),
     ):
-        assert evaluate_macro_gate(as_of_date=date(2024, 1, 8)) is False
+        result = evaluate_macro_gate(as_of_date=date(2024, 1, 8))
+    assert result.passed is False
+    assert result.detail == "MacroDataUnavailable"
 
 
 def test_evaluate_macro_gate_passes_through_on_success():
@@ -73,8 +96,18 @@ def test_evaluate_macro_gate_passes_through_on_success():
     with patch(
         "graywind_strategy.pipeline.fetch_bullion_macro_snapshot", return_value=snapshot
     ) as mock_fetch:
-        assert evaluate_macro_gate(as_of_date=date(2024, 1, 8)) is True
+        result = evaluate_macro_gate(as_of_date=date(2024, 1, 8))
+    assert result.passed is True
+    assert result.value == 0  # zero breaches
     mock_fetch.assert_called_once_with(date(2024, 1, 8), session=requests)
+
+
+def test_evaluate_macro_gate_value_is_breach_count_when_gate_fails():
+    snapshot = {"vix": 14.6, "nfci": 0.1, "hy_oas": 6.0, "curve_slope": 0.48}  # nfci + hy_oas both breach
+    with patch("graywind_strategy.pipeline.fetch_bullion_macro_snapshot", return_value=snapshot):
+        result = evaluate_macro_gate(as_of_date=date(2024, 1, 8))
+    assert result.passed is False
+    assert result.value == 2
 
 
 def _passing_gates():

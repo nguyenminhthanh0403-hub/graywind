@@ -40,7 +40,7 @@ _FIELD_CEILINGS = {
 }
 
 
-def macro_gate(snapshot, required_breaches=2):
+def count_macro_breaches(snapshot):
     breaches = 0
     if snapshot["nfci"] >= NFCI_THRESHOLD:
         breaches += 1
@@ -48,7 +48,11 @@ def macro_gate(snapshot, required_breaches=2):
         breaches += 1
     if snapshot["curve_slope"] < CURVE_SLOPE_THRESHOLD:
         breaches += 1
-    return breaches < required_breaches
+    return breaches
+
+
+def macro_gate(snapshot, required_breaches=2):
+    return count_macro_breaches(snapshot) < required_breaches
 
 
 def _most_recent_value_before(history, field, as_of_date, ceiling_days):

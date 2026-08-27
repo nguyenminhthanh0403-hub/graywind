@@ -6,6 +6,7 @@ import requests
 
 from graywind_strategy.gates.macro_gate import (
     MacroDataUnavailable,
+    count_macro_breaches,
     fetch_bullion_macro_snapshot,
     macro_gate,
 )
@@ -65,6 +66,16 @@ def test_macro_gate_respects_custom_required_breaches():
     # nfci and hy_oas breach (2 of 3), but required_breaches=3 means it takes all 3 to block.
     snapshot = {"vix": 14.6, "nfci": 0.5, "hy_oas": 6.0, "curve_slope": 0.48}
     assert macro_gate(snapshot, required_breaches=3) is True
+
+
+def test_count_macro_breaches_counts_each_breaching_field():
+    snapshot = {"vix": 999.0, "nfci": 0.1, "hy_oas": 6.0, "curve_slope": -0.1}
+    assert count_macro_breaches(snapshot) == 3  # nfci, hy_oas, curve_slope all breach; vix excluded from the vote
+
+
+def test_count_macro_breaches_is_zero_when_nothing_breaches():
+    snapshot = {"vix": 14.6, "nfci": -0.55, "hy_oas": 2.71, "curve_slope": 0.48}
+    assert count_macro_breaches(snapshot) == 0
 
 
 def test_fetch_bullion_macro_snapshot_parses_most_recent_value_per_field():
