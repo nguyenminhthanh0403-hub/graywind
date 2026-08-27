@@ -17,7 +17,15 @@ No tag, no registered gate for a symbol's sector, or an empty list are all
 treated as "pass" -- a sector caveat is additive risk management, not a
 required check (same precedent as earnings_gate: no earnings scheduled ->
 allow, not block).
+
+evaluate_sector_gates itself returns a GateResult (see
+graywind_strategy.gate_result), not a plain bool -- its .value is the list
+of (sub_gate_name, passed) tuples for every sub-gate actually evaluated
+this call. Evaluation still short-circuits on the first failure (same as
+the old all(...)), so .value can be a strict prefix of the full sector's
+gate list, not every registered gate, when one fails.
 """
+from graywind_strategy.gate_result import GateResult
 from graywind_strategy.sector_config import SYMBOL_SECTOR
 
 
@@ -33,4 +41,10 @@ SECTOR_GATES = {
 def evaluate_sector_gates(symbol, as_of_date):
     sector = SYMBOL_SECTOR.get(symbol)
     gates = SECTOR_GATES.get(sector, [])
-    return all(gate(symbol=symbol, as_of_date=as_of_date) for gate in gates)
+    readings = []
+    for gate in gates:
+        passed = gate(symbol=symbol, as_of_date=as_of_date)
+        readings.append((gate.__name__, passed))
+        if not passed:
+            return GateResult(passed=False, value=readings)
+    return GateResult(passed=True, value=readings)
