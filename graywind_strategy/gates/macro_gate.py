@@ -52,6 +52,15 @@ def count_macro_breaches(snapshot):
 
 
 def macro_gate(snapshot, required_breaches=2):
+    """Bare-bool wrapper around count_macro_breaches().
+
+    Not called by pipeline.py -- decide_trade() calls count_macro_breaches()
+    directly (see evaluate_macro_gate() in pipeline.py) so it can attach a
+    breach count to gate_readings, which a plain bool can't carry. This
+    function is kept as a tested, reusable pure predicate (its is True/
+    is False return behavior is deliberately pinned by tests/test_macro_gate.py)
+    even though nothing in production currently calls it.
+    """
     return count_macro_breaches(snapshot) < required_breaches
 
 

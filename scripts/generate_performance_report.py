@@ -17,6 +17,7 @@ equity_curve.csv alone, trades just get a generic narrative instead of a
 real one, same honest-gap handling as the 6 pre-existing trades that
 predate this feature entirely.
 """
+import ast
 import csv
 import json
 import os
@@ -69,6 +70,24 @@ def per_symbol_pnl(trades):
 
 NO_DECISION_LOG_MATCH = "no decision-log detail available for this trade"
 SELL_EXIT_NARRATIVE = "stop/target exit — no gated decision to explain (exits aren't gated)"
+
+
+def _format_sector_gates(raw):
+    """decision_log.csv's sector_gates column is a raw str() of a list of
+    (name, passed) tuples, e.g. "[('energy_stub_gate', True)]" -- fine as a
+    durable CSV artifact, but not human-readable in the dashboard's "Why"
+    column. Reformat it into "name:pass"/"name:fail" pairs joined by ";".
+    Falls back to the raw string unchanged if it isn't parseable (malformed
+    data must never crash the report), and leaves an empty string empty
+    rather than fabricating placeholder text.
+    """
+    if not raw:
+        return raw
+    try:
+        parsed = ast.literal_eval(raw)
+        return ";".join(f"{name}:{'pass' if passed else 'fail'}" for name, passed in parsed)
+    except (ValueError, SyntaxError, TypeError):
+        return raw
 
 
 def _nearest_decision_row(rows_for_symbol, trade_timestamp):
@@ -134,13 +153,19 @@ def build_trade_narratives(trades, decision_rows):
             narrative["gate_summary"] = (
                 f"vix={match['vix']}, sentiment={match['sentiment']}, "
                 f"days_to_earnings={match['days_to_earnings']}, "
-                f"macro_breaches={match['macro_breaches']}, sector={match['sector_gates']}"
+                f"macro_breaches={match['macro_breaches']}, sector={_format_sector_gates(match['sector_gates'])}"
             )
         narratives.append(narrative)
     return narratives
 
 
 def build_block_frequency_notes(decision_rows):
+    # `total` counts per-symbol-per-cycle decision_log.csv rows, not distinct
+    # trading cycles -- a multi-symbol watchlist writes one row per symbol
+    # per cycle, and the skip-if-holding guard suppresses rows for
+    # already-held symbols, so this is neither a stable nor accurate count
+    # of "cycles". The note text below must describe what's actually being
+    # measured (evaluated decision rows), not claim "cycles".
     total = len(decision_rows)
     if total == 0:
         return []
@@ -151,7 +176,7 @@ def build_block_frequency_notes(decision_rows):
     notes = []
     for reason, count in sorted(blocked_counts.items(), key=lambda kv: -kv[1]):
         pct = count / total * 100
-        notes.append(f"blocked by {reason} on {pct:.0f}% of cycles this period")
+        notes.append(f"blocked by {reason} on {pct:.0f}% of evaluated decisions this period")
     return notes
 
 

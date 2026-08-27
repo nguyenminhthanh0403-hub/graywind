@@ -207,7 +207,7 @@ tbody tr:hover td { background: var(--bg-2); }
 .pos-open { color: var(--gold-soft); }
 .pnl-cell.pos { color: var(--pos); }
 .pnl-cell.neg { color: var(--neg); }
-#trade-scroll { max-height: 380px; overflow-y: auto; }
+#trade-scroll, #narrative-scroll { max-height: 380px; overflow-y: auto; }
 
 /* ---------- Accounts grid ---------- */
 .accounts-grid {
@@ -218,6 +218,7 @@ tbody tr:hover td { background: var(--bg-2); }
 @media (max-width: 900px) {
   .accounts-grid { grid-template-columns: 1fr; }
 }
+.account-col { min-width: 0; }
 .account-label { margin-top: 0; }
 
 /* ---------- Footer ---------- */
@@ -537,12 +538,12 @@ function buildPerformanceReport(report) {
           <tbody>${symbolRows}</tbody>
         </table>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap"><div id="narrative-scroll">
         <table>
           <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Why</th></tr></thead>
           <tbody>${narrativeRows}</tbody>
         </table>
-      </div>
+      </div></div>
     </section>`;
 }
 

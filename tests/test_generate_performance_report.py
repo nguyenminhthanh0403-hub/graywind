@@ -201,6 +201,42 @@ def test_build_trade_narratives_includes_sma_fast_and_slow_on_a_real_match():
     assert narratives[0]["sma_slow"] == "99.0"
 
 
+def test_build_trade_narratives_formats_sector_gates_as_readable_text():
+    # decision_log.csv's sector_gates column is a raw Python str() of a list
+    # of (name, passed) tuples, e.g. "[('energy_stub_gate', True)]" -- the
+    # dashboard's "Why" column must not show that raw repr.
+    trades = [{
+        "timestamp": "2026-08-10T10:00:00-04:00", "symbol": "AAPL", "side": "buy",
+        "qty": 10, "price": 100.0, "reason": "all checks passed",
+    }]
+    decision_rows = [{
+        "timestamp": "2026-08-10T10:00:05-04:00", "symbol": "AAPL", "action": "buy",
+        "reason": "all checks passed", "rsi": "45.2", "sma_fast": "101.0", "sma_slow": "99.0",
+        "vix": "15.0", "sentiment": "0.1", "days_to_earnings": "12",
+        "macro_breaches": "0", "sector_gates": "[('energy_stub_gate', True)]",
+    }]
+    narratives = build_trade_narratives(trades, decision_rows)
+    gate_summary = narratives[0]["gate_summary"]
+    assert "('energy_stub_gate', True)" not in gate_summary
+    assert "energy_stub_gate:pass" in gate_summary
+
+
+def test_build_trade_narratives_leaves_empty_sector_gates_unchanged():
+    trades = [{
+        "timestamp": "2026-08-10T10:00:00-04:00", "symbol": "AAPL", "side": "buy",
+        "qty": 10, "price": 100.0, "reason": "all checks passed",
+    }]
+    decision_rows = [{
+        "timestamp": "2026-08-10T10:00:05-04:00", "symbol": "AAPL", "action": "buy",
+        "reason": "all checks passed", "rsi": "45.2", "sma_fast": "101.0", "sma_slow": "99.0",
+        "vix": "15.0", "sentiment": "0.1", "days_to_earnings": "12",
+        "macro_breaches": "0", "sector_gates": "",
+    }]
+    narratives = build_trade_narratives(trades, decision_rows)
+    assert "sector=" in narratives[0]["gate_summary"]
+    assert narratives[0]["gate_summary"].endswith("sector=")
+
+
 def test_generate_report_skips_account_with_no_dashboard_data(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     dashboard_dir = str(tmp_path / "dashboard-data")
