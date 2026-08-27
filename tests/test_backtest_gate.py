@@ -5,7 +5,9 @@ import pandas as pd
 import pytest
 
 from graywind_strategy.backtest_gate import (
-    MIN_HISTORY_DAYS, check_fold_thresholds, fetch_backtest_bars, split_into_folds,
+    MIN_HISTORY_DAYS, _kurtosis, _period_returns, _skewness, check_fold_thresholds,
+    deflated_sharpe_ratio, expected_max_z, fetch_backtest_bars, probabilistic_sharpe_ratio,
+    split_into_folds,
 )
 from graywind_strategy.backtester import BacktestResult
 from graywind_strategy.guardrails import GuardrailViolation
@@ -113,3 +115,57 @@ def test_check_fold_thresholds_rejects_low_win_rate():
 def test_check_fold_thresholds_rejects_too_few_trades():
     with pytest.raises(GuardrailViolation, match="fold 3.*trades"):
         check_fold_thresholds(_passing_result(trades=[{"x": 1}] * 10), fold_index=3)
+
+
+def test_period_returns_computes_simple_percent_changes():
+    assert _period_returns([100.0, 110.0, 99.0]) == pytest.approx([0.10, -0.10])
+
+
+def test_skewness_of_symmetric_returns_is_zero():
+    assert _skewness([0.01, -0.01, 0.02, -0.02, 0.0]) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_kurtosis_of_symmetric_returns():
+    assert _kurtosis([0.01, -0.01, 0.02, -0.02, 0.0]) == pytest.approx(1.7)
+
+
+def test_skewness_of_left_skewed_returns_is_negative():
+    assert _skewness([0.01, 0.01, 0.01, 0.01, -0.10]) == pytest.approx(-1.5)
+
+
+def test_kurtosis_of_flat_returns_is_normal_default():
+    assert _kurtosis([0.0, 0.0, 0.0]) == pytest.approx(3.0)
+
+
+def test_expected_max_z_is_zero_for_a_single_trial():
+    assert expected_max_z(1) == 0.0
+
+
+def test_expected_max_z_increases_with_more_trials():
+    z2 = expected_max_z(2)
+    z10 = expected_max_z(10)
+    z100 = expected_max_z(100)
+    assert z2 == pytest.approx(0.5197553442805939)
+    assert z2 < z10 < z100
+
+
+def test_deflated_sharpe_ratio_decreases_as_trial_count_grows():
+    sharpe, n_returns, skew, kurt = 0.06, 500, 0.0, 3.0
+    values = [
+        deflated_sharpe_ratio(sharpe, nt, n_returns, skew, kurt)
+        for nt in (1, 2, 10, 50, 100, 500, 1000)
+    ]
+    assert values == sorted(values, reverse=True)  # strictly non-increasing in n_trials
+    assert values[0] == pytest.approx(0.909729935836157)
+
+
+def test_deflated_sharpe_ratio_crosses_below_threshold_as_trials_pile_up():
+    # Verified by hand during planning: a strategy that clears DSR>=0.95 comfortably
+    # as the very first trial can fail it once enough other candidates have been tried.
+    sharpe, n_returns, skew, kurt = 0.15, 1000, 0.0, 3.0
+    assert deflated_sharpe_ratio(sharpe, 1, n_returns, skew, kurt) == pytest.approx(
+        0.9999987890623048
+    )
+    assert deflated_sharpe_ratio(sharpe, 1000, n_returns, skew, kurt) == pytest.approx(
+        0.927783097961449
+    )

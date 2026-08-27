@@ -91,3 +91,56 @@ def check_fold_thresholds(result, fold_index):
             f"fold {fold_index}: only {len(result.trades)} trades, need at least "
             f"{FOLD_MIN_TRADES}"
         )
+
+
+def _period_returns(equity_curve):
+    return [
+        (equity_curve[i] - equity_curve[i - 1]) / equity_curve[i - 1]
+        for i in range(1, len(equity_curve))
+    ]
+
+
+def _skewness(returns):
+    n = len(returns)
+    mean = statistics.mean(returns)
+    stdev = statistics.pstdev(returns)
+    if stdev == 0:
+        return 0.0
+    return sum(((r - mean) / stdev) ** 3 for r in returns) / n
+
+
+def _kurtosis(returns):
+    n = len(returns)
+    mean = statistics.mean(returns)
+    stdev = statistics.pstdev(returns)
+    if stdev == 0:
+        return 3.0  # neutral (normal-distribution) default for a degenerate zero-variance series
+    return sum(((r - mean) / stdev) ** 4 for r in returns) / n
+
+
+def expected_max_z(n_trials):
+    """Expected value of the max of n_trials draws from a standard normal
+    (extreme-value-theory approximation, Bailey & Lopez de Prado 2014)."""
+    if n_trials < 2:
+        return 0.0
+    return (
+        (1 - _EULER_MASCHERONI) * _STANDARD_NORMAL.inv_cdf(1 - 1.0 / n_trials)
+        + _EULER_MASCHERONI * _STANDARD_NORMAL.inv_cdf(1 - 1.0 / (n_trials * math.e))
+    )
+
+
+def probabilistic_sharpe_ratio(sharpe, benchmark_sharpe, n_returns, skew, kurtosis):
+    if n_returns < 2:
+        return 0.0
+    denom = math.sqrt(max(1 - skew * sharpe + ((kurtosis - 1) / 4) * sharpe ** 2, 1e-12))
+    z = (sharpe - benchmark_sharpe) * math.sqrt(n_returns - 1) / denom
+    return _STANDARD_NORMAL.cdf(z)
+
+
+def deflated_sharpe_ratio(sharpe, n_trials, n_returns, skew, kurtosis):
+    if n_returns < 2:
+        return 0.0
+    denom = math.sqrt(max(1 - skew * sharpe + ((kurtosis - 1) / 4) * sharpe ** 2, 1e-12))
+    sr_std = denom / math.sqrt(n_returns - 1)
+    sr0 = sr_std * expected_max_z(n_trials)
+    return probabilistic_sharpe_ratio(sharpe, sr0, n_returns, skew, kurtosis)
