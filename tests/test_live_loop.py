@@ -306,6 +306,89 @@ def test_process_symbol_without_collectors_behaves_exactly_as_before():
     trading_client.submit_order.assert_not_called()
 
 
+def test_process_symbol_appends_decision_log_row_when_decide_trade_runs():
+    decision_rows = []
+    with patch(
+        "live_loop.decide_trade",
+        return_value=TradeDecision(action="buy", reason="all checks passed", shares=10, stop_price=98.0, target_price=103.0),
+    ):
+        process_symbol(
+            symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+            open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+            trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+            cycle_timestamp="2026-08-15T10:00:00-04:00",
+            rsi=45.2, sma_fast=101.0, sma_slow=99.0,
+            decision_rows=decision_rows,
+        )
+    assert decision_rows == [{
+        "timestamp": "2026-08-15T10:00:00-04:00", "symbol": "AAPL", "action": "buy",
+        "reason": "all checks passed", "rsi": "45.2", "sma_fast": "101.0", "sma_slow": "99.0",
+        "vix": "", "sentiment": "", "days_to_earnings": "", "macro_breaches": "", "sector_gates": "",
+    }]
+
+
+def test_process_symbol_decision_row_includes_gate_values_from_gate_readings():
+    from graywind_strategy.gate_result import GateResult
+
+    decision_rows = []
+    decision = TradeDecision(
+        action="blocked", reason="macro_gate",
+        gate_readings=[
+            GateResult(passed=True, value=15.0),   # vix
+            GateResult(passed=True, value=0.05),   # sentiment
+            GateResult(passed=True, value=12),     # earnings (days_to_earnings)
+            GateResult(passed=False, value=2),     # macro (breaches) -- blocked here, sector never ran
+        ],
+    )
+    with patch("live_loop.decide_trade", return_value=decision):
+        process_symbol(
+            symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+            open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+            trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+            cycle_timestamp="t1", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+            decision_rows=decision_rows,
+        )
+    row = decision_rows[0]
+    assert row["vix"] == "15.0"
+    assert row["sentiment"] == "0.05"
+    assert row["days_to_earnings"] == "12"
+    assert row["macro_breaches"] == "2"
+    assert row["sector_gates"] == ""  # never reached -- blocked before the sector gate ran
+
+
+def test_process_symbol_does_not_append_decision_row_when_skipping_via_held_position():
+    decision_rows = []
+    symbol_statuses = {}
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0, opened_date="2024-01-08")}
+    process_symbol(
+        symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+        open_positions=open_positions, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+        drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+        cycle_timestamp="t1", symbol_statuses=symbol_statuses, decision_rows=decision_rows,
+    )
+    # decide_trade is never called for an already-held, non-exiting position
+    # (the skip-if-holding guard) -- no row to append for it this cycle.
+    assert decision_rows == []
+
+
+def test_process_symbol_without_decision_rows_does_not_raise():
+    # decision_rows defaults to None -- must not raise, matching every
+    # pre-existing call site in this file.
+    with patch(
+        "live_loop.decide_trade",
+        return_value=TradeDecision(action="hold", reason="no buy signal"),
+    ):
+        process_symbol(
+            symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+            open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+            trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+        )
+
+
 # --- reconcile_positions: reconciles local open_positions against Alpaca's
 # real account state at the start of each live-loop cycle (final-review
 # Fix 5). Local state is authoritative for stop/target/entry_price (Alpaca's
@@ -401,8 +484,11 @@ def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
          patch("live_loop.save_rebalance_state"), \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
-         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(
+             signal="hold", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+         )), \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")) as mock_decide, \
+         patch("live_loop.append_decision_log"), \
          patch("live_loop.write_cycle_export"):
         result = live_loop.main()
 
@@ -445,6 +531,7 @@ def test_main_threads_graywind_state_dir_env_var_into_every_state_call():
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}) as mock_load_rebalance, \
          patch("live_loop.save_rebalance_state") as mock_save_rebalance, \
          patch("live_loop.fetch_bars", return_value=[]), \
+         patch("live_loop.append_decision_log") as mock_append_decision_log, \
          patch("live_loop.write_cycle_export"):
         result = live_loop.main()
 
@@ -455,6 +542,7 @@ def test_main_threads_graywind_state_dir_env_var_into_every_state_call():
     assert mock_save_tier_pools.call_args.kwargs["state_dir"] == "state/small"
     assert mock_load_rebalance.call_args.kwargs["state_dir"] == "state/small"
     assert mock_save_rebalance.call_args.kwargs["state_dir"] == "state/small"
+    assert mock_append_decision_log.call_args.kwargs["state_dir"] == "state/small"
 
 
 def test_main_defaults_graywind_state_dir_to_state_when_env_var_unset():
@@ -481,12 +569,14 @@ def test_main_defaults_graywind_state_dir_to_state_when_env_var_unset():
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
          patch("live_loop.save_rebalance_state"), \
          patch("live_loop.fetch_bars", return_value=[]), \
+         patch("live_loop.append_decision_log") as mock_append_decision_log, \
          patch("live_loop.write_cycle_export"):
         os.environ.pop("GRAYWIND_STATE_DIR", None)
         result = live_loop.main()
 
     assert result == 0
     assert mock_load_state.call_args.kwargs["state_dir"] == "state"
+    assert mock_append_decision_log.call_args.kwargs["state_dir"] == "state"
 
 
 def test_get_account_exception_leaves_day_and_starting_equity_unchanged():
@@ -566,8 +656,11 @@ def test_successful_equity_read_updates_day_and_starting_equity_normally():
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
          patch("live_loop.save_rebalance_state"), \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
-         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(
+             signal="hold", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+         )), \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
+         patch("live_loop.append_decision_log"), \
          patch("live_loop.write_cycle_export"):
         result = live_loop.main()
 
@@ -603,8 +696,11 @@ def test_main_calls_write_cycle_export_after_save_state():
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
          patch("live_loop.save_rebalance_state"), \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
-         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(
+             signal="hold", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+         )), \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
+         patch("live_loop.append_decision_log"), \
          patch("live_loop.write_cycle_export") as mock_export:
         live_loop.main()
 
@@ -639,8 +735,11 @@ def test_process_symbol_cycle_passes_confirmation_bars_to_compute_signals():
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
          patch("live_loop.save_rebalance_state"), \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
-         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")) as mock_compute, \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(
+             signal="hold", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+         )) as mock_compute, \
          patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")), \
+         patch("live_loop.append_decision_log"), \
          patch("live_loop.write_cycle_export"):
         live_loop.main()
 
@@ -689,7 +788,9 @@ def test_main_passes_loaded_tier_pools_to_process_symbol():
          patch("live_loop.save_rebalance_state"), \
          patch("live_loop.should_rebalance_this_month", return_value=False), \
          patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
-         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(signal="hold")), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(
+             signal="hold", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+         )), \
          patch("live_loop.process_symbol") as mock_process_symbol, \
          patch("live_loop.write_cycle_export"):
         live_loop.main()

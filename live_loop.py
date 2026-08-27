@@ -39,7 +39,7 @@ from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 from graywind_strategy.dashboard_export import write_cycle_export
 from graywind_strategy.state_store import (
-    load_state, save_state, load_tier_pools, save_tier_pools,
+    append_decision_log, load_state, save_state, load_tier_pools, save_tier_pools,
     load_rebalance_state, save_rebalance_state,
 )
 from graywind_strategy.tier_config import SYMBOL_TIER, TIER1_SYMBOL_WEIGHTS
@@ -84,6 +84,32 @@ ET = ZoneInfo("America/New_York")
 # no-signal bar. See final-review Fix 1.
 SIGNAL_LOOKBACK = timedelta(days=21)
 
+DECISION_GATE_ORDER = ["vix", "sentiment", "earnings", "macro", "sector"]
+
+
+def _fmt_decision_value(value):
+    return "" if value is None else str(value)
+
+
+def _decision_log_row(cycle_timestamp, symbol, decision, rsi, sma_fast, sma_slow):
+    gate_values = {name: None for name in DECISION_GATE_ORDER}
+    for name, result in zip(DECISION_GATE_ORDER, decision.gate_readings):
+        gate_values[name] = result.value
+    return {
+        "timestamp": cycle_timestamp,
+        "symbol": symbol,
+        "action": decision.action,
+        "reason": decision.reason,
+        "rsi": _fmt_decision_value(rsi),
+        "sma_fast": _fmt_decision_value(sma_fast),
+        "sma_slow": _fmt_decision_value(sma_slow),
+        "vix": _fmt_decision_value(gate_values["vix"]),
+        "sentiment": _fmt_decision_value(gate_values["sentiment"]),
+        "days_to_earnings": _fmt_decision_value(gate_values["earnings"]),
+        "macro_breaches": _fmt_decision_value(gate_values["macro"]),
+        "sector_gates": _fmt_decision_value(gate_values["sector"]),
+    }
+
 
 def is_market_hours(now=None):
     now = now or datetime.now(ET)
@@ -124,7 +150,8 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                     pdt_throttle, position_sizer, drawdown_breaker_ok,
                     fred_api_key, news_client, finnhub_api_key, trading_client,
                     drawdown_breaker, cycle_timestamp=None, cycle_trades=None,
-                    symbol_statuses=None, tier_pools=None):
+                    symbol_statuses=None, tier_pools=None,
+                    rsi=None, sma_fast=None, sma_slow=None, decision_rows=None):
     """Resolves one symbol's decision for this cycle: sell-on-stop/target
     exit if a held position crossed its stop or target, otherwise
     decide_trade() for a fresh entry -- but only if the symbol isn't
@@ -204,6 +231,11 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
             finnhub_api_key=finnhub_api_key,
             pending_same_day_trades=pending_today,
         )
+        if decision_rows is not None:
+            decision_rows.append(_decision_log_row(
+                cycle_timestamp=cycle_timestamp, symbol=symbol, decision=decision,
+                rsi=rsi, sma_fast=sma_fast, sma_slow=sma_slow,
+            ))
         if decision.action == "buy":
             order = MarketOrderRequest(
                 symbol=symbol, qty=decision.shares,
@@ -304,6 +336,7 @@ def main():
     cycle_timestamp = datetime.now(ET).isoformat()
     cycle_trades = []
     symbol_statuses = {}
+    decision_rows = []
     state = load_state(state_dir=state_dir)
     tier_pools = load_tier_pools(state_dir=state_dir)
     rebalance_state = load_rebalance_state(state_dir=state_dir)
@@ -375,6 +408,8 @@ def main():
                     drawdown_breaker=drawdown_breaker,
                     cycle_timestamp=cycle_timestamp, cycle_trades=cycle_trades,
                     symbol_statuses=symbol_statuses, tier_pools=tier_pools,
+                    rsi=latest["rsi"], sma_fast=latest["sma_fast"], sma_slow=latest["sma_slow"],
+                    decision_rows=decision_rows,
                 )
             except Exception as exc:
                 print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)
@@ -398,6 +433,7 @@ def main():
         }, state_dir=state_dir)
         save_tier_pools(tier_pools, state_dir=state_dir)
         save_rebalance_state(rebalance_state, state_dir=state_dir)
+        append_decision_log(decision_rows, state_dir=state_dir)
         write_cycle_export(
             export_dir=DASHBOARD_EXPORT_DIR,
             timestamp=cycle_timestamp,
