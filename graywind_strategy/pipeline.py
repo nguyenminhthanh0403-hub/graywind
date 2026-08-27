@@ -4,7 +4,7 @@ code path both the backtester and the live loop call — keeping order logic
 in one place is what guarantees backtest and live behavior can't drift
 apart.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
@@ -46,6 +46,7 @@ class TradeDecision:
     shares: Optional[float] = None
     stop_price: Optional[float] = None
     target_price: Optional[float] = None
+    gate_readings: list = field(default_factory=list)
 
 
 def evaluate_vix_gate(fred_api_key, as_of_date=None, threshold=VIX_THRESHOLD):
@@ -154,29 +155,47 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
     symbols opened in the same session before either closes can each pass
     the realized-only check independently and both later close same-day,
     producing a real PDT violation neither individual check caught.
+
+    `gate_readings` on the returned TradeDecision is the ordered list of
+    GateResult objects (see graywind_strategy.gate_result) actually
+    evaluated this call -- [vix, sentiment, earnings, macro, sector],
+    truncated at whichever gate short-circuited the function. Stays empty
+    when gates_always_pass=True or signal != "buy" (no gates were ever
+    evaluated).
     """
     if signal != "buy":
         return TradeDecision(action="hold", reason="no buy signal")
 
+    gate_readings = []
     if not gates_always_pass:
         # Called with keyword arguments (not positional) so that callers/tests
         # can swap these wrappers out for arbitrary-signature stand-ins (e.g.
         # `lambda **kw: True`) without needing to match positional arity.
-        if not evaluate_vix_gate(fred_api_key=fred_api_key, as_of_date=as_of_date):
-            return TradeDecision(action="blocked", reason="vix_gate")
-        if not evaluate_sentiment_gate(news_client=news_client, symbol=symbol, as_of_date=as_of_date):
-            return TradeDecision(action="blocked", reason="sentiment_gate")
-        if not evaluate_earnings_gate(symbol=symbol, finnhub_api_key=finnhub_api_key, as_of_date=as_of_date):
-            return TradeDecision(action="blocked", reason="earnings_gate")
-        if not evaluate_macro_gate(as_of_date=as_of_date):
-            return TradeDecision(action="blocked", reason="macro_gate")
-        if not evaluate_sector_gates(symbol=symbol, as_of_date=as_of_date):
-            return TradeDecision(action="blocked", reason="sector_gate")
+        vix_result = evaluate_vix_gate(fred_api_key=fred_api_key, as_of_date=as_of_date)
+        gate_readings.append(vix_result)
+        if not vix_result:
+            return TradeDecision(action="blocked", reason="vix_gate", gate_readings=gate_readings)
+        sentiment_result = evaluate_sentiment_gate(news_client=news_client, symbol=symbol, as_of_date=as_of_date)
+        gate_readings.append(sentiment_result)
+        if not sentiment_result:
+            return TradeDecision(action="blocked", reason="sentiment_gate", gate_readings=gate_readings)
+        earnings_result = evaluate_earnings_gate(symbol=symbol, finnhub_api_key=finnhub_api_key, as_of_date=as_of_date)
+        gate_readings.append(earnings_result)
+        if not earnings_result:
+            return TradeDecision(action="blocked", reason="earnings_gate", gate_readings=gate_readings)
+        macro_result = evaluate_macro_gate(as_of_date=as_of_date)
+        gate_readings.append(macro_result)
+        if not macro_result:
+            return TradeDecision(action="blocked", reason="macro_gate", gate_readings=gate_readings)
+        sector_result = evaluate_sector_gates(symbol=symbol, as_of_date=as_of_date)
+        gate_readings.append(sector_result)
+        if not sector_result:
+            return TradeDecision(action="blocked", reason="sector_gate", gate_readings=gate_readings)
 
     if not drawdown_breaker_ok:  # False or None both block -- fail closed on unknown state
-        return TradeDecision(action="blocked", reason="drawdown_breaker")
+        return TradeDecision(action="blocked", reason="drawdown_breaker", gate_readings=gate_readings)
     if not pdt_throttle.can_open_day_trade(as_of_date, pending_count=pending_same_day_trades):
-        return TradeDecision(action="blocked", reason="pdt_throttle")
+        return TradeDecision(action="blocked", reason="pdt_throttle", gate_readings=gate_readings)
 
     stop_price = position_sizer.stop_loss_price(current_price, stop_pct)
     if current_price <= 0 or stop_price >= current_price:
@@ -184,15 +203,16 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
         # or above entry -- shares_to_buy would raise ValueError. decide_trade
         # is the single order-eligibility path for both backtest and live, so
         # it must never propagate an exception; fail to "hold", not a crash.
-        return TradeDecision(action="hold", reason="invalid price for sizing")
+        return TradeDecision(action="hold", reason="invalid price for sizing", gate_readings=gate_readings)
     target_price = position_sizer.take_profit_price(current_price, take_profit_pct)
     shares = position_sizer.shares_to_buy(account_equity, current_price, stop_price)
     shares = round(shares * evaluate_analyst_consensus_multiplier(
         symbol=symbol, as_of_date=as_of_date, current_price=current_price), QTY_DECIMALS)
     if shares <= 0:
-        return TradeDecision(action="hold", reason="position size rounds to zero shares")
+        return TradeDecision(action="hold", reason="position size rounds to zero shares", gate_readings=gate_readings)
 
     return TradeDecision(
         action="buy", reason="all checks passed",
         shares=shares, stop_price=stop_price, target_price=target_price,
+        gate_readings=gate_readings,
     )

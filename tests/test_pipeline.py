@@ -569,3 +569,72 @@ def test_decide_trade_preserves_fractional_precision_through_multiplier():
             finnhub_api_key="k",
         )
     assert decision.shares == 55.55  # 50.0 * 1.111 = 55.55
+
+
+def test_decide_trade_populates_gate_readings_in_order_when_all_gates_pass():
+    vix_result = GateResult(passed=True, value=15.0)
+    sentiment_result = GateResult(passed=True, value=0.1)
+    earnings_result = GateResult(passed=True, value=12)
+    macro_result = GateResult(passed=True, value=0)
+    sector_result = GateResult(passed=True, value=[])
+    with patch.multiple(
+        "graywind_strategy.pipeline",
+        evaluate_vix_gate=lambda **kw: vix_result,
+        evaluate_sentiment_gate=lambda **kw: sentiment_result,
+        evaluate_earnings_gate=lambda **kw: earnings_result,
+        evaluate_macro_gate=lambda **kw: macro_result,
+        evaluate_sector_gates=lambda **kw: sector_result,
+    ):
+        decision = decide_trade(
+            symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
+            current_price=100.0, account_equity=10000.0,
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        )
+    assert decision.action == "buy"
+    assert decision.gate_readings == [vix_result, sentiment_result, earnings_result, macro_result, sector_result]
+
+
+def test_decide_trade_gate_readings_stops_at_first_blocking_gate():
+    vix_result = GateResult(passed=False, value=30.0, detail="above threshold")
+    sentiment_mock = MagicMock()
+    with patch.multiple(
+        "graywind_strategy.pipeline",
+        evaluate_vix_gate=lambda **kw: vix_result,
+        evaluate_sentiment_gate=sentiment_mock,
+    ):
+        decision = decide_trade(
+            symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
+            current_price=100.0, account_equity=10000.0,
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        )
+    assert decision.reason == "vix_gate"
+    assert decision.gate_readings == [vix_result]
+    sentiment_mock.assert_not_called()
+
+
+def test_decide_trade_gate_readings_empty_when_gates_always_pass():
+    decision = decide_trade(
+        symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
+        current_price=100.0, account_equity=10000.0,
+        pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
+        drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        gates_always_pass=True,
+    )
+    assert decision.gate_readings == []
+
+
+def test_decide_trade_gate_readings_populated_even_on_non_gate_block():
+    # drawdown_breaker/pdt_throttle blocks happen AFTER the 5 gates -- the
+    # gate readings gathered along the way must still be attached, not
+    # discarded just because the eventual block reason is a different check.
+    with _passing_gates():
+        decision = decide_trade(
+            symbol="AAPL", signal="buy", as_of_date=date(2024, 1, 8),
+            current_price=100.0, account_equity=10000.0,
+            pdt_throttle=PDTThrottle(), position_sizer=PositionSizer(),
+            drawdown_breaker_ok=False, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        )
+    assert decision.reason == "drawdown_breaker"
+    assert len(decision.gate_readings) == 5
