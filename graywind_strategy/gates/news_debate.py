@@ -20,10 +20,12 @@ Every Claude call below forces structured output via a single tool choice
 False` schemas, and reads required fields with direct dict indexing (not
 `.get()`) -- a malformed or missing field is a loud KeyError/ValueError,
 never a silent default, per the spec's testing requirements. Thinking is
-explicitly disabled on these calls (`thinking={"type": "disabled"}`):
-forcing a specific tool_choice is not compatible with extended thinking,
-and thinking adds unneeded latency/cost to a short structured-output call
-that never gates anything time-sensitive.
+explicitly disabled on these calls (`thinking={"type": "disabled"}`): this
+is a deliberate cost/latency choice, not a forced API workaround -- these
+calls fire on every symbol/cycle of a 15-minute market-hours cron purely to
+accumulate shadow history, so the extra latency/cost of extended thinking
+buys nothing for a call that never gates anything time-sensitive. Revisit
+if this debate is ever promoted to authoritative.
 
 `llm_client` is injected on every function here (same shape as
 `news_client` throughout this codebase) -- tests always pass a MagicMock
@@ -85,6 +87,7 @@ def bull_argument(llm_client, headlines):
         "name": BULL_TOOL_NAME,
         "description": "Submit the strongest bullish (buy-supporting) reading of these headlines.",
         "input_schema": _ARGUMENT_TOOL_SCHEMA,
+        "strict": True,
     }
     prompt = (
         "You are a bullish trading analyst. Argue the strongest bullish "
@@ -98,6 +101,7 @@ def bear_argument(llm_client, headlines):
         "name": BEAR_TOOL_NAME,
         "description": "Submit the strongest bearish (sell/avoid-supporting) reading of these headlines.",
         "input_schema": _ARGUMENT_TOOL_SCHEMA,
+        "strict": True,
     }
     prompt = (
         "You are a bearish trading analyst. Argue the strongest bearish "
@@ -122,6 +126,7 @@ def judge_verdict(llm_client, headlines, bull_argument, bear_argument):
             "required": ["score", "reasoning"],
             "additionalProperties": False,
         },
+        "strict": True,
     }
     prompt = (
         "You are an impartial judge. Weigh the bull and bear arguments below "
@@ -157,6 +162,15 @@ def evaluate_shadow_debate(llm_client, news_client, symbol, as_of_date, cache):
     fail-open catch (see live_loop.py::process_symbol), since only the
     caller knows this is a shadow-mode-only call that must never affect
     the real trade decision.
+
+    Note: the returned `vader_score`/`vader_gate_result` are RECOMPUTED
+    here independently (a fresh fetch_recent_headlines + sentiment_score
+    call) -- they are NOT copied from whatever decide_trade()'s own
+    sentiment gate actually saw/decided that cycle. A reader of
+    news_debate_log.csv should not treat these two fields as a literal
+    record of the live gate's decision, especially on a cycle where an
+    earlier gate (e.g. vix) short-circuited decide_trade() before its own
+    sentiment gate ever ran.
     """
     headlines = fetch_recent_headlines(news_client, symbol, as_of=as_of_date)
     vader_score = sentiment_score(headlines)

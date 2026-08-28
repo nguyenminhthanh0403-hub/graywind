@@ -1,13 +1,21 @@
+import csv
+import os
 from unittest.mock import MagicMock
 
 import pytest
 
+from graywind_strategy.dashboard_export import log_news_debate
 from graywind_strategy.gates.news_debate import (
     Verdict,
     bear_argument,
     bull_argument,
     judge_verdict,
 )
+
+
+def _read_csv(path):
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
 
 
 def _fake_tool_response(tool_name, input_dict):
@@ -249,3 +257,28 @@ def test_evaluate_shadow_debate_does_not_reuse_cache_across_different_symbols():
     assert aapl_result["debate_score"] == 0.1
     assert serv_result["debate_score"] == 0.2
     assert llm_client.messages.create.call_count == 6
+
+
+def test_evaluate_shadow_debate_output_round_trips_through_log_news_debate(tmp_path):
+    # Binds evaluate_shadow_debate's real output keys to log_news_debate's
+    # expected schema end-to-end -- every other test on either side of this
+    # seam uses hand-written dicts, so nothing would otherwise catch a
+    # future rename (e.g. debate_score -> score) until it broke in
+    # production. See final-review Fix 4.
+    news_client = _fake_news_client(["Company beats earnings"])
+    llm_client = _fake_llm_client_for_debate(score=0.5, reasoning="net positive")
+
+    result = evaluate_shadow_debate(
+        llm_client=llm_client, news_client=news_client, symbol="AAPL",
+        as_of_date=None, cache={},
+    )
+    row = {"timestamp": "2026-08-27T10:00:00-04:00", "symbol": "AAPL", **result}
+
+    dashboard_dir = str(tmp_path)
+    log_news_debate(rows=[row], dashboard_dir=dashboard_dir)
+
+    written = _read_csv(os.path.join(dashboard_dir, "news_debate_log.csv"))
+    assert len(written) == 1
+    assert written[0]["symbol"] == "AAPL"
+    assert written[0]["debate_score"] == "0.5"
+    assert written[0]["debate_reasoning"] == "net positive"

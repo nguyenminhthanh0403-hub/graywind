@@ -21,6 +21,11 @@ _UNEVALUATED_STATUS = {
     "action": "unknown", "reason": "cycle did not evaluate this symbol",
 }
 
+# The FINAL destination directory ("dashboard-data") -- distinct from
+# write_cycle_export's `export_dir` parameter above, which is a scratch
+# directory ("dashboard_export") that a separate step (merge_dashboard_
+# export.py) later merges into this final destination. Two similarly-named
+# but opposite-ends-of-the-pipeline concepts living in this same file.
 DEFAULT_DASHBOARD_DIR = "dashboard-data"
 NEWS_DEBATE_LOG_FILENAME = "news_debate_log.csv"
 NEWS_DEBATE_LOG_FIELDS = [

@@ -18,7 +18,10 @@ uptrend) and (b) know when a held position crosses its stop or target and
 needs to be sold.
 
 Requires: ALPACA_API_KEY, ALPACA_API_SECRET, FRED_API_KEY, FINNHUB_API_KEY
-in the environment. See .env.example.
+in the environment. See .env.example. ANTHROPIC_API_KEY is optional -- when
+unset, `llm_client` stays None and only the shadow-mode news-debate logging
+(news_debate_log.csv) is disabled; the rest of the trading cycle (real
+gates, sizing, order submission) is completely unaffected.
 """
 import os
 import sys
@@ -200,7 +203,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
     identical to behavior before these parameters existed. When given,
     a debate-call failure (network, malformed structured output) is caught
     here and never propagates or affects the real buy/sell/hold decision
-    below -- shadow mode fails open, the opposite of every real gate in
+    above -- shadow mode fails open, the opposite of every real gate in
     this file. Runs only in the same branch as the real decide_trade()
     call (mirrors "alongside the existing news_client usage" -- an
     already-held position never reaches this branch and is never debated
@@ -208,7 +211,10 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
     independently of decide_trade()'s own signal/gate short-circuiting --
     it always fetches and scores headlines when reached, so the shadow log
     accumulates a verdict for every symbol/cycle this branch runs, not
-    just the subset where VADER's gate happened to run live.
+    just the subset where VADER's gate happened to run live. Deliberately
+    positioned AFTER decide_trade() and the resulting buy/hold handling
+    (rather than before it) so that a slow or hung debate call can never
+    delay real order submission -- see final-review Fix 3.
     """
     if cycle_trades is None:
         cycle_trades = []
@@ -259,20 +265,6 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         pending_today = sum(
             1 for p in open_positions.values() if p["opened_date"] == today.isoformat()
         )
-        if llm_client is not None:
-            try:
-                debate_result = evaluate_shadow_debate(
-                    llm_client=llm_client, news_client=news_client, symbol=symbol,
-                    as_of_date=today, cache=debate_cache if debate_cache is not None else {},
-                )
-                if debate_rows is not None:
-                    debate_rows.append({
-                        "timestamp": cycle_timestamp, "symbol": symbol, **debate_result,
-                    })
-            except Exception as exc:
-                print(f"{symbol}: news debate shadow-mode error, skipping this cycle's row: {exc}",
-                      file=sys.stderr)
-
         decision = decide_trade(
             symbol=symbol, signal=signal, as_of_date=today,
             current_price=current_price, account_equity=sizing_equity,
@@ -315,6 +307,29 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 "current_price": current_price, "action": decision.action, "reason": decision.reason,
             }
             print(f"{symbol}: {decision.action} ({decision.reason})")
+
+        # Runs AFTER the buy/hold handling above (and thus after
+        # decide_trade()/order submission) so that a slow or hung Anthropic
+        # endpoint never delays real order placement -- delaying WHEN the
+        # real decision executes is itself an effect on the trade cycle the
+        # spec says shadow mode must never have, even though it never
+        # touches the decision itself. Still scoped to `if position is
+        # None:` only (an already-held position is never debated -- see
+        # final-review controller ruling deferring that as a separate
+        # scope decision). See final-review Fix 3.
+        if llm_client is not None:
+            try:
+                debate_result = evaluate_shadow_debate(
+                    llm_client=llm_client, news_client=news_client, symbol=symbol,
+                    as_of_date=today, cache=debate_cache if debate_cache is not None else {},
+                )
+                if debate_rows is not None:
+                    debate_rows.append({
+                        "timestamp": cycle_timestamp, "symbol": symbol, **debate_result,
+                    })
+            except Exception as exc:
+                print(f"{symbol}: news debate shadow-mode error, skipping this cycle's row: {exc}",
+                      file=sys.stderr)
     else:
         symbol_statuses[symbol] = {
             "position_open": True, "shares": position["shares"], "entry_price": position["entry_price"],
@@ -379,11 +394,19 @@ def main():
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
 
     state_dir = os.environ.get("GRAYWIND_STATE_DIR", "state")
+    dashboard_dir = os.environ.get("GRAYWIND_DASHBOARD_DIR", "dashboard-data")
 
     trading_client = TradingClient(api_key, api_secret, paper=True)
     data_client = StockHistoricalDataClient(api_key, api_secret)
     news_client = NewsClient(api_key, api_secret)
-    llm_client = anthropic.Anthropic(api_key=anthropic_api_key) if anthropic_api_key else None
+    # timeout/max_retries bounded explicitly: the SDK's own defaults (10min
+    # timeout, 2 retries) could otherwise stall a cycle for up to ~30min on
+    # a hung Anthropic endpoint. This is a shadow-mode call that must never
+    # meaningfully delay real order submission -- see final-review Fix 3.
+    llm_client = (
+        anthropic.Anthropic(api_key=anthropic_api_key, timeout=20.0, max_retries=1)
+        if anthropic_api_key else None
+    )
 
     today = datetime.now(ET).date()
     cycle_timestamp = datetime.now(ET).isoformat()
@@ -490,7 +513,6 @@ def main():
         save_tier_pools(tier_pools, state_dir=state_dir)
         save_rebalance_state(rebalance_state, state_dir=state_dir)
         append_decision_log(decision_rows, state_dir=state_dir)
-        log_news_debate(debate_rows)
         write_cycle_export(
             export_dir=DASHBOARD_EXPORT_DIR,
             timestamp=cycle_timestamp,
@@ -500,6 +522,16 @@ def main():
             symbol_statuses=symbol_statuses,
             cycle_trades=cycle_trades,
         )
+        # Guarded and run AFTER write_cycle_export: a shadow-mode logging
+        # failure here (schema mismatch, disk/permission error) must never
+        # prevent the real dashboard export above from running, nor
+        # propagate out of main() and fail the whole job -- fails open, per
+        # the spec's mandate that shadow mode never affects the rest of the
+        # cycle. See final-review Fix 2.
+        try:
+            log_news_debate(debate_rows, dashboard_dir=dashboard_dir)
+        except Exception as exc:
+            print(f"news debate log write failed, skipping: {exc}", file=sys.stderr)
     return 0
 
 

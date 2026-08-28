@@ -877,7 +877,9 @@ def test_main_constructs_llm_client_when_anthropic_key_set():
         result = live_loop.main()
 
     assert result == 0
-    mock_anthropic_ctor.assert_called_once_with(api_key="fake-anthropic-key")
+    mock_anthropic_ctor.assert_called_once_with(
+        api_key="fake-anthropic-key", timeout=20.0, max_retries=1,
+    )
     mock_log_news_debate.assert_called_once()
     assert mock_log_news_debate.call_args.args[0] == []  # no symbols processed (fetch_bars -> [])
 

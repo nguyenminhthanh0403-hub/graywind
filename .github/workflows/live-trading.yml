@@ -50,6 +50,7 @@ jobs:
           ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python3 live_loop.py
 
       - name: Check whether this cycle actually ran
@@ -207,6 +208,8 @@ jobs:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           GRAYWIND_STATE_DIR: state/small
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GRAYWIND_DASHBOARD_DIR: dashboard-data/small
         run: python3 live_loop.py
 
       - name: Check whether this cycle actually ran
