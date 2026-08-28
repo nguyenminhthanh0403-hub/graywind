@@ -129,3 +129,74 @@ def test_written_csvs_use_bare_lf_not_crlf(tmp_path):
     for filename in ("new_equity_point.csv", "new_trades.csv", "status.csv"):
         content = open(os.path.join(export_dir, filename), "rb").read()
         assert b"\r\n" not in content, f"{filename} contains CRLF line endings"
+
+
+from graywind_strategy.dashboard_export import log_news_debate
+
+
+def test_log_news_debate_appends_one_row_per_call(tmp_path):
+    dashboard_dir = str(tmp_path)
+    log_news_debate(
+        rows=[{
+            "timestamp": "2026-08-27T10:00:00-04:00", "symbol": "AAPL",
+            "vader_score": 0.15, "vader_gate_result": True,
+            "debate_score": 0.4, "debate_reasoning": "Bull case narrowly wins.",
+        }],
+        dashboard_dir=dashboard_dir,
+    )
+    rows = _read_csv(os.path.join(dashboard_dir, "news_debate_log.csv"))
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "AAPL"
+    assert rows[0]["vader_score"] == "0.15"
+    assert rows[0]["debate_score"] == "0.4"
+    assert rows[0]["debate_reasoning"] == "Bull case narrowly wins."
+
+
+def test_log_news_debate_is_a_noop_on_empty_rows(tmp_path):
+    dashboard_dir = str(tmp_path)
+    log_news_debate(rows=[], dashboard_dir=dashboard_dir)
+    assert not os.path.exists(os.path.join(dashboard_dir, "news_debate_log.csv"))
+
+
+def test_log_news_debate_writes_header_once_across_multiple_calls(tmp_path):
+    dashboard_dir = str(tmp_path)
+    row = {
+        "timestamp": "2026-08-27T10:00:00-04:00", "symbol": "AAPL",
+        "vader_score": 0.0, "vader_gate_result": True,
+        "debate_score": 0.0, "debate_reasoning": "neutral",
+    }
+    log_news_debate(rows=[row], dashboard_dir=dashboard_dir)
+    log_news_debate(rows=[row], dashboard_dir=dashboard_dir)
+
+    path = os.path.join(dashboard_dir, "news_debate_log.csv")
+    with open(path) as f:
+        lines = f.readlines()
+    assert lines[0].strip() == "timestamp,symbol,vader_score,vader_gate_result,debate_score,debate_reasoning"
+    assert len(lines) == 3  # one header + two data rows, not two headers
+
+
+def test_log_news_debate_creates_dashboard_dir_if_missing(tmp_path):
+    dashboard_dir = str(tmp_path / "nested" / "dashboard-data")
+    log_news_debate(
+        rows=[{
+            "timestamp": "t", "symbol": "AAPL", "vader_score": 0.0,
+            "vader_gate_result": True, "debate_score": 0.0, "debate_reasoning": "x",
+        }],
+        dashboard_dir=dashboard_dir,
+    )
+    assert os.path.exists(os.path.join(dashboard_dir, "news_debate_log.csv"))
+
+
+def test_log_news_debate_writes_bare_lf_not_crlf(tmp_path):
+    # Same regression class as write_cycle_export's CRLF check -- must be
+    # checked at the byte level, csv.DictReader silently absorbs CRLF.
+    dashboard_dir = str(tmp_path)
+    log_news_debate(
+        rows=[{
+            "timestamp": "t", "symbol": "AAPL", "vader_score": 0.0,
+            "vader_gate_result": True, "debate_score": 0.0, "debate_reasoning": "x",
+        }],
+        dashboard_dir=dashboard_dir,
+    )
+    content = open(os.path.join(dashboard_dir, "news_debate_log.csv"), "rb").read()
+    assert b"\r\n" not in content

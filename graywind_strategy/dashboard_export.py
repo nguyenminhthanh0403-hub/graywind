@@ -21,6 +21,13 @@ _UNEVALUATED_STATUS = {
     "action": "unknown", "reason": "cycle did not evaluate this symbol",
 }
 
+DEFAULT_DASHBOARD_DIR = "dashboard-data"
+NEWS_DEBATE_LOG_FILENAME = "news_debate_log.csv"
+NEWS_DEBATE_LOG_FIELDS = [
+    "timestamp", "symbol", "vader_score", "vader_gate_result",
+    "debate_score", "debate_reasoning",
+]
+
 
 def _fmt(value):
     return "" if value is None else str(value)
@@ -57,3 +64,28 @@ def write_cycle_export(export_dir, timestamp, symbols, equity, today_pnl, symbol
                 "action": status["action"],
                 "reason": status["reason"],
             })
+
+
+def log_news_debate(rows, dashboard_dir=DEFAULT_DASHBOARD_DIR):
+    """Appends shadow-mode news-debate rows to
+    <dashboard_dir>/news_debate_log.csv, accumulating across every cycle
+    ever run -- same append-forever semantics as append_decision_log in
+    state_store.py (list of rows, no-op on empty, header written once),
+    just targeting dashboard-data/ directly instead of state/ (this data
+    is dashboard-facing history like trade_log.csv/equity_curve.csv, not
+    operational state). Written directly here rather than through the
+    scratch-dir-then-merge_dashboard_export.py two-step used for
+    trade_log.csv/equity_curve.csv/status.csv, since live-trading.yml's
+    final `git add -A dashboard-data` step picks up any file in that
+    directory regardless of how it got there -- no workflow change needed.
+    """
+    if not rows:
+        return
+    os.makedirs(dashboard_dir, exist_ok=True)
+    path = os.path.join(dashboard_dir, NEWS_DEBATE_LOG_FILENAME)
+    file_exists = os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=NEWS_DEBATE_LOG_FIELDS, lineterminator="\n")
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(rows)
