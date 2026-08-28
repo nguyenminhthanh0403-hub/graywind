@@ -448,6 +448,83 @@ def test_process_symbol_without_decision_rows_does_not_raise():
         )
 
 
+def test_process_symbol_records_debate_row_when_llm_client_given():
+    open_positions = {}
+    fake_result = {
+        "vader_score": 0.1, "vader_gate_result": True,
+        "debate_score": 0.4, "debate_reasoning": "net bullish",
+    }
+    debate_rows = []
+    with patch("live_loop.evaluate_shadow_debate", return_value=fake_result) as mock_debate:
+        live_loop.process_symbol(
+            symbol="AAPL", signal="hold", current_price=150.0, today=date(2024, 1, 8),
+            open_positions=open_positions, equity=10000.0,
+            pdt_throttle=MagicMock(can_open_day_trade=lambda *a, **kw: True),
+            position_sizer=MagicMock(), drawdown_breaker_ok=True, fred_api_key="k",
+            news_client=object(), finnhub_api_key="k", trading_client=MagicMock(),
+            drawdown_breaker=MagicMock(),
+            cycle_timestamp="2026-08-27T10:00:00-04:00",
+            llm_client=object(), debate_cache={}, debate_rows=debate_rows,
+        )
+
+    mock_debate.assert_called_once()
+    assert debate_rows == [{
+        "timestamp": "2026-08-27T10:00:00-04:00", "symbol": "AAPL", **fake_result,
+    }]
+
+
+def test_process_symbol_debate_exception_does_not_block_real_decision_or_propagate():
+    open_positions = {}
+    with patch("live_loop.evaluate_shadow_debate", side_effect=RuntimeError("rate limited")), \
+         patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")) as mock_decide:
+        # Must not raise -- the whole point of fail-open.
+        live_loop.process_symbol(
+            symbol="AAPL", signal="buy", current_price=150.0, today=date(2024, 1, 8),
+            open_positions=open_positions, equity=10000.0,
+            pdt_throttle=MagicMock(can_open_day_trade=lambda *a, **kw: True),
+            position_sizer=MagicMock(), drawdown_breaker_ok=True, fred_api_key="k",
+            news_client=object(), finnhub_api_key="k", trading_client=MagicMock(),
+            drawdown_breaker=MagicMock(),
+            llm_client=object(), debate_cache={}, debate_rows=[],
+        )
+
+    mock_decide.assert_called_once()  # the real decision still ran
+
+
+def test_process_symbol_skips_debate_entirely_when_llm_client_not_given():
+    open_positions = {}
+    with patch("live_loop.evaluate_shadow_debate") as mock_debate, \
+         patch("live_loop.decide_trade", return_value=TradeDecision(action="hold", reason="no buy signal")):
+        live_loop.process_symbol(
+            symbol="AAPL", signal="hold", current_price=150.0, today=date(2024, 1, 8),
+            open_positions=open_positions, equity=10000.0,
+            pdt_throttle=MagicMock(can_open_day_trade=lambda *a, **kw: True),
+            position_sizer=MagicMock(), drawdown_breaker_ok=True, fred_api_key="k",
+            news_client=object(), finnhub_api_key="k", trading_client=MagicMock(),
+            drawdown_breaker=MagicMock(),
+        )
+
+    mock_debate.assert_not_called()
+
+
+def test_process_symbol_does_not_debate_an_already_held_position():
+    open_positions = {"AAPL": {
+        "entry_price": 100.0, "shares": 5, "stop": 90.0, "target": 130.0,
+        "opened_date": "2024-01-05",
+    }}
+    with patch("live_loop.evaluate_shadow_debate") as mock_debate:
+        live_loop.process_symbol(
+            symbol="AAPL", signal="hold", current_price=110.0, today=date(2024, 1, 8),
+            open_positions=open_positions, equity=10000.0,
+            pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(),
+            finnhub_api_key="k", trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+            llm_client=object(), debate_cache={}, debate_rows=[],
+        )
+
+    mock_debate.assert_not_called()
+
+
 # --- reconcile_positions: reconciles local open_positions against Alpaca's
 # real account state at the start of each live-loop cycle (final-review
 # Fix 5). Local state is authoritative for stop/target/entry_price (Alpaca's
@@ -767,6 +844,78 @@ def test_main_calls_write_cycle_export_after_save_state():
     kwargs = mock_export.call_args.kwargs
     assert kwargs["symbols"] == live_loop.WATCHLIST
     assert kwargs["equity"] == 10000.0
+
+
+def test_main_constructs_llm_client_when_anthropic_key_set():
+    fake_account = MagicMock()
+    fake_account.equity = "10000.0"
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+    fake_trading_client.get_all_positions.return_value = []
+    fake_state = {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "ANTHROPIC_API_KEY": "fake-anthropic-key",
+         }), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.anthropic.Anthropic") as mock_anthropic_ctor, \
+         patch("live_loop.load_state", return_value=fake_state), \
+         patch("live_loop.save_state"), \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
+         patch("live_loop.fetch_bars", return_value=[]), \
+         patch("live_loop.append_decision_log"), \
+         patch("live_loop.log_news_debate") as mock_log_news_debate, \
+         patch("live_loop.write_cycle_export"):
+        result = live_loop.main()
+
+    assert result == 0
+    mock_anthropic_ctor.assert_called_once_with(api_key="fake-anthropic-key")
+    mock_log_news_debate.assert_called_once()
+    assert mock_log_news_debate.call_args.args[0] == []  # no symbols processed (fetch_bars -> [])
+
+
+def test_main_skips_llm_client_construction_when_anthropic_key_unset():
+    fake_account = MagicMock()
+    fake_account.equity = "10000.0"
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+    fake_trading_client.get_all_positions.return_value = []
+    fake_state = {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+         }, clear=False), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.anthropic.Anthropic") as mock_anthropic_ctor, \
+         patch("live_loop.load_state", return_value=fake_state), \
+         patch("live_loop.save_state"), \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
+         patch("live_loop.fetch_bars", return_value=[]), \
+         patch("live_loop.append_decision_log"), \
+         patch("live_loop.log_news_debate") as mock_log_news_debate, \
+         patch("live_loop.write_cycle_export"):
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        result = live_loop.main()
+
+    assert result == 0
+    mock_anthropic_ctor.assert_not_called()
+    mock_log_news_debate.assert_called_once()
+    assert mock_log_news_debate.call_args.args[0] == []
 
 
 def test_process_symbol_cycle_passes_confirmation_bars_to_compute_signals():

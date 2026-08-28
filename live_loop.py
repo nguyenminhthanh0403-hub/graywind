@@ -25,6 +25,7 @@ import sys
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 
+import anthropic
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.news import NewsClient
@@ -37,7 +38,8 @@ from graywind_strategy.pipeline import decide_trade
 from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
-from graywind_strategy.dashboard_export import write_cycle_export
+from graywind_strategy.gates.news_debate import evaluate_shadow_debate
+from graywind_strategy.dashboard_export import write_cycle_export, log_news_debate
 from graywind_strategy.state_store import (
     append_decision_log, load_state, save_state, load_tier_pools, save_tier_pools,
     load_rebalance_state, save_rebalance_state,
@@ -169,7 +171,8 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                     fred_api_key, news_client, finnhub_api_key, trading_client,
                     drawdown_breaker, cycle_timestamp=None, cycle_trades=None,
                     symbol_statuses=None, tier_pools=None,
-                    rsi=None, sma_fast=None, sma_slow=None, decision_rows=None):
+                    rsi=None, sma_fast=None, sma_slow=None, decision_rows=None,
+                    llm_client=None, debate_cache=None, debate_rows=None):
     """Resolves one symbol's decision for this cycle: sell-on-stop/target
     exit if a held position crossed its stop or target, otherwise
     decide_trade() for a fresh entry -- but only if the symbol isn't
@@ -190,6 +193,22 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
     -- so it naturally excludes the symbol currently being evaluated,
     matching the "other symbols only" contract documented in
     pdt_throttle.py/pipeline.py, without needing an explicit exclusion.
+
+    `llm_client`/`debate_cache`/`debate_rows` are the shadow-mode
+    news-debate collectors -- when `llm_client` is None (the
+    ANTHROPIC_API_KEY-not-set case), the debate step is skipped entirely,
+    identical to behavior before these parameters existed. When given,
+    a debate-call failure (network, malformed structured output) is caught
+    here and never propagates or affects the real buy/sell/hold decision
+    below -- shadow mode fails open, the opposite of every real gate in
+    this file. Runs only in the same branch as the real decide_trade()
+    call (mirrors "alongside the existing news_client usage" -- an
+    already-held position never reaches this branch and is never debated
+    either, matching decide_trade()'s own skip-if-holding scope), but
+    independently of decide_trade()'s own signal/gate short-circuiting --
+    it always fetches and scores headlines when reached, so the shadow log
+    accumulates a verdict for every symbol/cycle this branch runs, not
+    just the subset where VADER's gate happened to run live.
     """
     if cycle_trades is None:
         cycle_trades = []
@@ -240,6 +259,20 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         pending_today = sum(
             1 for p in open_positions.values() if p["opened_date"] == today.isoformat()
         )
+        if llm_client is not None:
+            try:
+                debate_result = evaluate_shadow_debate(
+                    llm_client=llm_client, news_client=news_client, symbol=symbol,
+                    as_of_date=today, cache=debate_cache if debate_cache is not None else {},
+                )
+                if debate_rows is not None:
+                    debate_rows.append({
+                        "timestamp": cycle_timestamp, "symbol": symbol, **debate_result,
+                    })
+            except Exception as exc:
+                print(f"{symbol}: news debate shadow-mode error, skipping this cycle's row: {exc}",
+                      file=sys.stderr)
+
         decision = decide_trade(
             symbol=symbol, signal=signal, as_of_date=today,
             current_price=current_price, account_equity=sizing_equity,
@@ -343,18 +376,22 @@ def main():
     if not all([api_key, api_secret, fred_api_key, finnhub_api_key]):
         print("ERROR: one or more required API keys are not set in the environment", file=sys.stderr)
         return 1
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
 
     state_dir = os.environ.get("GRAYWIND_STATE_DIR", "state")
 
     trading_client = TradingClient(api_key, api_secret, paper=True)
     data_client = StockHistoricalDataClient(api_key, api_secret)
     news_client = NewsClient(api_key, api_secret)
+    llm_client = anthropic.Anthropic(api_key=anthropic_api_key) if anthropic_api_key else None
 
     today = datetime.now(ET).date()
     cycle_timestamp = datetime.now(ET).isoformat()
     cycle_trades = []
     symbol_statuses = {}
     decision_rows = []
+    debate_cache = {}
+    debate_rows = []
     state = load_state(state_dir=state_dir)
     tier_pools = load_tier_pools(state_dir=state_dir)
     rebalance_state = load_rebalance_state(state_dir=state_dir)
@@ -428,6 +465,7 @@ def main():
                     symbol_statuses=symbol_statuses, tier_pools=tier_pools,
                     rsi=latest["rsi"], sma_fast=latest["sma_fast"], sma_slow=latest["sma_slow"],
                     decision_rows=decision_rows,
+                    llm_client=llm_client, debate_cache=debate_cache, debate_rows=debate_rows,
                 )
             except Exception as exc:
                 print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)
@@ -452,6 +490,7 @@ def main():
         save_tier_pools(tier_pools, state_dir=state_dir)
         save_rebalance_state(rebalance_state, state_dir=state_dir)
         append_decision_log(decision_rows, state_dir=state_dir)
+        log_news_debate(debate_rows)
         write_cycle_export(
             export_dir=DASHBOARD_EXPORT_DIR,
             timestamp=cycle_timestamp,
