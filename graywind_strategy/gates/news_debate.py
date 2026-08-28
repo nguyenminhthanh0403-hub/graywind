@@ -31,6 +31,12 @@ and never make a real API call.
 """
 from dataclasses import dataclass
 
+from graywind_strategy.gates.sentiment_gate import (
+    fetch_recent_headlines,
+    sentiment_gate,
+    sentiment_score,
+)
+
 NEWS_DEBATE_MODEL = "claude-sonnet-5"
 NEWS_DEBATE_MAX_TOKENS = 1024
 
@@ -127,3 +133,47 @@ def judge_verdict(llm_client, headlines, bull_argument, bear_argument):
     )
     result = _tool_call(llm_client, prompt, tool)
     return Verdict(score=float(result["score"]), reasoning=result["reasoning"])
+
+
+def evaluate_shadow_debate(llm_client, news_client, symbol, as_of_date, cache):
+    """Fetches this symbol's recent headlines, scores them with VADER (same
+    scoring the live sentiment gate uses), and runs the bull/bear/judge
+    debate on the same headline set -- returning both side by side so the
+    caller can log a shadow-mode comparison row. Independent of
+    pipeline.py::decide_trade()'s own gate evaluation: this always fetches
+    and scores, regardless of whether decide_trade() would have reached
+    its sentiment gate this cycle (e.g. signal != "buy", or an earlier
+    gate like vix would have short-circuited it) -- that's what lets the
+    shadow log build comparison history for every symbol/cycle rather than
+    only the subset of cycles where VADER's gate happened to run live.
+
+    `cache` is an in-memory dict the caller owns (per live_loop.py process
+    invocation -- see the module docstring), keyed on
+    (symbol, hash(tuple(headlines))): a repeat call this run with the same
+    symbol and an unchanged headline set skips re-running the debate.
+
+    Raises on any failure (headline fetch, malformed debate output) --
+    does not catch anything itself. The caller is responsible for the
+    fail-open catch (see live_loop.py::process_symbol), since only the
+    caller knows this is a shadow-mode-only call that must never affect
+    the real trade decision.
+    """
+    headlines = fetch_recent_headlines(news_client, symbol, as_of=as_of_date)
+    vader_score = sentiment_score(headlines)
+    vader_gate_result = sentiment_gate(vader_score)
+
+    cache_key = (symbol, hash(tuple(headlines)))
+    if cache_key in cache:
+        verdict = cache[cache_key]
+    else:
+        bull = bull_argument(llm_client, headlines)
+        bear = bear_argument(llm_client, headlines)
+        verdict = judge_verdict(llm_client, headlines, bull, bear)
+        cache[cache_key] = verdict
+
+    return {
+        "vader_score": vader_score,
+        "vader_gate_result": vader_gate_result,
+        "debate_score": verdict.score,
+        "debate_reasoning": verdict.reasoning,
+    }
