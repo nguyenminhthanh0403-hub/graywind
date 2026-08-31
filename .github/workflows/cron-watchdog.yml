@@ -1,0 +1,218 @@
+name: Live Trading Cron Watchdog
+
+# Safety net for GitHub's unreliable `schedule` trigger.
+#
+# On 2026-08-31 the live-trading.yml cron (*/15 13-20 * * 1-5) silently
+# stopped firing: the last real schedule-triggered run was 2026-08-28, and
+# three full days of market-hours ticks produced no runs at all -- not failed
+# runs, no run objects whatsoever. GitHub does not surface this anywhere, does
+# not retry, and does not alarm. The trading cycle simply stops and the state
+# CSVs quietly go stale.
+#
+# This workflow watches the *absence* of runs and dispatches live-trading.yml
+# by hand when the native cron drops a tick.
+#
+# TWO HONEST CAVEATS, because this is a partial fix and should not be mistaken
+# for a complete one:
+#
+#   1. This watchdog is itself a `schedule` workflow, so it is subject to the
+#      exact same GitHub scheduler flakiness it exists to catch. If GitHub
+#      drops triggers repo-wide, it drops these too -- correlated failure,
+#      precisely when the watchdog is most needed. It helps because the
+#      observed failure mode looks per-workflow (a stale schedule
+#      registration), and a separate workflow file carries its own
+#      registration. It is *not* a guarantee. The out-of-band monitor that
+#      runs outside GitHub entirely (see docs/cron-watchdog.md) is the
+#      component that actually closes this hole.
+#
+#   2. It needs a PAT. See the dispatch step below -- GITHUB_TOKEN physically
+#      cannot do this job.
+#
+# Offset minutes (4,14,24,...) deliberately dodge :00/:15/:30/:45, where every
+# */15 cron on GitHub piles into the scheduler queue at once and delays and
+# drops concentrate.
+on:
+  # Hour range mirrors live-trading.yml's 13-21 rather than stopping at 20.
+  # A watchdog that stops watching before the thing it watches stops running
+  # would leave the last winter-session ticks (EST puts 3:45pm ET at 20:45
+  # UTC) uncovered -- the exact edge live-trading.yml was just widened to
+  # include. Ticks that land outside real market hours exit in seconds.
+  schedule:
+    - cron: "4,14,24,34,44,54 13-21 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  issues: write
+
+concurrency:
+  group: cron-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for a dropped trading cycle and heal it
+        uses: actions/github-script@v7
+        with:
+          # GITHUB_TOKEN CANNOT BE USED HERE. GitHub deliberately refuses to
+          # start a workflow run from an event raised with GITHUB_TOKEN -- it
+          # is their recursion guard, it applies to workflow_dispatch, and it
+          # fails *silently*: the API returns 204 No Content exactly as if it
+          # had worked, and no run is ever created. A watchdog built on
+          # GITHUB_TOKEN would report "healed!" on every miss forever while
+          # actually doing nothing, which is worse than no watchdog at all.
+          #
+          # So this needs a PAT (fine-grained, this repo only, Actions:
+          # read+write) stored as the WATCHDOG_PAT secret. If it is absent the
+          # step below fails loudly and tells you why, rather than pretending.
+          github-token: ${{ secrets.WATCHDOG_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const HAVE_PAT = ${{ secrets.WATCHDOG_PAT != '' }};
+            // A tick is "dropped" once no cycle has started in this long. The
+            // cron is every 15 min; GitHub routinely runs 5-15 min late under
+            // ordinary load, and dispatching on top of a merely-late tick just
+            // burns runner time and doubles the cycle. 25 min is late enough
+            // to clear normal jitter, early enough that at most one tick is
+            // ever actually missed.
+            const STALE_MINUTES = 25;
+            const WORKFLOW = 'live-trading.yml';
+
+            // --- Are we inside real US market hours right now? -------------
+            // GitHub cron is UTC-only and cannot track DST, so the 13-20 UTC
+            // window drifts an hour against the real session twice a year.
+            // Resolve the actual America/New_York wall clock instead. Market
+            // holidays are deliberately NOT handled: live_loop.py checks real
+            // market hours itself and exits early, so a dispatch on Christmas
+            // is a harmless ~40-second no-op run. Not worth a holiday table.
+            const fmt = new Intl.DateTimeFormat('en-US', {
+              timeZone: 'America/New_York',
+              weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+            });
+            const p = Object.fromEntries(
+              fmt.formatToParts(new Date()).map(x => [x.type, x.value])
+            );
+            // hour12:false yields '24' for midnight on some ICU builds.
+            const etMinutes = (Number(p.hour) % 24) * 60 + Number(p.minute);
+            const isWeekday = !['Sat', 'Sun'].includes(p.weekday);
+            const OPEN = 9 * 60 + 30, CLOSE = 16 * 60;
+            const inMarketHours = isWeekday && etMinutes >= OPEN && etMinutes <= CLOSE;
+
+            const summary = [];
+            const log = (s) => { core.info(s); summary.push(s); };
+            log(`Now: ${p.weekday} ${p.hour}:${p.minute} ET — market hours: ${inMarketHours}`);
+
+            if (!inMarketHours) {
+              log('Outside market hours; nothing to watch.');
+              await core.summary.addRaw(summary.join('\n\n')).write();
+              return;
+            }
+
+            // --- How long since the trading cycle last ran? ----------------
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: WORKFLOW,
+              per_page: 20,
+            });
+            const runs = data.workflow_runs || [];
+            if (runs.length === 0) {
+              log(`No runs of ${WORKFLOW} found at all — cannot assess. Skipping.`);
+              await core.summary.addRaw(summary.join('\n\n')).write();
+              return;
+            }
+
+            const ageMin = (r) => (Date.now() - new Date(r.created_at).getTime()) / 60000;
+
+            // Healing looks at ANY run: a manual dispatch executes the trading
+            // cycle just as well as a cron one, and the goal here is that the
+            // cycle keeps running -- not that it runs via one specific trigger.
+            const latest = runs[0];
+            // Diagnosis tracks `schedule` separately, because "cron is dead but
+            // the watchdog is covering for it" and "cron is healthy" are very
+            // different states that must not be allowed to look identical.
+            const latestCron = runs.find(r => r.event === 'schedule');
+
+            log(`Last cycle: run #${latest.run_number} (${latest.event}) ` +
+                `${ageMin(latest).toFixed(1)} min ago.`);
+            log(latestCron
+              ? `Last *native cron* run: #${latestCron.run_number}, ` +
+                `${ageMin(latestCron).toFixed(1)} min ago.`
+              : 'No native cron run in the last 20 runs — schedule trigger looks dead.');
+
+            if (ageMin(latest) <= STALE_MINUTES) {
+              log(`Fresh (<= ${STALE_MINUTES} min). No action.`);
+              await core.summary.addRaw(summary.join('\n\n')).write();
+              return;
+            }
+
+            // --- Dropped tick: heal it -------------------------------------
+            log(`STALE: no cycle in ${ageMin(latest).toFixed(1)} min ` +
+                `(threshold ${STALE_MINUTES}). Dispatching ${WORKFLOW}.`);
+
+            if (!HAVE_PAT) {
+              await core.summary.addRaw(summary.join('\n\n')).write();
+              core.setFailed(
+                'A trading cycle was dropped, but the WATCHDOG_PAT secret is not ' +
+                'set. GITHUB_TOKEN cannot start a workflow run (GitHub silently ' +
+                'ignores it), so this watchdog cannot heal anything until a PAT ' +
+                'with Actions:write is added. See docs/cron-watchdog.md.'
+              );
+              return;
+            }
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: WORKFLOW,
+              // schedule payloads do carry `repository`, but a dispatch aimed
+              // at a branch that doesn't exist 422s, and this is the one call
+              // in the file that must not fail. Fall back rather than assume.
+              ref: context.payload?.repository?.default_branch || 'main',
+            });
+            log('Dispatched.');
+
+            // Leave a visible trail. A dropped tick is a real event worth
+            // knowing about even though it self-healed -- if this issue starts
+            // collecting comments every day, the native cron is chronically
+            // broken and the fix is escalation to GitHub, not more watchdog.
+            // One rolling issue, commented not recreated, so it stays quiet.
+            const body =
+              `Dropped trading cycle detected at ${new Date().toISOString()} — ` +
+              `no run in ${ageMin(latest).toFixed(1)} min ` +
+              `(last: #${latest.run_number}, \`${latest.event}\`). ` +
+              `Watchdog dispatched \`${WORKFLOW}\` to cover the gap.\n\n` +
+              (latestCron
+                ? `Last native \`schedule\` run was #${latestCron.run_number}, ` +
+                  `${ageMin(latestCron).toFixed(1)} min ago.`
+                : 'No native `schedule` run in recent history.');
+
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                name: 'cron-watchdog', color: 'fbca04',
+                description: 'GitHub schedule trigger dropped a trading cycle',
+              });
+            } catch (err) {
+              if (err.status !== 422) throw err; // 422 = already exists
+            }
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'cron-watchdog',
+            });
+            if (issues.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: 'GitHub cron is dropping live-trading ticks',
+                body, labels: ['cron-watchdog'],
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issues[0].number, body,
+              });
+            }
+
+            await core.summary.addRaw(summary.join('\n\n')).write();

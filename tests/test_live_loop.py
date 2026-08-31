@@ -1121,3 +1121,63 @@ def test_run_tier1_rebalance_skips_symbol_with_no_recent_bars():
     assert orders == []
     trading_client.submit_order.assert_not_called()
     assert tier_pools[1] == 700.0  # untouched
+
+
+# --- entries_enabled: exit-only mode for a symbol that is still held but has
+# been dropped from WATCHLIST. process_symbol is the only code that evaluates
+# stop/target, so before this existed, main() iterating WATCHLIST alone meant
+# such a holding had its stop written to state every cycle and never checked.
+# Live case: SPY (65 sh, stop 754.75, ~$50k), bought 2026-08-19 when WATCHLIST
+# was ["AAPL","SPY"], unmonitored since commit 695abd0 changed it on 08-26.
+
+def test_entries_disabled_still_sells_a_position_that_breached_its_stop():
+    open_positions = {"SPY": _position(shares=65, stop=754.75, target=793.25)}
+    trading_client = MagicMock()
+    with patch("live_loop.decide_trade") as mock_decide:
+        process_symbol(
+            symbol="SPY", signal="hold", current_price=750.0, today=date(2024, 1, 8),
+            open_positions=open_positions, equity=100000.0,
+            pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(),
+            finnhub_api_key="k", trading_client=trading_client,
+            drawdown_breaker=MagicMock(), entries_enabled=False,
+        )
+    trading_client.submit_order.assert_called_once()
+    assert "SPY" not in open_positions
+    # Exit-only means the entry path is never even consulted.
+    mock_decide.assert_not_called()
+
+
+def test_entries_disabled_never_opens_a_new_position():
+    open_positions = {}
+    trading_client = MagicMock()
+    with patch("live_loop.decide_trade") as mock_decide:
+        process_symbol(
+            symbol="SPY", signal="buy", current_price=770.0, today=date(2024, 1, 8),
+            open_positions=open_positions, equity=100000.0,
+            pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(),
+            finnhub_api_key="k", trading_client=trading_client,
+            drawdown_breaker=MagicMock(), entries_enabled=False,
+        )
+    mock_decide.assert_not_called()
+    trading_client.submit_order.assert_not_called()
+    assert open_positions == {}
+
+
+def test_entries_enabled_defaults_to_true_so_existing_callers_are_unchanged():
+    _, trading_client, _, _, _ = _call(symbol="AAPL", signal="buy")
+    # _call omits entries_enabled entirely; the entry path must still run.
+    assert trading_client is not None
+
+
+def test_reconcile_warns_about_broker_position_even_when_off_watchlist(capsys):
+    # The warning used to be gated on `symbol in WATCHLIST`, so a holding
+    # dropped from the watchlist went silent in BOTH directions: no exit
+    # checks and no warning either. Off-watchlist makes it more urgent.
+    trading_client = MagicMock()
+    trading_client.get_all_positions.return_value = [_fake_broker_position("TSLA")]
+    assert "TSLA" not in live_loop.WATCHLIST
+    live_loop.reconcile_positions(trading_client, {})
+    err = capsys.readouterr().err
+    assert "TSLA" in err and "WARNING" in err

@@ -30,7 +30,17 @@ def fetch_bars(client, symbol, start, end):
         feed=DataFeed.IEX,
     )
     response = client.get_stock_bars(request)
-    return list(response[symbol])
+    # .data.get(symbol, []), not response[symbol]: alpaca-py's BarSet
+    # __getitem__ raises KeyError("No key SERV was found.") when a symbol
+    # came back with no bars -- it does not return an empty list. Alpaca
+    # legitimately returns zero bars for a thin symbol on the IEX feed, in
+    # the first minutes after the open, or during a partial data outage.
+    # The KeyError propagated past four separate `if not bars:` /
+    # `if symbol not in current_prices:` guards written to handle exactly
+    # that case (live_loop.py's per-symbol skip and run_tier1_rebalance's,
+    # tier1_rebalance.py's price check, and write_csv's ValueError below),
+    # making all four unreachable. Returning [] makes them real.
+    return list(response.data.get(symbol, []))
 
 
 def write_csv(symbol, bars, output_dir=OUTPUT_DIR):

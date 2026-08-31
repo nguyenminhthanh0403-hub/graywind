@@ -8,9 +8,23 @@ name: Graywind Live Trading Cycle
 # checks real ET market hours and exits immediately outside them, so an
 # extra early/late firing is a no-op, not a bug). workflow_dispatch lets
 # this be run by hand for the Task 7 dry run.
+#
+# Hour range is 13-21, not 13-20, because of that same DST drift. Under EST
+# the last tick of a 13-20 window is 20:45 UTC = 3:45pm ET, so the final 15
+# minutes of every winter session -- including the run-up to the closing
+# auction -- got no cycle at all. Extending to 21 covers 4:00pm ET in EST;
+# the extra ticks it adds in EDT land after the close and no-op out of
+# is_market_hours() in under a minute. Cheap insurance against a silent
+# seasonal blind spot.
+#
+# Minutes are :00/:15/:30/:45, which is where every */15 cron on GitHub
+# piles into the scheduler queue at once. See docs/cron-watchdog.md and
+# cron-watchdog.yml -- rather than shifting these (which would move the
+# cycle off the clean quarter-hour boundaries the state CSVs are keyed to),
+# the watchdog runs on offset minutes and covers dropped ticks.
 on:
   schedule:
-    - cron: "*/15 13-20 * * 1-5"
+    - cron: "*/15 13-21 * * 1-5"
   workflow_dispatch:
 
 # Lets the built-in GITHUB_TOKEN push graywind's own state/*.csv and
