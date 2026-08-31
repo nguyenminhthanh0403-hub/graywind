@@ -1,0 +1,3 @@
+timestamp,symbol,action,reason,rsi,sma_fast,sma_slow,vix,sentiment,days_to_earnings,macro_breaches,sector_gates
+2026-08-31T13:50:19.713763-04:00,AAPL,hold,no buy signal,37.420166697219976,314.2415,316.81783333333334,,,,,
+2026-08-31T13:50:19.713763-04:00,SERV,hold,no buy signal,40.057729969464845,5.0045,5.012166666666667,,,,,
