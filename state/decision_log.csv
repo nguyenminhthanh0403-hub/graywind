@@ -1,0 +1,2 @@
+timestamp,symbol,action,reason,rsi,sma_fast,sma_slow,vix,sentiment,days_to_earnings,macro_breaches,sector_gates
+2026-08-31T13:26:03.864922-04:00,SERV,hold,position size rounds to zero shares,42.02577193629961,5.0325,5.011166666666667,14.43,0.0,none,0,[]
