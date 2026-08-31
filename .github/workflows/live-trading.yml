@@ -233,6 +233,8 @@ jobs:
             echo "No changes this cycle; nothing to commit."
           else
             git commit -m "Update live state and dashboard data (small account) for $(date -u +%FT%H:%M)"
+            git fetch origin main
+            git rebase origin/main
             git push
           fi
 
