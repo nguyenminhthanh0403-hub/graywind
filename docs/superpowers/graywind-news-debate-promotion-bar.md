@@ -30,7 +30,7 @@ The debate gate may be promoted from shadow to authoritative **only when all fou
    better and must be excluded from the comparison.
 4. **Cost is justified.** Measured Anthropic API spend per additional dollar of realized
    P&L attributable to the debate gate must be positive. See
-   `graywind-news-debate-provider-cost-handoff.md`.
+   `archive/graywind-news-debate-provider-cost-handoff.md`.
 
 **Failing criterion 2 or 3 means delete the gate, not tune it.** A shadow gate that never
 earns promotion is a successful experiment with a negative result, and removing it is the
@@ -47,7 +47,7 @@ the bar; both are prerequisites to ever evaluating it.
 
 **Owner decision, 2026-08-31: `ANTHROPIC_API_KEY` will NOT be set — paying Anthropic for
 this feature is too costly.** That closes option 1 of the three in
-`graywind-news-debate-provider-cost-handoff.md` (keep `claude-sonnet-5`, ~$10–20/month).
+`archive/graywind-news-debate-provider-cost-handoff.md` (keep `claude-sonnet-5`, ~$10–20/month).
 The consequence is that **no shadow data will accumulate at all** until a cheaper provider
 is wired in, so the promotion bar above is currently unreachable — not failing, just
 never evaluated.
@@ -92,11 +92,13 @@ but **silently**. Nothing alerts on it.
 This is the exact failure shape recorded elsewhere in this project's history: an unset CI
 secret expanding to `""` and failing quietly forever rather than loudly once.
 
-**Required action before the bar can ever be evaluated:**
-- Set the `ANTHROPIC_API_KEY` repository secret, **or** consciously decide the debate
-  experiment is not being run and remove the dead code path rather than leaving it
-  looking active.
-- Verify from the run side, not the code side: after a market-hours cycle, confirm
+**Required action before the bar can ever be evaluated** (note the Anthropic option is
+closed — see the owner decision above; these are the two remaining paths):
+- **Wire a cheaper provider** (the option-3 recommendation), **or** consciously decide the
+  debate experiment is not being run and remove the dead code path rather than leaving it
+  looking active. Leaving it as-is is not a third option — it is the current state, and it
+  produces nothing.
+- Then verify from the run side, not the code side: after a market-hours cycle, confirm
   `dashboard-data/news_debate_log.csv` exists on `origin/main` and is gaining rows.
   Reading the workflow file is not verification that it ran.
 
@@ -136,5 +138,5 @@ built in shadow mode.
 ## Related
 
 - `docs/superpowers/graywind-news-debate-shadow-mode-handoff.md` — how shadow mode works.
-- `docs/superpowers/graywind-news-debate-provider-cost-handoff.md` — cost side of criterion 4.
+- `docs/superpowers/archive/graywind-news-debate-provider-cost-handoff.md` — cost side of criterion 4.
 - `docs/superpowers/graywind-real-capital-done-criteria.md` — the project's stopping rules.
