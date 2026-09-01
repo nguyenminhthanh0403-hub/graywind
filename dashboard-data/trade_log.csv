@@ -5,3 +5,5 @@ timestamp,symbol,side,qty,price,reason
 2026-08-19T12:33:05.456953-04:00,AAPL,buy,161,316.27,all checks passed
 2026-08-21T09:46:51.498418-04:00,AAPL,sell,161,307.745,stop/target exit
 2026-08-24T11:24:12.775002-04:00,AAPL,buy,160,311.76,all checks passed
+2026-09-01T13:12:23.372421-04:00,AAPL,sell,160.0,325.04,stop/target exit
+2026-09-01T13:12:23.372421-04:00,AAPL,buy,82.3924,325.04,all checks passed

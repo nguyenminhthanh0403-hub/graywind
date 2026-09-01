@@ -3,3 +3,5 @@ timestamp,symbol,action,reason,rsi,sma_fast,sma_slow,vix,sentiment,days_to_earni
 2026-08-31T13:33:26.410262-04:00,SERV,hold,position size rounds to zero shares,41.52535857787588,5.0215,5.012333333333333,14.43,0.0,none,0,[]
 2026-08-31T13:49:34.980287-04:00,SERV,hold,position size rounds to zero shares,40.55945168324831,5.0205,5.012,14.43,0.0,none,0,[]
 2026-08-31T15:25:39.842990-04:00,SERV,hold,no buy signal,46.98712199071948,4.936,5.003,,,,,
+2026-09-01T13:12:23.372421-04:00,AAPL,buy,all checks passed,63.36946975481151,325.248,320.1765,14.92,-0.05131,none,0,[]
+2026-09-01T13:12:23.372421-04:00,SERV,hold,no buy signal,34.17596821144439,4.6594999999999995,4.814333333333333,,,,,
