@@ -18,7 +18,7 @@ block is the current state.
 | #5 rolling drawdown breaker | **Implemented + tested**, not yet committed/pushed | `risk/drawdown_breaker.py` |
 | #6 long-only decision | **Decided:** deliberate, documented, no code change | `graywind-standing-design-decisions.md` |
 | #7 LLM promotion bar | **Written** — plus two blockers found | `graywind-news-debate-promotion-bar.md` |
-| #8 data-vendor ceiling | **STILL OPEN** — not written | — |
+| #8 data-vendor ceiling | **Written** — gate does NOT abort; one free fix needed | `graywind-data-vendor-evaluation.md` |
 | #9 dual-account | **Decided:** keep it, re-fund to $500 (owner action) | `graywind-standing-design-decisions.md` |
 
 **Three findings worth carrying forward:**
@@ -28,14 +28,24 @@ block is the current state.
    `should_rebalance_this_month`. Every gate in `decide_trade` protects only the 30% in
    tiers 2/3. This reframes what the gate stack can and cannot do for returns, and is the
    basis of the edge thesis doc.
-2. **The news-debate shadow gate has logged nothing since it shipped 2026-08-28.**
-   `dashboard-data/news_debate_log.csv` does not exist in `origin/main`. The
-   `ANTHROPIC_API_KEY` secret is almost certainly unset — it expands to `""`, and
-   `live_loop.py`'s `os.environ.get` treats that as "skip", silently. No calibration data
-   is accumulating.
+2. **The news-debate shadow gate has logged nothing since it shipped 2026-08-28, and
+   will not start on its own.** `dashboard-data/news_debate_log.csv` does not exist in
+   `origin/main`. `ANTHROPIC_API_KEY` is unset — it expands to `""`, and `live_loop.py`'s
+   `os.environ.get` treats that as "skip", silently. **Owner decided 2026-08-31 not to set
+   it: Anthropic is too costly for this feature.** The gate is therefore dormant, not just
+   un-promoted. Recommended path is the ~$2–3/month DeepSeek-via-OpenRouter option, since
+   the "fully free via OpenRouter" option is undermined by OpenRouter retiring its free
+   catalog (verified 2026-08-31: five common `:free` slugs all now 404 as paid-only). See
+   `graywind-news-debate-promotion-bar.md` for the evidence and the delete-it alternative.
 3. **The small paper account sits at exactly $2,000.00**, the `small_account_threshold`
    boundary, so it exercises the 3% low-capital risk fraction but *not* the 50% position
    cap. It has also logged zero trades in two weeks.
+4. **The macro gate fails closed on an upstream outage that nothing alerts on.** It reads
+   the owner's own Bullion `data.json`; a >7-day staleness ceiling correctly prevents
+   trading on frozen data, but `MacroDataUnavailable` returns `passed=False`, so a dead
+   Bullion cron would **silently stop all new entries indefinitely** and look identical to
+   a genuine risk-off reading in `decision_log.csv`. Free to fix via the existing
+   `pipeline-alarm` mechanism. See `graywind-data-vendor-evaluation.md`.
 
 ## Goal
 

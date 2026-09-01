@@ -43,7 +43,40 @@ correct outcome.
 Both were found by inspecting the live repo, not inferred. Neither is a reason to weaken
 the bar; both are prerequisites to ever evaluating it.
 
-### Blocker 1 — no data is being collected at all
+### Blocker 1 — no data is being collected, and the owner has ruled out paying to fix it
+
+**Owner decision, 2026-08-31: `ANTHROPIC_API_KEY` will NOT be set — paying Anthropic for
+this feature is too costly.** That closes option 1 of the three in
+`graywind-news-debate-provider-cost-handoff.md` (keep `claude-sonnet-5`, ~$10–20/month).
+The consequence is that **no shadow data will accumulate at all** until a cheaper provider
+is wired in, so the promotion bar above is currently unreachable — not failing, just
+never evaluated.
+
+**Evidence that narrows the remaining two options** (gathered 2026-08-31 while trying to
+use OpenRouter's free tier for an unrelated task): OpenRouter has been withdrawing its
+free model catalog. Five commonly-used `:free` slugs — DeepSeek V3.1, Llama 3.3 70B,
+Qwen3 235B, Gemma 3 27B, Mistral Small 3.2 — every one returned
+`404: "This model is unavailable for free. The paid version is available now"`. The only
+still-routable free model was rate-limited upstream (`429`).
+
+This materially weakens **option 2** ("fully free via OpenRouter"), which assumed a stable
+free catalog and a $10 top-up unlocking 1,000 free requests/day. A feature needing ~156
+calls/day cannot be built on models that are being retired without notice — and if it
+silently stops logging, the failure looks exactly like today's: an empty log nobody
+notices.
+
+**Therefore the recommendation is option 3** — DeepSeek via OpenRouter, paid, ~$2–3/month.
+It is roughly an order of magnitude cheaper than the rejected Anthropic option, uses an
+OpenRouter key already wired into this repo's secrets, and does not depend on a free tier
+that is actively disappearing. The code change is the same one option 2 would need
+(`news_debate.py::_tool_call()` plus `live_loop.py`'s client wiring for OpenRouter's
+request/response shape).
+
+**Until that is done, treat the news-debate gate as dormant, not merely un-promoted.**
+The honest alternative, if ~$2–3/month is also unwanted, is to delete the shadow path
+rather than leave code that looks active and logs nothing.
+
+### The original blocker detail
 
 `dashboard-data/news_debate_log.csv` **does not exist anywhere in `origin/main`'s tree**,
 despite the shadow gate having shipped 2026-08-28 and the live cron having run many

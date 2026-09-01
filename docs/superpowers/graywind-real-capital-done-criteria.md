@@ -115,11 +115,17 @@ unofficial, silent schema breaks), Finnhub free tier (rate limits), FRED, and Al
 This is the same *shape* of ceiling as the hardware failures above, just sourced
 externally, and it is discovered mid-build rather than scoped up front.
 
-**A full vendor evaluation is audit item #8 and has NOT been written yet** (the session
-that wrote this doc had its research tooling unavailable). That evaluation — realistic
-failure modes per vendor, which breaks first, paid alternatives and costs — must be
-completed and folded into the Phase-3 cost model **before** real capital, not after a
-live outage. Treat this gate as open, not cleared.
+**The full evaluation is now written:
+`docs/superpowers/graywind-data-vendor-evaluation.md` (audit item #8).** Its conclusion:
+**no hard vendor ceiling blocks the $500 tranche.** Unlike Reign's camera FOV or the
+local-LLM RAM limit, every constraint here is soft (rate limits, data quality) with a
+cheap or free mitigation — so this gate does **not** abort the project.
+
+One finding from it does need action before real capital, and it is free to fix: the
+macro gate depends on the owner's own Bullion `data.json`, and it **fails closed**. If
+that upstream cron stops, Graywind silently halts all new entries indefinitely, and the
+decision log cannot distinguish that from a genuine risk-off reading. Alerting on
+sustained `MacroDataUnavailable` closes it.
 
 ---
 
