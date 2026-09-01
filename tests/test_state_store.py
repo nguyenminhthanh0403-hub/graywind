@@ -1,10 +1,65 @@
 import csv
 import os
 
+from datetime import date
+
 from graywind_strategy.state_store import (
     load_state, save_state, load_tier_pools, save_tier_pools,
     load_rebalance_state, save_rebalance_state, append_decision_log,
+    load_equity_history, save_equity_history,
 )
+
+
+def test_load_equity_history_returns_empty_list_when_no_file_exists(tmp_path):
+    assert load_equity_history(state_dir=str(tmp_path / "nonexistent")) == []
+
+
+def test_save_then_load_round_trips_equity_history(tmp_path):
+    state_dir = str(tmp_path)
+    rows = [(date(2024, 1, 8), 10000.0), (date(2024, 1, 9), 9950.5)]
+    save_equity_history(rows, state_dir=state_dir)
+    assert load_equity_history(state_dir=state_dir) == rows
+
+
+def test_save_equity_history_overwrites_rather_than_appends(tmp_path):
+    state_dir = str(tmp_path)
+    save_equity_history([(date(2024, 1, 8), 10000.0)], state_dir=state_dir)
+    save_equity_history([(date(2024, 1, 9), 9950.0)], state_dir=state_dir)
+    assert load_equity_history(state_dir=state_dir) == [(date(2024, 1, 9), 9950.0)]
+
+
+def test_save_equity_history_accepts_an_empty_list(tmp_path):
+    state_dir = str(tmp_path)
+    save_equity_history([], state_dir=state_dir)
+    assert load_equity_history(state_dir=state_dir) == []
+
+
+def test_load_equity_history_degrades_to_empty_on_a_truncated_file(tmp_path, capsys):
+    # A cron cancelled mid-write leaves a partial final line. Raising here would
+    # abort live_loop above its try/finally and wedge every later cycle.
+    state_dir = str(tmp_path)
+    save_equity_history([(date(2024, 1, 8), 10000.0)], state_dir=state_dir)
+    with open(os.path.join(state_dir, "equity_history.csv"), "a") as f:
+        f.write("2024-01-09,not-a-num")
+    assert load_equity_history(state_dir=state_dir) == []
+    assert "unreadable" in capsys.readouterr().err
+
+
+def test_load_equity_history_degrades_to_empty_on_a_malformed_date(tmp_path):
+    state_dir = str(tmp_path)
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, "equity_history.csv"), "w") as f:
+        f.write("day,equity\nnot-a-date,10000.0\n")
+    assert load_equity_history(state_dir=state_dir) == []
+
+
+def test_equity_history_respects_a_per_account_state_dir(tmp_path):
+    main_dir = str(tmp_path / "state")
+    small_dir = str(tmp_path / "state" / "small")
+    save_equity_history([(date(2024, 1, 8), 100000.0)], state_dir=main_dir)
+    save_equity_history([(date(2024, 1, 8), 2000.0)], state_dir=small_dir)
+    assert load_equity_history(state_dir=main_dir) == [(date(2024, 1, 8), 100000.0)]
+    assert load_equity_history(state_dir=small_dir) == [(date(2024, 1, 8), 2000.0)]
 
 
 def test_load_state_returns_empty_defaults_when_no_files_exist(tmp_path):

@@ -11,7 +11,7 @@ from itertools import groupby
 
 from graywind_strategy import volatility
 from graywind_strategy.pipeline import decide_trade
-from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker
+from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker, build_rolling_breakers
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import QTY_DECIMALS, PositionSizer
 from graywind_strategy.strategy_engine import compute_signals
@@ -119,6 +119,22 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
     pdt_throttle = PDTThrottle()
     position_sizer = PositionSizer()
     drawdown_breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
+    # Same rolling breakers live_loop.py runs, from the same shared limits, so a
+    # symbol vetted from here on is evaluated under the risk regime it will
+    # actually trade under. NOTE this is forward-looking only: every symbol
+    # already on the live WATCHLIST was cleared under the pre-rolling-breaker
+    # regime and has NOT been re-vetted against these limits.
+    #
+    # Second-order effect to watch when adding symbols (audit item on
+    # diversifying the universe): gating entries here strictly reduces trade
+    # counts, and backtest_gate.validate_symbol_backtest raises
+    # GuardrailViolation below MIN_TOTAL_TRADES. A candidate that falls short
+    # only because the breaker suppressed entries still records a failed trial,
+    # and n_trials permanently ratchets the DSR bar for every later candidate.
+    #
+    # In-memory only -- a backtest starts from no history every run, which the
+    # breakers treat as cold start (permissive) exactly as the first live cycle does.
+    rolling_breakers = build_rolling_breakers()
 
     all_rows = []
     for symbol, df in signals_by_symbol.items():
@@ -222,6 +238,9 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                 for sym, pos in open_positions.items()
             )
             drawdown_breaker.update_equity(mark_to_market_equity)
+            if mark_to_market_equity > 0:
+                for breaker in rolling_breakers:
+                    breaker.record_equity(current_day, mark_to_market_equity)
 
             position = open_positions.get(symbol)
             if position is not None:
@@ -249,7 +268,10 @@ def run_backtest(df_by_symbol, starting_equity=10000.0,
                     symbol=symbol, signal=row["signal"], as_of_date=current_day,
                     current_price=close_price, account_equity=equity,
                     pdt_throttle=pdt_throttle, position_sizer=position_sizer,
-                    drawdown_breaker_ok=drawdown_breaker.can_open_new_trade(),
+                    drawdown_breaker_ok=(
+                        drawdown_breaker.can_open_new_trade()
+                        and all(b.can_open_new_trade() for b in rolling_breakers)
+                    ),
                     fred_api_key=fred_api_key, news_client=news_client,
                     finnhub_api_key=finnhub_api_key,
                     pending_same_day_trades=pending_today,

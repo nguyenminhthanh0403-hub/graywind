@@ -1,9 +1,10 @@
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 from alpaca.trading.enums import OrderSide
 
 from graywind_strategy.pipeline import TradeDecision
@@ -13,6 +14,21 @@ import live_loop
 from live_loop import is_market_hours, process_symbol, run_tier1_rebalance
 
 ET = ZoneInfo("America/New_York")
+
+
+@pytest.fixture(autouse=True)
+def isolate_equity_history():
+    """main() loads and persists rolling-drawdown equity history through
+    state_store. Every main() test below patches the other state_store calls
+    but would otherwise leave these two unpatched, writing into the repo's
+    REAL state/ directory (and state/small/ in the test that sets
+    GRAYWIND_STATE_DIR) as a side effect of running the suite. Autouse so a
+    future main() test cannot reintroduce that leak by forgetting to patch.
+    Yields the mocks so a test can assert on how they were called.
+    """
+    with patch("live_loop.load_equity_history", return_value=[]) as load_mock, \
+         patch("live_loop.save_equity_history") as save_mock:
+        yield load_mock, save_mock
 
 
 def test_is_market_hours_true_during_regular_session():
@@ -642,7 +658,106 @@ def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
     assert saved_state["day_trade_dates"] == []
 
 
-def test_main_threads_graywind_state_dir_env_var_into_every_state_call():
+def _run_main_with_equity(equity, load_equity_history_mock, history, state=None):
+    """Drives main() end-to-end with the I/O boundary faked, returning the
+    decide_trade mock so a caller can inspect what the wiring actually passed.
+    """
+    load_equity_history_mock.return_value = history
+    fake_account = MagicMock()
+    fake_account.equity = str(equity)
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+    fake_trading_client.get_all_positions.return_value = []
+    fake_state = state if state is not None else {
+        "day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {},
+    }
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+         }), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.load_state", return_value=fake_state), \
+         patch("live_loop.save_state"), \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
+         patch("live_loop.fetch_bars", return_value=[
+             _FakeBar(100.0, datetime(2024, 1, 8, 10, 0, tzinfo=ET))]), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(
+             signal="buy", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+         )), \
+         patch("live_loop.decide_trade",
+               return_value=TradeDecision(action="hold", reason="no buy signal")) as mock_decide, \
+         patch("live_loop.append_decision_log"), \
+         patch("live_loop.write_cycle_export"):
+        assert live_loop.main() == 0
+    return mock_decide
+
+
+def test_main_blocks_entries_when_the_rolling_drawdown_breaker_has_tripped(isolate_equity_history):
+    # Without this test the whole rolling-breaker wiring in main() could be
+    # deleted and every other test would still pass -- they all run against an
+    # empty history, which the breaker treats as permissive cold start.
+    mock_load_equity_history, _ = isolate_equity_history
+    today = date.today()
+    # -10% off a peak two days ago: trips the 7d/5% breaker (and the 30d/10%).
+    history = [(today - timedelta(days=2), 10000.0)]
+    mock_decide = _run_main_with_equity(9000.0, mock_load_equity_history, history)
+
+    assert mock_decide.called
+    assert mock_decide.call_args.kwargs["drawdown_breaker_ok"] is False
+
+
+def test_main_allows_entries_when_the_rolling_drawdown_is_within_limits(isolate_equity_history):
+    mock_load_equity_history, _ = isolate_equity_history
+    today = date.today()
+    history = [(today - timedelta(days=2), 10000.0)]
+    # -1%: well inside both rolling windows, and the daily breaker is untripped.
+    mock_decide = _run_main_with_equity(9900.0, mock_load_equity_history, history)
+
+    assert mock_decide.called
+    assert mock_decide.call_args.kwargs["drawdown_breaker_ok"] is True
+
+
+def test_main_persists_todays_equity_into_the_rolling_history(isolate_equity_history):
+    mock_load_equity_history, mock_save_equity_history = isolate_equity_history
+    today = date.today()
+    history = [(today - timedelta(days=2), 10000.0)]
+    _run_main_with_equity(9900.0, mock_load_equity_history, history)
+
+    saved_rows = mock_save_equity_history.call_args[0][0]
+    assert (today, 9900.0) in saved_rows
+    # the loaded row is carried forward, not dropped
+    assert (today - timedelta(days=2), 10000.0) in saved_rows
+
+
+def test_main_survives_an_intraday_wipeout_without_abandoning_the_cycle(isolate_equity_history):
+    # record_equity rejects non-positive equity, and it sits above the WATCHLIST
+    # loop with no `except` between, so an unguarded raise would skip the
+    # stop/target exit checks in exactly the scenario where exits matter most.
+    # The daily breaker's own start_new_day guard does NOT cover this case: with
+    # a valid start-of-day baseline already persisted it succeeds, and only the
+    # current equity has collapsed.
+    mock_load_equity_history, _ = isolate_equity_history
+    mid_day_wipeout_state = {
+        "day_trade_dates": [],
+        "day": date.today().isoformat(),
+        "starting_equity": 10000.0,
+        "open_positions": {},
+    }
+    mock_decide = _run_main_with_equity(
+        0.0, mock_load_equity_history, [], state=mid_day_wipeout_state,
+    )
+    assert mock_decide.called  # the cycle body still ran
+
+
+def test_main_threads_graywind_state_dir_env_var_into_every_state_call(isolate_equity_history):
+    mock_load_equity_history, mock_save_equity_history = isolate_equity_history
     fake_account = MagicMock()
     fake_account.equity = "2000.0"
     fake_trading_client = MagicMock()
@@ -679,9 +794,15 @@ def test_main_threads_graywind_state_dir_env_var_into_every_state_call():
     assert mock_load_rebalance.call_args.kwargs["state_dir"] == "state/small"
     assert mock_save_rebalance.call_args.kwargs["state_dir"] == "state/small"
     assert mock_append_decision_log.call_args.kwargs["state_dir"] == "state/small"
+    # The rolling-drawdown history is per-account too: sharing one file between
+    # the main and small accounts would blend two different equity curves into
+    # one drawdown calculation and trip (or fail to trip) both breakers wrongly.
+    assert mock_load_equity_history.call_args.kwargs["state_dir"] == "state/small"
+    assert mock_save_equity_history.call_args.kwargs["state_dir"] == "state/small"
 
 
-def test_main_defaults_graywind_state_dir_to_state_when_env_var_unset():
+def test_main_defaults_graywind_state_dir_to_state_when_env_var_unset(isolate_equity_history):
+    mock_load_equity_history, _ = isolate_equity_history
     fake_account = MagicMock()
     fake_account.equity = "100000.0"
     fake_trading_client = MagicMock()
@@ -713,6 +834,7 @@ def test_main_defaults_graywind_state_dir_to_state_when_env_var_unset():
     assert result == 0
     assert mock_load_state.call_args.kwargs["state_dir"] == "state"
     assert mock_append_decision_log.call_args.kwargs["state_dir"] == "state"
+    assert mock_load_equity_history.call_args.kwargs["state_dir"] == "state"
 
 
 def test_get_account_exception_leaves_day_and_starting_equity_unchanged():

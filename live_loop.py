@@ -38,14 +38,16 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 
 from fetch_alpaca_data import fetch_bars
 from graywind_strategy.pipeline import decide_trade
-from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker
+from graywind_strategy.risk.drawdown_breaker import (
+    DrawdownBreaker, build_rolling_breakers, widest_history,
+)
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 from graywind_strategy.gates.news_debate import evaluate_shadow_debate
 from graywind_strategy.dashboard_export import write_cycle_export, log_news_debate
 from graywind_strategy.state_store import (
     append_decision_log, load_state, save_state, load_tier_pools, save_tier_pools,
-    load_rebalance_state, save_rebalance_state,
+    load_rebalance_state, save_rebalance_state, load_equity_history, save_equity_history,
 )
 from graywind_strategy.tier_config import SYMBOL_TIER, TIER1_SYMBOL_WEIGHTS
 from graywind_strategy.tier1_rebalance import compute_rebalance_orders, should_rebalance_this_month
@@ -422,6 +424,15 @@ def main():
     open_positions = state["open_positions"]
     open_positions = reconcile_positions(trading_client, open_positions)
     drawdown_breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
+    # Rolling (weekly/monthly) breakers above the daily one: they catch the slow
+    # bleed a per-day limit structurally cannot see. Seeded from persisted
+    # history, which is empty on the first cycle after deploy -- the breakers are
+    # permissive on thin history by design, so that cold start does not halt
+    # live trading (see risk/drawdown_breaker.py).
+    rolling_breakers = build_rolling_breakers()
+    equity_history = load_equity_history(state_dir=state_dir)
+    for breaker in rolling_breakers:
+        breaker.load_history(equity_history)
     position_sizer = PositionSizer()
     # Default to whatever was already persisted so the `finally` below has
     # something safe to write back even if get_account() itself raises
@@ -448,6 +459,15 @@ def main():
         baseline_established = True
         drawdown_breaker.start_new_day(today, starting_equity)
         drawdown_breaker.update_equity(equity)
+        # Guarded exactly as backtester.py does: record_equity rejects
+        # non-positive equity, and this sits above the WATCHLIST loop with no
+        # `except` between it and the cycle body. An unguarded raise on a wiped-out
+        # or margin-debit account would abandon the whole cycle *including the
+        # stop/target exit checks*, leaving positions past their stop open -- the
+        # exact scenario where exits matter most.
+        if equity > 0:
+            for breaker in rolling_breakers:
+                breaker.record_equity(today, equity)
 
         if should_rebalance_this_month(rebalance_state["last_rebalance_month"], today):
             try:
@@ -480,7 +500,10 @@ def main():
                     symbol=symbol, signal=latest["signal"], current_price=latest["close"],
                     today=today, open_positions=open_positions, equity=equity,
                     pdt_throttle=pdt_throttle, position_sizer=position_sizer,
-                    drawdown_breaker_ok=drawdown_breaker.can_open_new_trade(),
+                    drawdown_breaker_ok=(
+                        drawdown_breaker.can_open_new_trade()
+                        and all(b.can_open_new_trade() for b in rolling_breakers)
+                    ),
                     fred_api_key=fred_api_key, news_client=news_client,
                     finnhub_api_key=finnhub_api_key, trading_client=trading_client,
                     drawdown_breaker=drawdown_breaker,
@@ -512,6 +535,10 @@ def main():
         }, state_dir=state_dir)
         save_tier_pools(tier_pools, state_dir=state_dir)
         save_rebalance_state(rebalance_state, state_dir=state_dir)
+        # Persist the longest window's rows (a superset of the shorter ones).
+        # If get_account() failed this cycle nothing was recorded, so this
+        # writes back what was loaded -- idempotent, never a data loss.
+        save_equity_history(widest_history(rolling_breakers), state_dir=state_dir)
         append_decision_log(decision_rows, state_dir=state_dir)
         write_cycle_export(
             export_dir=DASHBOARD_EXPORT_DIR,
