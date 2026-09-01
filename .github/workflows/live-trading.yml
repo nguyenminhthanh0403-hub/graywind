@@ -53,6 +53,21 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python3 live_loop.py
 
+      # Seeds tier_pools.csv with real starting cash the first time it's found
+      # entirely at $0 (see scripts/seed_tier_pools.py's module docstring for
+      # why this is needed -- the pool-scoped sizing code shipped without any
+      # step that ever funded the pools it sizes against). Idempotent: once
+      # seeded, this becomes a pure health check on every later run. Runs
+      # regardless of market hours (always()) so a real cash split lands as
+      # soon as possible rather than waiting for the next market-hours cycle.
+      - name: Seed or check tier pool funding
+        id: tier_pools
+        if: always()
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+        run: python3 scripts/seed_tier_pools.py
+
       - name: Check whether this cycle actually ran
         # An out-of-market-hours cron firing (GitHub cron is UTC-only and
         # can't track DST, so it fires several times/day outside
@@ -200,6 +215,97 @@ jobs:
               });
             }
 
+      # Same rationale as the macro-alarm above: a $0 tier pool degrades to
+      # "position size rounds to zero shares" / frozen tier-1 drift, which
+      # looks identical to a healthy quiet cycle from the outside. Separate
+      # label for the same reason macro-alarm is separate -- the generic
+      # "Close the alarm issue on success" step below would otherwise
+      # auto-close it on the next green cycle regardless of whether the
+      # pools actually got seeded.
+      - name: Ensure the tier-pool-alarm label exists
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'tier-pool-alarm',
+                color: 'fbca04',
+                description: 'A tier pool is unfunded and could not be seeded',
+              });
+            } catch (err) {
+              if (err.status !== 422) throw err; // 422 = label already exists
+            }
+
+      - name: Raise or clear the tier-pool alarm (main account)
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          TIER_POOL_HEALTH: ${{ steps.tier_pools.outputs.tier_pool_health }}
+        with:
+          script: |
+            const unhealthy = process.env.TIER_POOL_HEALTH === 'unhealthy';
+            const now = new Date().toISOString();
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const marker = '(main account)';
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'tier-pool-alarm',
+            });
+            const mine = issues.filter(i => i.body && i.body.includes(marker));
+
+            if (!unhealthy) {
+              for (const issue of mine) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `Recovered ${marker} — tier pools funded (or already were) as of ${now}.`,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                });
+              }
+              return;
+            }
+
+            const body = [
+              `**${now}** ${marker} — a tier pool is unfunded and could not be seeded this cycle.`,
+              '',
+              'This blocks new entries for that tier (sizes to zero shares) or freezes tier-1\'s',
+              'monthly rebalance at its current holding, without failing the workflow.',
+              '',
+              'Most likely cause: ALPACA_API_KEY/ALPACA_API_SECRET missing or invalid, or a',
+              'transient Alpaca API error. See scripts/seed_tier_pools.py.',
+              '',
+              `Run: ${runUrl}`,
+            ].join('\n');
+
+            if (mine.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Tier pool unfunded ${marker}`,
+                body,
+                labels: ['tier-pool-alarm'],
+                assignees: [context.repo.owner],
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: mine[0].number,
+                body,
+              });
+            }
+
       - name: Ensure the pipeline-alarm label exists
         if: always()
         uses: actions/github-script@v7
@@ -313,6 +419,15 @@ jobs:
           GRAYWIND_DASHBOARD_DIR: dashboard-data/small
         run: python3 live_loop.py
 
+      - name: Seed or check tier pool funding
+        id: tier_pools
+        if: always()
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY_SMALL }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET_SMALL }}
+          GRAYWIND_STATE_DIR: state/small
+        run: python3 scripts/seed_tier_pools.py
+
       - name: Check whether this cycle actually ran
         id: cycle
         if: always()
@@ -338,6 +453,76 @@ jobs:
             git rebase origin/main
             git push
           fi
+
+      # Label already ensured by the main job (this job `needs: live-cycle`, so it
+      # always runs after). Same rationale/separate-label reasoning as the main
+      # job's tier-pool-alarm step above -- see its comment.
+      - name: Raise or clear the tier-pool alarm (small account)
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          TIER_POOL_HEALTH: ${{ steps.tier_pools.outputs.tier_pool_health }}
+        with:
+          script: |
+            const unhealthy = process.env.TIER_POOL_HEALTH === 'unhealthy';
+            const now = new Date().toISOString();
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const marker = '(small account)';
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'tier-pool-alarm',
+            });
+            const mine = issues.filter(i => i.body && i.body.includes(marker));
+
+            if (!unhealthy) {
+              for (const issue of mine) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `Recovered ${marker} — tier pools funded (or already were) as of ${now}.`,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                });
+              }
+              return;
+            }
+
+            const body = [
+              `**${now}** ${marker} — a tier pool is unfunded and could not be seeded this cycle.`,
+              '',
+              'This blocks new entries for that tier (sizes to zero shares) or freezes tier-1\'s',
+              'monthly rebalance at its current holding, without failing the workflow.',
+              '',
+              'Most likely cause: ALPACA_API_KEY_SMALL/ALPACA_API_SECRET_SMALL missing or invalid,',
+              'or a transient Alpaca API error. See scripts/seed_tier_pools.py.',
+              '',
+              `Run: ${runUrl}`,
+            ].join('\n');
+
+            if (mine.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Tier pool unfunded ${marker}`,
+                body,
+                labels: ['tier-pool-alarm'],
+                assignees: [context.repo.owner],
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: mine[0].number,
+                body,
+              });
+            }
 
       - name: Report failure to the alarm issue
         if: failure()

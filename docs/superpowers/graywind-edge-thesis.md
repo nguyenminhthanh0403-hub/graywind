@@ -112,6 +112,17 @@ the kill condition and capital figure recorded in
 `graywind-real-capital-done-criteria.md`; the two-part thesis framing here is the
 analysis, and remains open to the owner's revision.
 
+**Part 2 — TESTED and CLOSED, 2026-09-01. Result: the hypothesis is dead; tier-1 stays
+passive.** Full method, data, and results:
+`docs/superpowers/graywind-tier1-exposure-test-results.md`. Summary: two independently
+designed VIX/macro exposure-scaling rules (a raw threshold, and a confirmation-bars
+variant modeled on `volatility.py`'s tier-2/3 whipsaw fix) were backtested against SPY
+buy-and-hold, 2000–2026, using the falsification test this doc specified. Both landed at
+a wash or worse on Calmar ratio (drawdown-adjusted return) — the CAGR given up by
+de-risking exactly offset (or exceeded) the drawdown avoided. **No live gating code was
+built for tier 1.** It remains ungated by design, not by omission, until a materially
+different mechanism is proposed and clears this same bar.
+
 ## Related
 
 - `docs/superpowers/graywind-real-capital-done-criteria.md` — what result advances or
