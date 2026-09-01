@@ -38,6 +38,13 @@ from graywind_strategy.gates.sentiment_gate import (
 )
 from graywind_strategy.gates.vix_gate import VIX_THRESHOLD, VixDataUnavailable, fetch_latest_vix, vix_gate
 
+# The GateResult.detail emitted when the macro feed cannot answer, as opposed to
+# answering "risk-off". Shared rather than a literal because three places must
+# agree on it: pipeline.py writes it, live_loop.py maps it to the
+# "unavailable" sentinel in decision_log.csv, and scripts/check_macro_health.py
+# reads that sentinel to raise the macro alarm.
+MACRO_UNAVAILABLE_DETAIL = "MacroDataUnavailable"
+
 
 @dataclass
 class TradeDecision:
@@ -79,7 +86,12 @@ def evaluate_macro_gate(as_of_date, session=requests, required_breaches=2):
     try:
         snapshot = fetch_bullion_macro_snapshot(as_of_date, session=session)
     except MacroDataUnavailable:
-        return GateResult(passed=False, detail="MacroDataUnavailable")
+        # NOTE this fails CLOSED: a macro feed that cannot answer blocks entries
+        # exactly as a real risk-off reading does. That is the safe default, but
+        # it means a dead upstream silently halts all trading, so the detail
+        # string below is load-bearing -- live_loop logs it to decision_log.csv
+        # and scripts/check_macro_health.py alarms on a sustained run of it.
+        return GateResult(passed=False, detail=MACRO_UNAVAILABLE_DETAIL)
     breaches = count_macro_breaches(snapshot)
     return GateResult(passed=breaches < required_breaches, value=breaches)
 

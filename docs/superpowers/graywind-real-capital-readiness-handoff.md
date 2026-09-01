@@ -40,12 +40,14 @@ block is the current state.
 3. **The small paper account sits at exactly $2,000.00**, the `small_account_threshold`
    boundary, so it exercises the 3% low-capital risk fraction but *not* the 50% position
    cap. It has also logged zero trades in two weeks.
-4. **The macro gate fails closed on an upstream outage that nothing alerts on.** It reads
-   the owner's own Bullion `data.json`; a >7-day staleness ceiling correctly prevents
-   trading on frozen data, but `MacroDataUnavailable` returns `passed=False`, so a dead
-   Bullion cron would **silently stop all new entries indefinitely** and look identical to
-   a genuine risk-off reading in `decision_log.csv`. Free to fix via the existing
-   `pipeline-alarm` mechanism. See `graywind-data-vendor-evaluation.md`.
+4. **The macro gate fails closed on an upstream outage — FIXED 2026-08-31.** It reads the
+   owner's own Bullion `data.json`; a >7-day staleness ceiling correctly prevents trading
+   on frozen data, but `MacroDataUnavailable` returns `passed=False`, so a dead Bullion
+   cron would **silently stop all new entries indefinitely** while looking identical to a
+   genuine risk-off reading. Now alarmed: `scripts/check_macro_health.py` opens a
+   `macro-alarm` GitHub issue after 8 consecutive unanswered cycles (~2h) and closes it on
+   recovery. Note this is a **separate label from `pipeline-alarm`** — so "no open
+   `pipeline-alarm` issue" no longer means "nothing is wrong"; check both.
 
 ## Goal
 

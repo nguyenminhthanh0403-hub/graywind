@@ -162,9 +162,16 @@ broker, already authenticated, and already integrated — it adds no new failure
 Deliberately ordered cheapest-and-highest-value first. **Steps 1–2 cost nothing and should
 happen before any spending at all.**
 
-1. **Alert on sustained `MacroDataUnavailable`.** Free — the signal is already recorded
-   and the `pipeline-alarm` mechanism already exists. Turns a silent indefinite trading
-   halt into a visible one. Do this first; it is the single highest-value item here.
+1. ~~**Alert on sustained `MacroDataUnavailable`.**~~ **DONE 2026-08-31.**
+   `scripts/check_macro_health.py` reads `decision_log.csv` and raises a GitHub issue
+   labelled `macro-alarm` after 8 consecutive cycles (~2h) with no macro answer, and
+   closes it on recovery. Two constraints shaped it: the check must **not** fail the job
+   (`live-cycle-small` declares `needs: live-cycle` and would be skipped), and it needs
+   its **own** label (the existing "Close the alarm issue on success" step closes every
+   open `pipeline-alarm` issue, which would auto-clear this one every green cycle).
+   Required a companion fix: `decision_log.csv` previously wrote `""` for an unavailable
+   macro reading, indistinguishable from the gate never being reached — `live_loop.py`
+   now emits an `unavailable` sentinel, mirroring the `_fmt_earnings_value` precedent.
 2. **Point the macro gate directly at FRED.** Free. Removes the self-dependency, and the
    indirect Yahoo dependency inside it, without losing any data.
 3. **Do nothing about yfinance yet.** Cached, buy-path only, degrades gracefully. Revisit

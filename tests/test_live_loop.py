@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 from alpaca.trading.enums import OrderSide
 
-from graywind_strategy.pipeline import TradeDecision
+from graywind_strategy.gate_result import GateResult
+from graywind_strategy.pipeline import MACRO_UNAVAILABLE_DETAIL, TradeDecision
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 import live_loop
@@ -372,6 +373,53 @@ def test_process_symbol_decision_row_includes_gate_values_from_gate_readings():
     assert row["days_to_earnings"] == "12"
     assert row["macro_breaches"] == "2"
     assert row["sector_gates"] == ""  # never reached -- blocked before the sector gate ran
+
+
+def test_decision_row_distinguishes_macro_unavailable_from_zero_breaches():
+    # Same ambiguity I5 fixed for the earnings gate. evaluate_macro_gate returns
+    # GateResult(passed=False, detail="MacroDataUnavailable") with value=None when
+    # the upstream Bullion feed cannot answer, which collapsed to "" -- identical
+    # to the macro gate never having been reached. That made a dead upstream
+    # indistinguishable from a short-circuit in decision_log.csv, so nothing could
+    # alarm on it.
+    decision_rows = []
+    decision = TradeDecision(
+        action="blocked", reason="macro_gate",
+        gate_readings=[
+            GateResult(passed=True, value=15.0),
+            GateResult(passed=True, value=0.05),
+            GateResult(passed=True, value=12),
+            GateResult(passed=False, detail=MACRO_UNAVAILABLE_DETAIL),  # value stays None
+        ],
+    )
+    with patch("live_loop.decide_trade", return_value=decision):
+        process_symbol(
+            symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+            open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+            trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+            cycle_timestamp="t1", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+            decision_rows=decision_rows,
+        )
+    assert decision_rows[0]["macro_breaches"] == "unavailable"
+
+
+def test_decision_row_leaves_macro_blank_when_the_gate_was_never_reached():
+    decision_rows = []
+    decision = TradeDecision(
+        action="blocked", reason="vix_gate",
+        gate_readings=[GateResult(passed=False, value=40.0)],  # blocked at vix; macro never ran
+    )
+    with patch("live_loop.decide_trade", return_value=decision):
+        process_symbol(
+            symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+            open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+            trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+            cycle_timestamp="t1", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+            decision_rows=decision_rows,
+        )
+    assert decision_rows[0]["macro_breaches"] == ""
 
 
 def test_process_symbol_decision_row_shows_none_sentinel_when_earnings_gate_ran_and_found_no_earnings():

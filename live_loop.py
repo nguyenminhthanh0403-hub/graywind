@@ -37,7 +37,7 @@ from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
 from fetch_alpaca_data import fetch_bars
-from graywind_strategy.pipeline import decide_trade
+from graywind_strategy.pipeline import MACRO_UNAVAILABLE_DETAIL, decide_trade
 from graywind_strategy.risk.drawdown_breaker import (
     DrawdownBreaker, build_rolling_breakers, widest_history,
 )
@@ -93,6 +93,11 @@ SIGNAL_LOOKBACK = timedelta(days=21)
 
 DECISION_GATE_ORDER = ["vix", "sentiment", "earnings", "macro", "sector"]
 
+# What decision_log.csv's macro_breaches column holds when the macro feed could
+# not answer at all (as opposed to a breach count). scripts/check_macro_health.py
+# reads this exact string.
+MACRO_UNAVAILABLE_SENTINEL = "unavailable"
+
 
 def _fmt_decision_value(value):
     return "" if value is None else str(value)
@@ -114,11 +119,29 @@ def _fmt_earnings_value(value, reached):
     return "none" if value is None else str(value)
 
 
+def _fmt_macro_value(value, reached, detail):
+    # Same shape of ambiguity as _fmt_earnings_value above. evaluate_macro_gate
+    # returns value=None with detail="MacroDataUnavailable" when the upstream
+    # Bullion feed cannot answer, which collapsed to "" through
+    # _fmt_decision_value -- indistinguishable from the macro gate never having
+    # run because an earlier gate short-circuited. Since the gate fails CLOSED,
+    # that made a dead upstream (which silently halts ALL entries indefinitely)
+    # look identical in decision_log.csv to a routine short-circuit. Emit a
+    # distinct sentinel so scripts/check_macro_health.py can alarm on it.
+    if not reached:
+        return ""
+    if detail == MACRO_UNAVAILABLE_DETAIL:
+        return MACRO_UNAVAILABLE_SENTINEL
+    return _fmt_decision_value(value)
+
+
 def _decision_log_row(cycle_timestamp, symbol, decision, rsi, sma_fast, sma_slow):
     gate_values = {name: None for name in DECISION_GATE_ORDER}
+    gate_details = {name: "" for name in DECISION_GATE_ORDER}
     reached_gates = set()
     for name, result in zip(DECISION_GATE_ORDER, decision.gate_readings):
         gate_values[name] = result.value
+        gate_details[name] = result.detail
         reached_gates.add(name)
     return {
         "timestamp": cycle_timestamp,
@@ -131,7 +154,9 @@ def _decision_log_row(cycle_timestamp, symbol, decision, rsi, sma_fast, sma_slow
         "vix": _fmt_decision_value(gate_values["vix"]),
         "sentiment": _fmt_decision_value(gate_values["sentiment"]),
         "days_to_earnings": _fmt_earnings_value(gate_values["earnings"], "earnings" in reached_gates),
-        "macro_breaches": _fmt_decision_value(gate_values["macro"]),
+        "macro_breaches": _fmt_macro_value(
+            gate_values["macro"], "macro" in reached_gates, gate_details["macro"],
+        ),
         "sector_gates": _fmt_decision_value(gate_values["sector"]),
     }
 

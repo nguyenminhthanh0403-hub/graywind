@@ -99,6 +99,107 @@ jobs:
             git push
           fi
 
+      # The macro gate fails closed: when the upstream Bullion data.json can't be
+      # read or is past its staleness ceiling, decide_trade blocks every entry.
+      # That looks identical to a healthy risk-off market from the outside -- cron
+      # green, no pipeline-alarm, equity flat -- so it gets its own alarm.
+      #
+      # Deliberately a SEPARATE label from pipeline-alarm: the "Close the alarm
+      # issue on success" step below closes every open pipeline-alarm issue, which
+      # would auto-close this one on the next green cycle. And the check never
+      # fails the job, because live-cycle-small declares `needs: live-cycle` and
+      # would be skipped along with it.
+      # Only on the main job -- macro data is account-independent, so running it
+      # in live-cycle-small too would just open duplicate issues.
+      - name: Check macro-gate health
+        id: macro_health
+        if: success()
+        run: python scripts/check_macro_health.py
+
+      - name: Ensure the macro-alarm label exists
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'macro-alarm',
+                color: 'fbca04',
+                description: 'Macro gate cannot read its upstream feed; new entries are blocked',
+              });
+            } catch (err) {
+              if (err.status !== 422) throw err; // 422 = label already exists
+            }
+
+      - name: Raise or clear the macro alarm
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          MACRO_HEALTH: ${{ steps.macro_health.outputs.macro_health }}
+          MACRO_STREAK: ${{ steps.macro_health.outputs.macro_streak }}
+        with:
+          script: |
+            const unhealthy = process.env.MACRO_HEALTH === 'unhealthy';
+            const streak = process.env.MACRO_STREAK;
+            const now = new Date().toISOString();
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'macro-alarm',
+            });
+
+            if (!unhealthy) {
+              for (const issue of issues) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `Recovered — the macro gate answered again at ${now}.`,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                });
+              }
+              return;
+            }
+
+            const body = [
+              `**${now}** — the macro gate has been unavailable for **${streak} consecutive cycles**.`,
+              '',
+              'The macro gate fails closed, so **no new entries are being opened on any symbol**.',
+              'This is not a risk-off signal — the gate cannot answer at all.',
+              '',
+              'Most likely cause: the upstream Bullion `data.json` has stopped updating',
+              '(its own cron failing, an unset secret, a repo rename, or Pages disabled).',
+              '',
+              `Run: ${runUrl}`,
+            ].join('\n');
+
+            if (issues.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'Macro gate unavailable — new entries are blocked',
+                body,
+                labels: ['macro-alarm'],
+                assignees: [context.repo.owner],
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues[0].number,
+                body,
+              });
+            }
+
       - name: Ensure the pipeline-alarm label exists
         if: always()
         uses: actions/github-script@v7
