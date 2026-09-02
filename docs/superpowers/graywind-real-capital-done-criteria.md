@@ -76,6 +76,50 @@ git show origin/main:dashboard-data/trade_log.csv | tail -n +2 | wc -l
 
 ---
 
+## Burn-in kill-check schedule
+
+Added 2026-09-02 (critical-review punch-list item 2) — the prior gap was a kill condition
+with no date attached to actually go read it, which is how this kind of check drifts
+indefinitely. Status at write time: burn-in started 2026-08-17, **8 trades logged** as of
+`origin/main` at `cd86e4a`.
+
+**Weekly check-in, every Monday starting 2026-09-07,** until burn-in completes:
+
+```
+git show origin/main:dashboard-data/trade_log.csv > /tmp/trade_log.csv
+python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+from generate_performance_report import per_symbol_pnl, _load_csv_rows
+trades = _load_csv_rows('/tmp/trade_log.csv')
+breakdown = per_symbol_pnl(trades)
+from graywind_strategy.tier_config import SYMBOL_TIER
+tier23_pnl = sum(v['pnl'] for s, v in breakdown.items() if SYMBOL_TIER.get(s) in (2, 3))
+print(breakdown, 'tier2/3 total:', tier23_pnl)
+"
+```
+
+`per_symbol_pnl` (in `scripts/generate_performance_report.py`) is the existing FIFO
+buy/sell matcher — `trade_log.csv` has no P&L column, so this is the actual tool, not a
+manual eyeball. Every symbol in `SYMBOL_TIER` is tier 2/3 by construction (tier 1 is the
+separate SPY buy-and-hold sleeve, not in this file), so today that's just AAPL + SERV.
+
+**A weekly reading below zero is an early-warning signal, not the kill trigger itself** —
+the trade-count floor (below) is what's authoritative, per "the burn-in pacing rule" above
+(don't let calendar pressure shorten the floor). Note it here in the doc as it happens so a
+future session can see the trend, but don't act on it before the floor is met.
+
+**The authoritative check:** the moment the 20th trade lands (same `wc -l` command as
+above), read tier-2/3 realized P&L one more time and apply the owner's kill condition —
+Done criterion #2 below. This is the actual gate.
+
+**Backstop, not a completion shortcut:** if burn-in still hasn't reached 20 trades by
+**2026-10-15** (~8.5 weeks from the 8/17 start — well past the ~9/26 projection at the
+current ~0.5 trades/day pace), that's a sign the pipeline itself may be stalled, not that
+the trade requirement should be waived. Stop and investigate why trades aren't landing
+before assuming the system is simply slow.
+
+---
+
 ## Done criteria
 
 Graywind is "done enough" to stop refining and evaluate for Phase 3 when **all three**
