@@ -5,4 +5,4 @@ vaderSentiment
 requests
 pytest
 yfinance==1.6.0
-anthropic
+openai

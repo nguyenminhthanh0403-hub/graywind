@@ -1,4 +1,4 @@
-"""Claude-based bull/bear/judge news debate -- SHADOW MODE ONLY. This
+"""DeepSeek-based bull/bear/judge news debate -- SHADOW MODE ONLY. This
 module's output never gates a trade: `pipeline.py::decide_trade()` has no
 code path into anything here, and this file imports nothing from
 `pipeline.py`. VADER (`sentiment_gate.py`) stays the live, unchanged gate.
@@ -6,31 +6,42 @@ See docs/superpowers/specs/2026-08-25-graywind-news-debate-shadow-mode-design.md
 for the full "why shadow mode" reasoning (lookahead bias, no principled
 threshold calibration).
 
-Model choice: `claude-sonnet-5`, not Opus. This runs on every symbol/cycle
-of a 15-minute live-trading cron during market hours (up to ~26 cycles/day
-x 2 symbols x 3 calls/symbol = ~156 calls/day) purely to accumulate shadow
-history for later comparison -- it is not gating capital at risk, so the
-cost/quality tradeoff favors the cheaper tier. This is a judgment call the
-spec leaves open (it doesn't name a model); revisit if/when the debate is
-ever considered for promotion to authoritative (see spec's "Deferred, not
-forgotten" section).
+Provider: DeepSeek's direct API (OpenAI Chat Completions-compatible,
+`openai.OpenAI(base_url="https://api.deepseek.com")`), not Anthropic --
+switched 2026-09-02 (critical-review punch-list item 3) purely on cost:
+at this call volume DeepSeek's `deepseek-v4-flash` runs at a small fraction
+of Claude Sonnet 5's price for a shadow-mode feature that accumulates
+history and never gates capital at risk. See
+`docs/superpowers/archive/graywind-news-debate-provider-cost-handoff.md`
+for the cost comparison this decision was based on.
 
-Every Claude call below forces structured output via a single tool choice
-(`tool_choice={"type": "tool", "name": ...}`) with `additionalProperties:
-False` schemas, and reads required fields with direct dict indexing (not
-`.get()`) -- a malformed or missing field is a loud KeyError/ValueError,
-never a silent default, per the spec's testing requirements. Thinking is
-explicitly disabled on these calls (`thinking={"type": "disabled"}`): this
-is a deliberate cost/latency choice, not a forced API workaround -- these
-calls fire on every symbol/cycle of a 15-minute market-hours cron purely to
-accumulate shadow history, so the extra latency/cost of extended thinking
-buys nothing for a call that never gates anything time-sensitive. Revisit
-if this debate is ever promoted to authoritative.
+Every call below forces structured output via a single tool choice
+(`tool_choice={"type": "function", "function": {"name": ...}}`) with
+`additionalProperties: False` schemas, and reads required fields with
+direct dict indexing (not `.get()`) -- a malformed or missing field is a
+loud KeyError/ValueError, never a silent default, per the spec's testing
+requirements. This client-side loud-failure behavior is the real
+guarantee, not the `strict: true` passed in each tool's schema: DeepSeek
+only enforces `strict` server-side on `base_url=".../beta"`, which this
+module deliberately does NOT use, because that beta endpoint has its own
+open bug returning malformed JSON in `function.arguments` under strict
+mode -- trading a silently-ignored flag for a live wire-format bug is a
+worse deal for a shadow-mode feature. `strict` is left in the schema as a
+harmless no-op on the standard endpoint rather than removed, in case
+DeepSeek fixes the beta bug and this becomes worth revisiting.
+
+`extra_body={"thinking": {"type": "disabled"}}` is required, not optional
+cost-tuning: `deepseek-v4-flash` defaults to thinking mode on, and
+DeepSeek's API rejects a forced `tool_choice` (this module's `_tool_call`
+always forces one) with an HTTP 400 while thinking mode is on -- see
+https://github.com/deepseek-ai/DeepSeek-V3/issues/1376. Removing this
+flag breaks every real call.
 
 `llm_client` is injected on every function here (same shape as
 `news_client` throughout this codebase) -- tests always pass a MagicMock
 and never make a real API call.
 """
+import json
 from dataclasses import dataclass
 
 from graywind_strategy.gates.sentiment_gate import (
@@ -39,7 +50,7 @@ from graywind_strategy.gates.sentiment_gate import (
     sentiment_score,
 )
 
-NEWS_DEBATE_MODEL = "claude-sonnet-5"
+NEWS_DEBATE_MODEL = "deepseek-v4-flash"
 NEWS_DEBATE_MAX_TOKENS = 1024
 
 BULL_TOOL_NAME = "submit_bull_argument"
@@ -60,18 +71,26 @@ def _headlines_block(headlines):
 
 
 def _tool_call(llm_client, prompt, tool):
-    response = llm_client.messages.create(
+    response = llm_client.chat.completions.create(
         model=NEWS_DEBATE_MODEL,
         max_tokens=NEWS_DEBATE_MAX_TOKENS,
-        thinking={"type": "disabled"},
-        tools=[tool],
-        tool_choice={"type": "tool", "name": tool["name"]},
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"],
+                "strict": tool["strict"],
+            },
+        }],
+        tool_choice={"type": "function", "function": {"name": tool["name"]}},
         messages=[{"role": "user", "content": prompt}],
+        extra_body={"thinking": {"type": "disabled"}},
     )
-    for block in response.content:
-        if getattr(block, "type", None) == "tool_use" and block.name == tool["name"]:
-            return block.input
-    raise ValueError(f"news_debate: no {tool['name']} tool_use block in response")
+    for tool_call in response.choices[0].message.tool_calls or []:
+        if tool_call.function.name == tool["name"]:
+            return json.loads(tool_call.function.arguments)
+    raise ValueError(f"news_debate: no {tool['name']} tool call in response")
 
 
 _ARGUMENT_TOOL_SCHEMA = {

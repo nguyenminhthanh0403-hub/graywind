@@ -18,7 +18,7 @@ uptrend) and (b) know when a held position crosses its stop or target and
 needs to be sold.
 
 Requires: ALPACA_API_KEY, ALPACA_API_SECRET, FRED_API_KEY, FINNHUB_API_KEY
-in the environment. See .env.example. ANTHROPIC_API_KEY is optional -- when
+in the environment. See .env.example. DEEPSEEK_API_KEY is optional -- when
 unset, `llm_client` stays None and only the shadow-mode news-debate logging
 (news_debate_log.csv) is disabled; the rest of the trading cycle (real
 gates, sizing, order submission) is completely unaffected.
@@ -28,7 +28,7 @@ import sys
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 
-import anthropic
+import openai
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.news import NewsClient
@@ -226,7 +226,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
 
     `llm_client`/`debate_cache`/`debate_rows` are the shadow-mode
     news-debate collectors -- when `llm_client` is None (the
-    ANTHROPIC_API_KEY-not-set case), the debate step is skipped entirely,
+    DEEPSEEK_API_KEY-not-set case), the debate step is skipped entirely,
     identical to behavior before these parameters existed. When given,
     a debate-call failure (network, malformed structured output) is caught
     here and never propagates or affects the real buy/sell/hold decision
@@ -336,7 +336,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
             print(f"{symbol}: {decision.action} ({decision.reason})")
 
         # Runs AFTER the buy/hold handling above (and thus after
-        # decide_trade()/order submission) so that a slow or hung Anthropic
+        # decide_trade()/order submission) so that a slow or hung DeepSeek
         # endpoint never delays real order placement -- delaying WHEN the
         # real decision executes is itself an effect on the trade cycle the
         # spec says shadow mode must never have, even though it never
@@ -418,7 +418,7 @@ def main():
     if not all([api_key, api_secret, fred_api_key, finnhub_api_key]):
         print("ERROR: one or more required API keys are not set in the environment", file=sys.stderr)
         return 1
-    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
 
     state_dir = os.environ.get("GRAYWIND_STATE_DIR", "state")
     dashboard_dir = os.environ.get("GRAYWIND_DASHBOARD_DIR", "dashboard-data")
@@ -428,11 +428,14 @@ def main():
     news_client = NewsClient(api_key, api_secret)
     # timeout/max_retries bounded explicitly: the SDK's own defaults (10min
     # timeout, 2 retries) could otherwise stall a cycle for up to ~30min on
-    # a hung Anthropic endpoint. This is a shadow-mode call that must never
+    # a hung endpoint. This is a shadow-mode call that must never
     # meaningfully delay real order submission -- see final-review Fix 3.
     llm_client = (
-        anthropic.Anthropic(api_key=anthropic_api_key, timeout=20.0, max_retries=1)
-        if anthropic_api_key else None
+        openai.OpenAI(
+            api_key=deepseek_api_key, base_url="https://api.deepseek.com",
+            timeout=20.0, max_retries=1,
+        )
+        if deepseek_api_key else None
     )
 
     today = datetime.now(ET).date()

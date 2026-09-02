@@ -1016,7 +1016,7 @@ def test_main_calls_write_cycle_export_after_save_state():
     assert kwargs["equity"] == 10000.0
 
 
-def test_main_constructs_llm_client_when_anthropic_key_set():
+def test_main_constructs_llm_client_when_deepseek_key_set():
     fake_account = MagicMock()
     fake_account.equity = "10000.0"
     fake_trading_client = MagicMock()
@@ -1028,12 +1028,12 @@ def test_main_constructs_llm_client_when_anthropic_key_set():
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
              "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
-             "ANTHROPIC_API_KEY": "fake-anthropic-key",
+             "DEEPSEEK_API_KEY": "fake-deepseek-key",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
          patch("live_loop.NewsClient"), \
-         patch("live_loop.anthropic.Anthropic") as mock_anthropic_ctor, \
+         patch("live_loop.openai.OpenAI") as mock_openai_ctor, \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
@@ -1047,14 +1047,15 @@ def test_main_constructs_llm_client_when_anthropic_key_set():
         result = live_loop.main()
 
     assert result == 0
-    mock_anthropic_ctor.assert_called_once_with(
-        api_key="fake-anthropic-key", timeout=20.0, max_retries=1,
+    mock_openai_ctor.assert_called_once_with(
+        api_key="fake-deepseek-key", base_url="https://api.deepseek.com",
+        timeout=20.0, max_retries=1,
     )
     mock_log_news_debate.assert_called_once()
     assert mock_log_news_debate.call_args.args[0] == []  # no symbols processed (fetch_bars -> [])
 
 
-def test_main_skips_llm_client_construction_when_anthropic_key_unset():
+def test_main_skips_llm_client_construction_when_deepseek_key_unset():
     fake_account = MagicMock()
     fake_account.equity = "10000.0"
     fake_trading_client = MagicMock()
@@ -1070,7 +1071,7 @@ def test_main_skips_llm_client_construction_when_anthropic_key_unset():
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
          patch("live_loop.NewsClient"), \
-         patch("live_loop.anthropic.Anthropic") as mock_anthropic_ctor, \
+         patch("live_loop.openai.OpenAI") as mock_openai_ctor, \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
@@ -1081,11 +1082,11 @@ def test_main_skips_llm_client_construction_when_anthropic_key_unset():
          patch("live_loop.append_decision_log"), \
          patch("live_loop.log_news_debate") as mock_log_news_debate, \
          patch("live_loop.write_cycle_export"):
-        os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ.pop("DEEPSEEK_API_KEY", None)
         result = live_loop.main()
 
     assert result == 0
-    mock_anthropic_ctor.assert_not_called()
+    mock_openai_ctor.assert_not_called()
     mock_log_news_debate.assert_called_once()
     assert mock_log_news_debate.call_args.args[0] == []
 
