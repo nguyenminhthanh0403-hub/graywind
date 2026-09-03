@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 import openai
 import pandas as pd
+import requests
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.news import NewsClient
 from alpaca.trading.client import TradingClient
@@ -44,6 +45,7 @@ from graywind_strategy.risk.drawdown_breaker import (
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 from graywind_strategy.gates.news_debate import evaluate_shadow_debate
+from graywind_strategy import trade_approval
 from graywind_strategy.dashboard_export import write_cycle_export, log_news_debate
 from graywind_strategy.state_store import (
     append_decision_log, load_state, save_state, load_tier_pools, save_tier_pools,
@@ -202,7 +204,9 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                     drawdown_breaker, cycle_timestamp=None, cycle_trades=None,
                     symbol_statuses=None, tier_pools=None,
                     rsi=None, sma_fast=None, sma_slow=None, decision_rows=None,
-                    llm_client=None, debate_cache=None, debate_rows=None):
+                    llm_client=None, debate_cache=None, debate_rows=None,
+                    pending_trades=None, github_token=None, repo=None,
+                    account_label=None, session=requests):
     """Resolves one symbol's decision for this cycle: sell-on-stop/target
     exit if a held position crossed its stop or target, otherwise
     decide_trade() for a fresh entry -- but only if the symbol isn't
@@ -247,6 +251,8 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         cycle_trades = []
     if symbol_statuses is None:
         symbol_statuses = {}
+    if pending_trades is None:
+        pending_trades = {}
     tier = SYMBOL_TIER.get(symbol)
 
     position = open_positions.get(symbol)
@@ -307,27 +313,30 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 rsi=rsi, sma_fast=sma_fast, sma_slow=sma_slow,
             ))
         if decision.action == "buy":
-            order = MarketOrderRequest(
-                symbol=symbol, qty=decision.shares,
-                side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
-            )
-            trading_client.submit_order(order)
-            if tier is not None and tier_pools is not None:
-                tier_pools[tier] -= decision.shares * current_price
-            open_positions[symbol] = {
-                "entry_price": current_price, "shares": decision.shares,
-                "stop": decision.stop_price, "target": decision.target_price,
-                "opened_date": today.isoformat(),
-            }
-            cycle_trades.append({
-                "timestamp": cycle_timestamp, "symbol": symbol, "side": "buy",
-                "qty": decision.shares, "price": current_price, "reason": decision.reason,
-            })
-            symbol_statuses[symbol] = {
-                "position_open": True, "shares": decision.shares, "entry_price": current_price,
-                "current_price": current_price, "action": "buy", "reason": decision.reason,
-            }
-            print(f"{symbol}: submitted buy for {decision.shares} shares")
+            if symbol in pending_trades:
+                symbol_statuses[symbol] = {
+                    "position_open": False, "shares": None, "entry_price": None,
+                    "current_price": current_price, "action": "pending",
+                    "reason": "awaiting approval on existing proposal",
+                }
+                print(f"{symbol}: already has a pending trade proposal, skipping")
+            else:
+                issue_number = trade_approval.propose_trade(
+                    symbol=symbol, side="buy", qty=decision.shares, price=current_price,
+                    tier=tier, account_label=account_label, reasoning=decision.reason,
+                    github_token=github_token, repo=repo, session=session,
+                )
+                pending_trades[symbol] = {
+                    "issue_number": issue_number, "side": "buy", "qty": decision.shares,
+                    "price_at_proposal": current_price, "stop_price": decision.stop_price,
+                    "target_price": decision.target_price, "tier": tier,
+                    "proposed_date": today.isoformat(),
+                }
+                symbol_statuses[symbol] = {
+                    "position_open": False, "shares": None, "entry_price": None,
+                    "current_price": current_price, "action": "proposed", "reason": decision.reason,
+                }
+                print(f"{symbol}: proposed buy for {decision.shares} shares (issue #{issue_number}), awaiting approval")
         else:
             symbol_statuses[symbol] = {
                 "position_open": False, "shares": None, "entry_price": None,

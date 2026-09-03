@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
+import requests
 from alpaca.trading.enums import OrderSide
 
 from graywind_strategy.gate_result import GateResult
@@ -59,11 +60,12 @@ def _position(shares=10, stop=98.0, target=103.0, opened_date="2024-01-08"):
 
 def _call(symbol="AAPL", signal="hold", current_price=100.0, today=date(2024, 1, 8),
           open_positions=None, trading_client=None, pdt_throttle=None, decide_return=None,
-          drawdown_breaker=None, equity=10000.0, tier_pools=None):
+          drawdown_breaker=None, equity=10000.0, tier_pools=None, pending_trades=None):
     open_positions = {} if open_positions is None else open_positions
     trading_client = MagicMock() if trading_client is None else trading_client
     pdt_throttle = MagicMock() if pdt_throttle is None else pdt_throttle
     drawdown_breaker = MagicMock() if drawdown_breaker is None else drawdown_breaker
+    pending_trades = {} if pending_trades is None else pending_trades
     with patch(
         "live_loop.decide_trade",
         return_value=decide_return or TradeDecision(action="hold", reason="no buy signal"),
@@ -75,6 +77,8 @@ def _call(symbol="AAPL", signal="hold", current_price=100.0, today=date(2024, 1,
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(),
             finnhub_api_key="k", trading_client=trading_client,
             drawdown_breaker=drawdown_breaker, tier_pools=tier_pools,
+            pending_trades=pending_trades, github_token="tok", repo="me/graywind",
+            account_label="100k",
         )
     return mock_decide, trading_client, pdt_throttle, open_positions, drawdown_breaker
 
@@ -230,6 +234,9 @@ def test_pending_same_day_trades_real_decide_trade_blocks_when_reservation_hits_
 def test_pending_same_day_trades_real_decide_trade_allows_when_reservation_under_cap():
     # Same realized count (1), but one of the "other" positions was opened
     # on an earlier day, so only 1 counts as pending -> 1 + 1 < 3 -> allowed.
+    # The reservation-under-cap outcome now shows up as a buy *proposal*
+    # (propose_trade called, symbol entered into pending_trades) rather than
+    # an executed order, since process_symbol no longer executes buys itself.
     throttle = PDTThrottle()
     throttle.record_day_trade(date(2024, 1, 8))
     open_positions = {
@@ -237,17 +244,22 @@ def test_pending_same_day_trades_real_decide_trade_allows_when_reservation_under
         "MSFT": _position(shares=3, stop=300.0, target=320.0, opened_date="2024-01-07"),  # earlier day
     }
     trading_client = MagicMock()
-    with _passing_gates():
+    pending_trades = {}
+    with _passing_gates(), \
+         patch("live_loop.trade_approval.propose_trade", return_value=101) as mock_propose:
         process_symbol(
             symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
             open_positions=open_positions, equity=10000.0,
             pdt_throttle=throttle, position_sizer=PositionSizer(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(),
             finnhub_api_key="k", trading_client=trading_client,
-            drawdown_breaker=MagicMock(),
+            drawdown_breaker=MagicMock(), pending_trades=pending_trades,
+            github_token="tok", repo="me/graywind", account_label="100k",
         )
-    trading_client.submit_order.assert_called_once()
-    assert "AAPL" in open_positions
+    mock_propose.assert_called_once()
+    trading_client.submit_order.assert_not_called()
+    assert "AAPL" not in open_positions
+    assert "AAPL" in pending_trades
 
 
 # --- dashboard export collection: process_symbol optionally records what
@@ -255,26 +267,54 @@ def test_pending_same_day_trades_real_decide_trade_allows_when_reservation_under
 # defaulting to None (no-op) so every pre-existing call site above is
 # unaffected.
 
-def test_process_symbol_records_buy_trade_and_status_when_collectors_passed():
+def test_process_symbol_proposes_buy_instead_of_executing():
+    # SYMBOL_TIER is patched explicitly here (rather than relying on AAPL's real tag) so this
+    # test is isolated from tier_config.py's actual contents -- AAPL is tagged tier 2 for real
+    # once the dual-account/tier-symbols plan has shipped, and this test's `tier=2` expectation
+    # must track that, not silently drift to `None` if tier_config.py ever changes.
     cycle_trades = []
     symbol_statuses = {}
-    with patch(
+    pending_trades = {}
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True), patch(
         "live_loop.decide_trade",
         return_value=TradeDecision(action="buy", reason="signal=buy", shares=10, stop_price=98.0, target_price=103.0),
-    ):
+    ), patch("live_loop.trade_approval.propose_trade", return_value=101) as mock_propose:
+        trading_client = MagicMock()
         process_symbol(
             symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
             open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
             drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
-            trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+            trading_client=trading_client, drawdown_breaker=MagicMock(),
             cycle_timestamp="2026-08-15T10:00:00-04:00", cycle_trades=cycle_trades, symbol_statuses=symbol_statuses,
+            pending_trades=pending_trades, github_token="tok", repo="me/graywind", account_label="100k",
         )
-    assert cycle_trades == [{
-        "timestamp": "2026-08-15T10:00:00-04:00", "symbol": "AAPL", "side": "buy",
-        "qty": 10, "price": 100.0, "reason": "signal=buy",
-    }]
-    assert symbol_statuses["AAPL"]["action"] == "buy"
-    assert symbol_statuses["AAPL"]["position_open"] is True
+    mock_propose.assert_called_once_with(
+        symbol="AAPL", side="buy", qty=10, price=100.0, tier=2, account_label="100k",
+        reasoning="signal=buy", github_token="tok", repo="me/graywind", session=requests,
+    )
+    trading_client.submit_order.assert_not_called()
+    assert cycle_trades == []  # not a real trade yet -- just a proposal
+    assert symbol_statuses["AAPL"]["action"] == "proposed"
+    assert pending_trades["AAPL"] == {
+        "issue_number": 101, "side": "buy", "qty": 10, "price_at_proposal": 100.0,
+        "stop_price": 98.0, "target_price": 103.0, "tier": 2, "proposed_date": "2024-01-08",
+    }
+
+
+def test_process_symbol_skips_duplicate_proposal_for_already_pending_symbol():
+    pending_trades = {
+        "AAPL": {
+            "issue_number": 99, "side": "buy", "qty": 5.0, "price_at_proposal": 95.0,
+            "stop_price": 90.0, "target_price": 100.0, "tier": 2, "proposed_date": "2024-01-08",
+        },
+    }
+    with patch("live_loop.trade_approval.propose_trade") as mock_propose:
+        _call(
+            symbol="AAPL", signal="buy", pending_trades=pending_trades,
+            decide_return=TradeDecision(action="buy", reason="signal=buy", shares=10, stop_price=98.0, target_price=103.0),
+        )
+    mock_propose.assert_not_called()
+    assert pending_trades["AAPL"]["issue_number"] == 99  # untouched, not overwritten
 
 
 def test_process_symbol_records_sell_trade_on_stop_exit():
@@ -328,7 +368,12 @@ def test_process_symbol_appends_decision_log_row_when_decide_trade_runs():
     with patch(
         "live_loop.decide_trade",
         return_value=TradeDecision(action="buy", reason="all checks passed", shares=10, stop_price=98.0, target_price=103.0),
-    ):
+    ), patch("live_loop.trade_approval.propose_trade", return_value=101):
+        # propose_trade is mocked here purely to keep this decision-log test
+        # from making a real network call now that a "buy" decision routes
+        # through the proposal path -- the buy/proposal behavior itself is
+        # covered by the dedicated tests above, this test only cares about
+        # decision_rows, which is populated before the buy/proposal branch.
         process_symbol(
             symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
             open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
@@ -1215,8 +1260,9 @@ def test_process_symbol_falls_back_to_global_equity_when_tier_pools_not_passed()
     assert mock_decide.call_args.kwargs["account_equity"] == 10000.0
 
 
-def test_process_symbol_buy_decrements_tier_pool_cash():
-    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True):
+def test_process_symbol_buy_proposal_does_not_touch_tier_pool_cash():
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True), \
+         patch("live_loop.trade_approval.propose_trade", return_value=101):
         tier_pools = {1: 0.0, 2: 500.0, 3: 0.0}
         _call(
             symbol="AAPL", signal="buy", current_price=100.0, equity=10000.0,
@@ -1226,7 +1272,7 @@ def test_process_symbol_buy_decrements_tier_pool_cash():
                 shares=2.0, stop_price=95.0, target_price=110.0,
             ),
         )
-    assert tier_pools[2] == 300.0  # 500.0 - 2.0 * 100.0
+    assert tier_pools[2] == 500.0  # unchanged -- only execution (Task 5) touches this
 
 
 def test_process_symbol_stop_exit_increments_tier_pool_cash():
