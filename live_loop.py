@@ -444,7 +444,8 @@ PRICE_STALENESS_TOLERANCE = 0.02
 
 def process_pending_trades(pending_trades, today, trading_client, drawdown_breaker,
                             github_token, repo, owner_username, tier_pools, open_positions,
-                            data_client, cycle_trades=None, symbol_statuses=None, session=requests):
+                            data_client, cycle_trades=None, symbol_statuses=None, session=requests,
+                            rolling_breakers=()):
     """Resolves every open trade-approval proposal once per cycle: expires a
     stale (not-today) proposal, closes a rejected one, executes an approved
     one only after re-validating price/drawdown/position-not-already-open
@@ -452,6 +453,15 @@ def process_pending_trades(pending_trades, today, trading_client, drawdown_break
     created). One symbol's API failure must not block resolving the others
     this cycle -- same fail-isolation convention as the WATCHLIST loop in
     main().
+
+    `rolling_breakers` mirrors main()'s own weekly/monthly breakers list
+    (each with a `.can_open_new_trade()` method) -- the proposal-creation
+    gate in main() requires the daily breaker AND every rolling breaker to
+    allow a new trade, so re-validation at approval time (after time has
+    passed since the proposal) must apply the same combined gate, not just
+    the daily one. Defaults to `()` so `all(...)` over an empty sequence is
+    permissively True, matching every pre-existing caller/test that doesn't
+    pass rolling breakers at all.
     """
     if cycle_trades is None:
         cycle_trades = []
@@ -502,6 +512,8 @@ def process_pending_trades(pending_trades, today, trading_client, drawdown_break
                 )
             elif not drawdown_breaker.can_open_new_trade():
                 failure_reason = "drawdown breaker no longer allows new trades"
+            elif not all(b.can_open_new_trade() for b in rolling_breakers):
+                failure_reason = "rolling drawdown breaker no longer allows new trades"
             elif symbol in open_positions:
                 failure_reason = "position already opened since this proposal was made"
 
@@ -642,11 +654,6 @@ def main():
         baseline_established = True
         drawdown_breaker.start_new_day(today, starting_equity)
         drawdown_breaker.update_equity(equity)
-        process_pending_trades(
-            pending_trades, today, trading_client, drawdown_breaker, github_token, repo,
-            owner_username, tier_pools, open_positions, data_client,
-            cycle_trades=cycle_trades, symbol_statuses=symbol_statuses,
-        )
         # Guarded exactly as backtester.py does: record_equity rejects
         # non-positive equity, and this sits above the WATCHLIST loop with no
         # `except` between it and the cycle body. An unguarded raise on a wiped-out
@@ -656,6 +663,20 @@ def main():
         if equity > 0:
             for breaker in rolling_breakers:
                 breaker.record_equity(today, equity)
+
+        # Placed AFTER the record_equity loop above (not before it): an
+        # approved trade's re-validation must weigh the rolling breakers
+        # against TODAY's equity, not against whatever history was loaded
+        # before this cycle recorded a fresh reading. Runs unconditionally
+        # regardless of the `equity > 0` guard above (it sits outside that
+        # `if`), same as the WATCHLIST loop below -- a proposal still needs
+        # to be expired/rejected/resolved even on a wiped-out-equity cycle.
+        process_pending_trades(
+            pending_trades, today, trading_client, drawdown_breaker, github_token, repo,
+            owner_username, tier_pools, open_positions, data_client,
+            cycle_trades=cycle_trades, symbol_statuses=symbol_statuses,
+            rolling_breakers=rolling_breakers,
+        )
 
         if should_rebalance_this_month(rebalance_state["last_rebalance_month"], today):
             try:

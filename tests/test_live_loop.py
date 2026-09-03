@@ -34,6 +34,26 @@ def isolate_equity_history():
         yield load_mock, save_mock
 
 
+@pytest.fixture(autouse=True)
+def isolate_pending_trades():
+    """main() also loads and persists pending trade-approval proposals
+    through state_store (load_pending_trades/save_pending_trades). Same
+    rationale as isolate_equity_history above: every main() test patches the
+    other state_store calls but would otherwise leave these two unpatched,
+    writing real state/pending_trades.csv (and state/small/pending_trades.csv)
+    files into the repo's actual state/ directory as a side effect of running
+    the suite. Autouse so a future main() test can't reintroduce that leak by
+    forgetting to patch. A separate fixture from isolate_equity_history
+    (rather than folded into it) so existing `mock_load, mock_save =
+    isolate_equity_history` unpacking at every call site doesn't need to
+    change shape. Yields the mocks so a test can assert on how they were
+    called.
+    """
+    with patch("live_loop.load_pending_trades", return_value={}) as load_mock, \
+         patch("live_loop.save_pending_trades") as save_mock:
+        yield load_mock, save_mock
+
+
 def test_is_market_hours_true_during_regular_session():
     assert is_market_hours(now=datetime(2024, 1, 8, 10, 0, tzinfo=ET)) is True  # Mon 10am
 
@@ -725,8 +745,6 @@ def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state") as mock_save_state, \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
          patch("live_loop.save_tier_pools"), \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
@@ -778,8 +796,6 @@ def _run_main_with_equity(equity, load_equity_history_mock, history, state=None)
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
          patch("live_loop.save_tier_pools"), \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
@@ -875,8 +891,6 @@ def test_main_threads_graywind_state_dir_env_var_into_every_state_call(isolate_e
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state) as mock_load_state, \
          patch("live_loop.save_state") as mock_save_state, \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}) as mock_load_tier_pools, \
          patch("live_loop.save_tier_pools") as mock_save_tier_pools, \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}) as mock_load_rebalance, \
@@ -921,8 +935,6 @@ def test_main_defaults_graywind_state_dir_to_state_when_env_var_unset(isolate_eq
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state) as mock_load_state, \
          patch("live_loop.save_state"), \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
          patch("live_loop.save_tier_pools"), \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
@@ -967,8 +979,6 @@ def test_get_account_exception_leaves_day_and_starting_equity_unchanged():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state") as mock_save_state, \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
          patch("live_loop.save_tier_pools"), \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
@@ -1013,8 +1023,6 @@ def test_successful_equity_read_updates_day_and_starting_equity_normally():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state") as mock_save_state, \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
          patch("live_loop.save_tier_pools"), \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
@@ -1055,8 +1063,6 @@ def test_main_calls_write_cycle_export_after_save_state():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
          patch("live_loop.save_tier_pools"), \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
@@ -1096,8 +1102,6 @@ def test_main_constructs_llm_client_when_deepseek_key_set():
          patch("live_loop.openai.OpenAI") as mock_openai_ctor, \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
          patch("live_loop.save_tier_pools"), \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
@@ -1136,8 +1140,6 @@ def test_main_skips_llm_client_construction_when_deepseek_key_unset():
          patch("live_loop.openai.OpenAI") as mock_openai_ctor, \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
          patch("live_loop.save_tier_pools"), \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
@@ -1175,8 +1177,6 @@ def test_process_symbol_cycle_passes_confirmation_bars_to_compute_signals():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
          patch("live_loop.save_tier_pools"), \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
@@ -1229,8 +1229,6 @@ def test_main_passes_loaded_tier_pools_to_process_symbol():
          patch("live_loop.NewsClient"), \
          patch("live_loop.load_state", return_value=fake_state), \
          patch("live_loop.save_state"), \
-         patch("live_loop.load_pending_trades", return_value={}), \
-         patch("live_loop.save_pending_trades"), \
          patch("live_loop.load_tier_pools", return_value=fake_tier_pools), \
          patch("live_loop.save_tier_pools"), \
          patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
@@ -1516,6 +1514,43 @@ def test_process_pending_trades_executes_approved_tier1_buy_without_opening_posi
     assert open_positions == {}  # tier-1 holdings are tracked via Alpaca, not open_positions
 
 
+def test_process_pending_trades_submits_order_and_clears_row_even_if_close_issue_fails():
+    # Regression test for a duplicate-buy bug found in review: order
+    # submission and pending_trades cleanup on the approved-and-executed
+    # path must happen BEFORE the closing close_issue call, not after --
+    # otherwise a transient GitHub failure there leaves the row in
+    # pending_trades even though the order already went through, and the
+    # next cycle re-validates clean and resubmits the SAME order. This is
+    # especially dangerous for tier-1 buys, which (per the test above) are
+    # never added to open_positions, so there's no already-open-position
+    # guard to catch the duplicate.
+    fake_bar = MagicMock(close=101.0)  # within 2% of the 100.0 proposal price
+    pending_trades = {
+        "AAPL": {
+            "issue_number": 12, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2024-01-08",
+        },
+    }
+    trading_client = MagicMock()
+    drawdown_breaker = MagicMock()
+    drawdown_breaker.can_open_new_trade.return_value = True
+    with patch("live_loop.trade_approval.get_owner_reaction", return_value="approved"), \
+         patch("live_loop.trade_approval.close_issue",
+               side_effect=RuntimeError("transient GitHub error")), \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]):
+        # close_issue raises, but process_pending_trades must not propagate
+        # it -- the order/state cleanup already happened by the time
+        # close_issue is even called.
+        process_pending_trades(
+            pending_trades, today=date(2024, 1, 8), trading_client=trading_client,
+            drawdown_breaker=drawdown_breaker, github_token="tok", repo="me/graywind",
+            owner_username="me", tier_pools={1: 0.0, 2: 500.0, 3: 0.0}, open_positions={},
+            data_client=MagicMock(),
+        )
+    trading_client.submit_order.assert_called_once()
+    assert pending_trades == {}  # cleared regardless of the closing comment's outcome
+
+
 def test_process_pending_trades_rejects_approved_buy_on_stale_price():
     fake_bar = MagicMock(close=110.0)  # 10% above the 100.0 proposal price -- exceeds 2% tolerance
     pending_trades = {
@@ -1565,6 +1600,39 @@ def test_process_pending_trades_rejects_approved_buy_when_drawdown_breaker_block
     trading_client.submit_order.assert_not_called()
     mock_close.assert_called_once()
     assert "drawdown" in mock_close.call_args.args[1]
+
+
+def test_process_pending_trades_rejects_approved_buy_when_rolling_breaker_blocks():
+    # main()'s own proposal-creation gate for tier-2/3 buys requires the
+    # daily breaker AND every rolling (weekly/monthly) breaker to allow a
+    # new trade -- re-validation at approval time must apply the same
+    # combined gate, not just the daily breaker, since time has passed
+    # since the proposal was made.
+    fake_bar = MagicMock(close=100.0)
+    pending_trades = {
+        "AAPL": {
+            "issue_number": 14, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2024-01-08",
+        },
+    }
+    trading_client = MagicMock()
+    drawdown_breaker = MagicMock()
+    drawdown_breaker.can_open_new_trade.return_value = True
+    blocking_rolling_breaker = MagicMock()
+    blocking_rolling_breaker.can_open_new_trade.return_value = False
+    with patch("live_loop.trade_approval.get_owner_reaction", return_value="approved"), \
+         patch("live_loop.trade_approval.close_issue") as mock_close, \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]):
+        process_pending_trades(
+            pending_trades, today=date(2024, 1, 8), trading_client=trading_client,
+            drawdown_breaker=drawdown_breaker, github_token="tok", repo="me/graywind",
+            owner_username="me", tier_pools={1: 0.0, 2: 500.0, 3: 0.0}, open_positions={},
+            data_client=MagicMock(), rolling_breakers=[blocking_rolling_breaker],
+        )
+    trading_client.submit_order.assert_not_called()
+    mock_close.assert_called_once()
+    assert "rolling" in mock_close.call_args.args[1]
+    assert pending_trades == {}
 
 
 def test_process_pending_trades_rejects_approved_buy_when_position_already_open():
