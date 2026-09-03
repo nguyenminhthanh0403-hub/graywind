@@ -51,6 +51,7 @@ jobs:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 live_loop.py
 
       # Seeds tier_pools.csv with real starting cash the first time it's found
@@ -417,6 +418,7 @@ jobs:
           GRAYWIND_STATE_DIR: state/small
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GRAYWIND_DASHBOARD_DIR: dashboard-data/small
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 live_loop.py
 
       - name: Seed or check tier pool funding
