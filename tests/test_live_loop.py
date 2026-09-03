@@ -55,6 +55,20 @@ def isolate_pending_trades():
         yield load_mock, save_mock
 
 
+@pytest.fixture(autouse=True)
+def isolate_tier1_holdings():
+    """main() also loads and persists last-known tier-1 holdings through
+    state_store (load_tier1_holdings/save_tier1_holdings), used to defer a
+    tier-1 sell's tier_pools[1] credit until the resulting holdings decrease
+    is actually observed. Same rationale and pattern as isolate_pending_trades
+    above -- autouse so a future main() test can't reintroduce a real-file-
+    write leak by forgetting to patch.
+    """
+    with patch("live_loop.load_tier1_holdings", return_value={}) as load_mock, \
+         patch("live_loop.save_tier1_holdings") as save_mock:
+        yield load_mock, save_mock
+
+
 def test_is_market_hours_true_during_regular_session():
     assert is_market_hours(now=datetime(2024, 1, 8, 10, 0, tzinfo=ET)) is True  # Mon 10am
 
@@ -1511,7 +1525,14 @@ def test_run_tier1_rebalance_proposes_buy_instead_of_executing():
     }
 
 
-def test_run_tier1_rebalance_sell_still_executes_immediately():
+def test_run_tier1_rebalance_sell_submits_but_defers_pool_credit_until_settlement_observed():
+    # Sells still submit immediately (risk-reducing, stays automatic) -- but
+    # tier_pools[1] is no longer credited optimistically at submission time.
+    # Crediting now happens only once a real holdings decrease is observed
+    # on a later cycle (see the credit-on-settlement tests below) -- this
+    # closes both the equity-double-count race and the worse case where a
+    # DAY order never fills and gets broker-cancelled, since nothing is
+    # ever credited for an order that never actually settles.
     fake_bar = MagicMock(close=100.0)
     trading_client = MagicMock()
     trading_client.get_all_positions.return_value = [MagicMock(symbol="VTI", qty="7")]
@@ -1525,7 +1546,84 @@ def test_run_tier1_rebalance_sell_still_executes_immediately():
     assert orders[0].side == "sell"
     trading_client.submit_order.assert_called_once()
     mock_propose.assert_not_called()
-    assert tier_pools[1] == 280.0  # 0.0 + 2.8 * 100.0 -- sell still settles immediately
+    assert tier_pools[1] == 0.0  # NOT credited yet -- settlement hasn't been observed
+
+
+def test_run_tier1_rebalance_credits_pool_when_holdings_decreased_since_last_known():
+    # Simulates the cycle AFTER a sell actually settled: get_all_positions()
+    # now shows the lower share count, and last_known_holdings still has the
+    # pre-sale figure from the prior cycle -- the observed decrease is what
+    # triggers the (deferred) credit, priced at this cycle's current price.
+    fake_bar = MagicMock(close=100.0)
+    trading_client = MagicMock()
+    trading_client.get_all_positions.return_value = [MagicMock(symbol="VTI", qty="4.2")]
+    tier_pools = {1: 0.0, 2: 0.0, 3: 0.0}
+    last_known_holdings = {"VTI": 7.0}
+    with patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"VTI": 0.6}, clear=True), \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]), \
+         patch("live_loop.trade_approval.propose_trade") as mock_propose:
+        run_tier1_rebalance(
+            trading_client, MagicMock(), tier_pools, last_known_holdings=last_known_holdings,
+        )
+    assert tier_pools[1] == 280.0  # 0.0 + (7.0 - 4.2) * 100.0
+    assert last_known_holdings["VTI"] == 4.2  # updated for the next cycle's comparison
+
+
+def test_run_tier1_rebalance_no_credit_when_holdings_unchanged():
+    fake_bar = MagicMock(close=100.0)
+    trading_client = MagicMock()
+    trading_client.get_all_positions.return_value = [MagicMock(symbol="VTI", qty="7")]
+    tier_pools = {1: 0.0, 2: 0.0, 3: 0.0}
+    last_known_holdings = {"VTI": 7.0}
+    with patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"VTI": 0.6}, clear=True), \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]):
+        run_tier1_rebalance(
+            trading_client, MagicMock(), tier_pools, last_known_holdings=last_known_holdings,
+        )
+    assert tier_pools[1] == 0.0  # no observed decrease -- nothing credited
+
+
+def test_run_tier1_rebalance_defers_credit_when_price_unavailable_and_retries_later():
+    # A decrease observed on a cycle where this symbol's bars are
+    # unavailable must not be silently lost -- last_known_holdings should
+    # NOT advance past it, so a later cycle (once bars return) still
+    # detects and credits the same decrease.
+    trading_client = MagicMock()
+    trading_client.get_all_positions.return_value = [MagicMock(symbol="VTI", qty="4.2")]
+    tier_pools = {1: 0.0, 2: 0.0, 3: 0.0}
+    last_known_holdings = {"VTI": 7.0}
+    with patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"VTI": 0.6}, clear=True), \
+         patch("live_loop.fetch_bars", return_value=[]):  # no bars this cycle
+        run_tier1_rebalance(
+            trading_client, MagicMock(), tier_pools, last_known_holdings=last_known_holdings,
+        )
+    assert tier_pools[1] == 0.0  # can't price the credit yet -- deferred, not lost
+    assert last_known_holdings["VTI"] == 7.0  # unchanged, so it's retried next time
+
+    # Next cycle: bars are available again -- the deferred decrease is
+    # still detected (baseline never advanced) and credited now.
+    fake_bar = MagicMock(close=100.0)
+    with patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"VTI": 0.6}, clear=True), \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]), \
+         patch("live_loop.trade_approval.propose_trade") as mock_propose:
+        run_tier1_rebalance(
+            trading_client, MagicMock(), tier_pools, last_known_holdings=last_known_holdings,
+        )
+    assert tier_pools[1] == 280.0  # 0.0 + (7.0 - 4.2) * 100.0
+    assert last_known_holdings["VTI"] == 4.2
+
+
+def test_run_tier1_rebalance_no_phantom_credit_on_cold_start():
+    # No prior last_known_holdings persisted yet (first ever run) --
+    # must not be misread as "everything just got sold".
+    fake_bar = MagicMock(close=100.0)
+    trading_client = MagicMock()
+    trading_client.get_all_positions.return_value = [MagicMock(symbol="VTI", qty="7")]
+    tier_pools = {1: 0.0, 2: 0.0, 3: 0.0}
+    with patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"VTI": 0.6}, clear=True), \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]):
+        run_tier1_rebalance(trading_client, MagicMock(), tier_pools, last_known_holdings={})
+    assert tier_pools[1] == 0.0
 
 
 def test_run_tier1_rebalance_skips_symbol_with_no_recent_bars():

@@ -35,6 +35,8 @@ TIER_POOLS_FILENAME = "tier_pools.csv"
 TIER_POOLS_FIELDS = ["tier", "cash"]
 REBALANCE_FILENAME = "tier1_rebalance.csv"
 REBALANCE_FIELDS = ["last_rebalance_month"]
+TIER1_HOLDINGS_FILENAME = "tier1_holdings.csv"
+TIER1_HOLDINGS_FIELDS = ["symbol", "qty"]
 EQUITY_HISTORY_FILENAME = "equity_history.csv"
 EQUITY_HISTORY_FIELDS = ["day", "equity"]
 DECISION_LOG_FILENAME = "decision_log.csv"
@@ -112,6 +114,25 @@ def save_tier_pools(tier_pools, state_dir=DEFAULT_STATE_DIR):
         writer.writeheader()
         for tier, cash in tier_pools.items():
             writer.writerow({"tier": tier, "cash": cash})
+
+
+def load_tier1_holdings(state_dir=DEFAULT_STATE_DIR):
+    holdings = {}
+    path = os.path.join(state_dir, TIER1_HOLDINGS_FILENAME)
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                holdings[row["symbol"]] = float(row["qty"])
+    return holdings
+
+
+def save_tier1_holdings(holdings, state_dir=DEFAULT_STATE_DIR):
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, TIER1_HOLDINGS_FILENAME), "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=TIER1_HOLDINGS_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        for symbol, qty in holdings.items():
+            writer.writerow({"symbol": symbol, "qty": qty})
 
 
 def load_rebalance_state(state_dir=DEFAULT_STATE_DIR):

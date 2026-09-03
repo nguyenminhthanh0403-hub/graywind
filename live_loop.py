@@ -50,7 +50,7 @@ from graywind_strategy.dashboard_export import write_cycle_export, log_news_deba
 from graywind_strategy.state_store import (
     append_decision_log, load_state, save_state, load_tier_pools, save_tier_pools,
     load_rebalance_state, save_rebalance_state, load_equity_history, save_equity_history,
-    load_pending_trades, save_pending_trades,
+    load_pending_trades, save_pending_trades, load_tier1_holdings, save_tier1_holdings,
 )
 from graywind_strategy.tier_config import SYMBOL_TIER, TIER1_SYMBOL_WEIGHTS
 from graywind_strategy.tier1_rebalance import compute_rebalance_orders, should_rebalance_this_month
@@ -397,7 +397,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
 
 def run_tier1_rebalance(trading_client, data_client, tier_pools, pending_trades=None,
                          github_token=None, repo=None, account_label=None, today=None,
-                         session=requests):
+                         session=requests, last_known_holdings=None):
     """I/O wrapper around tier1_rebalance.compute_rebalance_orders(): fetches
     each tier-1 symbol's latest bar and Alpaca's real current holdings,
     computes the rebalance orders, and settles them -- sells execute
@@ -405,10 +405,51 @@ def run_tier1_rebalance(trading_client, data_client, tier_pools, pending_trades=
     GitHub issue instead of submitted directly (docs/superpowers/specs/
     2026-08-26-graywind-trade-approval-advisor-design.md). No-ops entirely
     (zero I/O) when TIER1_SYMBOL_WEIGHTS is empty -- see tier_config.py.
+
+    `tier_pools[1]` is credited for a sell only once the resulting holdings
+    DECREASE is actually observed via a later call's fresh
+    `get_all_positions()` read, compared against `last_known_holdings` --
+    never optimistically at submission time. A sell order's fill isn't
+    confirmed synchronously, and this function can now be re-invoked every
+    cycle while a same-rebalance buy proposal is unresolved (see main()'s
+    unresolved_buys handling), so crediting on submit risked double-counting
+    equity if a fill lagged into a later cycle -- or, worse, permanently
+    overstating the pool if a DAY order never filled and was broker-cancelled.
+    Crediting only on an observed decrease closes both: a cancelled order
+    never shows a holdings decrease, so it's correctly never credited.
+
+    With today's single-symbol TIER1_SYMBOL_WEIGHTS (see tier_config.py), a
+    sell-only rebalance has no unresolved buy, so `unresolved_buys` is empty
+    and the month is stamped immediately after that one call -- this function
+    then isn't re-invoked again until next month, so the credit is still
+    applied correctly but at NEXT MONTH's price, not one close to the actual
+    fill. Not a correctness bug (this ledger has no other consumer inside a
+    single call), just a wider approximation window than "next cycle" reads
+    in isolation.
+
+    KNOWN GAP, not yet closed, dormant only because TIER1_SYMBOL_WEIGHTS is
+    single-symbol today: nothing here prevents resubmitting an identical sell
+    for a symbol whose prior sell hasn't settled yet. The old optimistic
+    credit accidentally suppressed this (it shifted computed drift back
+    toward target immediately, so a same-cycle-or-later recompute wouldn't
+    reproduce the same sell) -- removing it for correctness above also
+    removed that side effect. A single symbol at one weight can only ever
+    produce a buy OR a sell per call, never both, so this can't manifest
+    today. It WILL manifest as soon as a second tier-1 symbol is added and a
+    cycle produces both a sell for one symbol and a buy for another: the
+    buy's pending proposal keeps this function being re-invoked every ~15
+    minutes, and if the sell's fill hasn't been observed yet,
+    compute_rebalance_orders will recompute and resubmit the same sell every
+    cycle until it is. Needs a dedup mechanism mirroring the buy side's
+    `if order.symbol in pending_trades: skip` before TIER1_SYMBOL_WEIGHTS
+    ever grows past one symbol -- e.g. track "a sell for this symbol was
+    submitted and is awaiting an observed settlement" the same way
+    pending_trades tracks awaiting-approval buys.
     """
     if not TIER1_SYMBOL_WEIGHTS:
         return []
     pending_trades = {} if pending_trades is None else pending_trades
+    last_known_holdings = {} if last_known_holdings is None else last_known_holdings
     if today is None:
         today = datetime.now(ET).date()
 
@@ -421,6 +462,20 @@ def run_tier1_rebalance(trading_client, data_client, tier_pools, pending_trades=
 
     real_positions = {p.symbol: float(p.qty) for p in trading_client.get_all_positions()}
     current_holdings = {symbol: real_positions.get(symbol, 0.0) for symbol in TIER1_SYMBOL_WEIGHTS}
+
+    for symbol, qty in current_holdings.items():
+        previously_known = last_known_holdings.get(symbol, qty)
+        apparent_decrease = previously_known - qty
+        if apparent_decrease > 0:
+            if symbol in current_prices:
+                tier_pools[1] += apparent_decrease * current_prices[symbol]
+                last_known_holdings[symbol] = qty
+            # else: bars unavailable this cycle -- leave last_known_holdings
+            # at its old (higher) value so this decrease isn't silently
+            # forgotten. A later cycle with a price available will still
+            # detect and credit it.
+        else:
+            last_known_holdings[symbol] = qty
 
     tier1_equity = tier_pools[1] + sum(
         current_holdings[s] * current_prices[s] for s in current_holdings if s in current_prices
@@ -451,8 +506,9 @@ def run_tier1_rebalance(trading_client, data_client, tier_pools, pending_trades=
             side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
         )
         trading_client.submit_order(market_order)
-        notional = order.qty * current_prices[order.symbol]
-        tier_pools[1] += notional
+        # tier_pools[1] is deliberately NOT credited here -- see the
+        # docstring above. It's credited later, once the resulting holdings
+        # decrease is actually observed.
         print(f"{order.symbol}: submitted tier-1 rebalance sell for {order.qty} shares")
     return orders
 
@@ -669,6 +725,7 @@ def main():
     state = load_state(state_dir=state_dir)
     pending_trades = load_pending_trades(state_dir=state_dir)
     tier_pools = load_tier_pools(state_dir=state_dir)
+    last_known_tier1_holdings = load_tier1_holdings(state_dir=state_dir)
     rebalance_state = load_rebalance_state(state_dir=state_dir)
     pdt_throttle = _restore_pdt_throttle(state)
     open_positions = state["open_positions"]
@@ -737,6 +794,7 @@ def main():
             try:
                 orders = run_tier1_rebalance(
                     trading_client, data_client, tier_pools, pending_trades=pending_trades,
+                    last_known_holdings=last_known_tier1_holdings,
                     github_token=github_token, repo=repo, account_label=account_label, today=today,
                 )
                 # Rebalance buys are now only PROPOSED, not executed. Stamping
@@ -822,6 +880,7 @@ def main():
         save_tier_pools(tier_pools, state_dir=state_dir)
         save_rebalance_state(rebalance_state, state_dir=state_dir)
         save_pending_trades(pending_trades, state_dir=state_dir)
+        save_tier1_holdings(last_known_tier1_holdings, state_dir=state_dir)
         # Persist the longest window's rows (a superset of the shorter ones).
         # If get_account() failed this cycle nothing was recorded, so this
         # writes back what was loaded -- idempotent, never a data loss.

@@ -7,6 +7,7 @@ from graywind_strategy.state_store import (
     load_state, save_state, load_tier_pools, save_tier_pools,
     load_rebalance_state, save_rebalance_state, append_decision_log,
     load_equity_history, save_equity_history, load_pending_trades, save_pending_trades,
+    load_tier1_holdings, save_tier1_holdings,
 )
 
 
@@ -308,3 +309,27 @@ def test_save_pending_trades_overwrites_previous_contents(tmp_path):
     }, state_dir=state_dir)
     save_pending_trades({}, state_dir=state_dir)
     assert load_pending_trades(state_dir=state_dir) == {}
+
+
+def test_load_tier1_holdings_returns_empty_dict_when_no_file_exists(tmp_path):
+    assert load_tier1_holdings(state_dir=str(tmp_path / "nonexistent")) == {}
+
+
+def test_save_then_load_round_trips_tier1_holdings(tmp_path):
+    state_dir = str(tmp_path)
+    holdings = {"SPY": 5.0, "VTI": 2.5}
+    save_tier1_holdings(holdings, state_dir=state_dir)
+    assert load_tier1_holdings(state_dir=state_dir) == holdings
+
+
+def test_save_tier1_holdings_creates_state_dir_if_missing(tmp_path):
+    state_dir = str(tmp_path / "new_dir")
+    save_tier1_holdings({}, state_dir=state_dir)
+    assert os.path.exists(os.path.join(state_dir, "tier1_holdings.csv"))
+
+
+def test_save_tier1_holdings_overwrites_previous_contents(tmp_path):
+    state_dir = str(tmp_path)
+    save_tier1_holdings({"SPY": 5.0}, state_dir=state_dir)
+    save_tier1_holdings({}, state_dir=state_dir)
+    assert load_tier1_holdings(state_dir=state_dir) == {}
