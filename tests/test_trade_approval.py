@@ -46,6 +46,41 @@ def test_get_owner_reaction_returns_approved_on_owner_thumbs_up():
     result = get_owner_reaction(101, "me", "tok", "me/graywind", session=fake_session)
 
     assert result == "approved"
+    # GitHub's reactions endpoint defaults to 30 per page and this function does
+    # not follow Link headers, so on a public repo 30+ strangers' reactions could
+    # push the owner's own :+1: onto page 2 and silently make approval impossible.
+    # per_page=100 raises that ceiling to the API's maximum (final-review Fix 4).
+    assert fake_session.get.call_args.kwargs["params"] == {"per_page": 100}
+
+
+def test_get_owner_reaction_ignores_reaction_from_a_deleted_account():
+    # GitHub returns "user": null for a reaction left by an account that has
+    # since been deleted. Indexing r["user"]["login"] raises TypeError on that,
+    # which (via live_loop's per-symbol except) leaves the pending_trades row
+    # stuck forever and permanently disables the symbol. A null user simply
+    # isn't the owner, so it must be skipped, not crash the scan.
+    fake_response = MagicMock()
+    fake_response.status_code = 200
+    fake_response.json.return_value = [
+        {"content": "+1", "user": None},
+        {"content": "+1", "user": {"login": "me"}},
+    ]
+    fake_response.raise_for_status.return_value = None
+    fake_session = MagicMock()
+    fake_session.get.return_value = fake_response
+
+    assert get_owner_reaction(101, "me", "tok", "me/graywind", session=fake_session) == "approved"
+
+
+def test_get_owner_reaction_returns_none_when_only_a_deleted_account_reacted():
+    fake_response = MagicMock()
+    fake_response.status_code = 200
+    fake_response.json.return_value = [{"content": "+1", "user": None}]
+    fake_response.raise_for_status.return_value = None
+    fake_session = MagicMock()
+    fake_session.get.return_value = fake_response
+
+    assert get_owner_reaction(101, "me", "tok", "me/graywind", session=fake_session) is None
 
 
 def test_get_owner_reaction_returns_rejected_on_owner_thumbs_down():

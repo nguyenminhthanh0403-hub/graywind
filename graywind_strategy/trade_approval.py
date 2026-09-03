@@ -40,12 +40,21 @@ def propose_trade(symbol, side, qty, price, tier, account_label, reasoning,
 
 def get_owner_reaction(issue_number, owner_username, github_token, repo, session=requests):
     url = f"{GITHUB_API_BASE}/repos/{repo}/issues/{issue_number}/reactions"
-    response = session.get(url, headers=_headers(github_token), timeout=10)
+    # per_page=100 (the API maximum): this endpoint defaults to 30 per page and
+    # this function deliberately does not follow Link headers, so without it 30+
+    # reactions from other people on a public repo would push the owner's own
+    # :+1: onto page 2 and silently make approving a trade impossible.
+    response = session.get(url, headers=_headers(github_token), params={"per_page": 100}, timeout=10)
     if response.status_code == 404:
         raise IssueNotFound(f"issue {issue_number} not found")
     response.raise_for_status()
     reactions = response.json()
-    owner_reactions = {r["content"] for r in reactions if r["user"]["login"] == owner_username}
+    # `user` is null for a reaction left by a since-deleted account; that is not
+    # the owner, so it must be skipped rather than raising TypeError -- an
+    # exception here leaves the caller's pending_trades row stuck forever.
+    owner_reactions = {
+        r["content"] for r in reactions if (r.get("user") or {}).get("login") == owner_username
+    }
     if "-1" in owner_reactions:
         return "rejected"
     if "+1" in owner_reactions:

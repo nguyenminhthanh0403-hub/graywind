@@ -13,6 +13,7 @@ from graywind_strategy.gate_result import GateResult
 from graywind_strategy.pipeline import MACRO_UNAVAILABLE_DETAIL, TradeDecision
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
+from graywind_strategy.tier1_rebalance import RebalanceOrder
 import live_loop
 from live_loop import is_market_hours, process_symbol, process_pending_trades, run_tier1_rebalance
 
@@ -336,6 +337,47 @@ def test_process_symbol_skips_duplicate_proposal_for_already_pending_symbol():
         )
     mock_propose.assert_not_called()
     assert pending_trades["AAPL"]["issue_number"] == 99  # untouched, not overwritten
+
+
+def test_process_symbol_refuses_to_propose_a_buy_for_a_symbol_with_no_tier():
+    # Final-review CRITICAL fix: the pre-existing sell path guards its
+    # tier_pools debit with `tier is not None`; the buy-proposal path dropped
+    # that guard. A WATCHLIST symbol missing from SYMBOL_TIER would be proposed
+    # with tier=None, round-trip through pending_trades.csv as None, and then
+    # KeyError on `tier_pools[None]` at execution time -- AFTER the order was
+    # already submitted, leaving the row in place to be resubmitted every
+    # cycle. It would also create a GitHub label literally reading "tier:None".
+    # tier_config.py calls SYMBOL_TIER "a living list", so this is armed by the
+    # next watchlist change, not hypothetical. Refuse to propose instead.
+    cycle_trades = []
+    symbol_statuses = {}
+    decision_rows = []
+    pending_trades = {}
+    with patch.dict("live_loop.SYMBOL_TIER", {}, clear=True), patch(
+        "live_loop.decide_trade",
+        return_value=TradeDecision(action="buy", reason="signal=buy", shares=10, stop_price=98.0, target_price=103.0),
+    ), patch("live_loop.trade_approval.propose_trade") as mock_propose:
+        trading_client = MagicMock()
+        process_symbol(
+            symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+            open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+            trading_client=trading_client, drawdown_breaker=MagicMock(),
+            cycle_timestamp="2026-08-15T10:00:00-04:00", cycle_trades=cycle_trades,
+            symbol_statuses=symbol_statuses, decision_rows=decision_rows,
+            tier_pools={1: 0.0, 2: 500.0, 3: 0.0},
+            pending_trades=pending_trades, github_token="tok", repo="me/graywind", account_label="100k",
+        )
+    mock_propose.assert_not_called()
+    trading_client.submit_order.assert_not_called()
+    assert pending_trades == {}
+    assert cycle_trades == []
+    assert symbol_statuses["AAPL"]["position_open"] is False
+    # The refusal is scoped to the proposal only -- decide_trade still ran and
+    # its decision-log row must still be recorded, or the symbol silently
+    # vanishes from decision_log.csv.
+    assert len(decision_rows) == 1
+    assert decision_rows[0]["symbol"] == "AAPL"
 
 
 def test_process_symbol_records_sell_trade_on_stop_exit():
@@ -1247,6 +1289,116 @@ def test_main_passes_loaded_tier_pools_to_process_symbol():
         assert call.kwargs["tier_pools"] is fake_tier_pools
 
 
+def _main_with_patches(extra_patches=None, tier_pools=None, rebalance_state=None,
+                        should_rebalance=False):
+    """Runs main() with the standard main()-test patch set (copied from
+    test_main_passes_loaded_tier_pools_to_process_symbol, which is the
+    canonical one) so no test below reaches the network or writes into the
+    repo's real state/ or dashboard_export/ directories. `extra_patches` is a
+    list of already-constructed patchers the caller wants active and inspects
+    afterwards.
+    """
+    fake_account = MagicMock()
+    fake_account.equity = "10000.0"
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+    fake_trading_client.get_all_positions.return_value = []
+    fake_state = {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}
+
+    def fake_fetch_bars(client, symbol, start, end):
+        return [_FakeBar(100.0, datetime(2024, 1, 8, 10, 0, tzinfo=ET))]
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+         }), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.load_state", return_value=fake_state), \
+         patch("live_loop.save_state"), \
+         patch("live_loop.load_tier_pools", return_value=tier_pools or {1: 700.0, 2: 200.0, 3: 100.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state",
+               return_value=rebalance_state if rebalance_state is not None else {"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
+         patch("live_loop.should_rebalance_this_month", return_value=should_rebalance), \
+         patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(
+             signal="hold", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+         )), \
+         patch("live_loop.process_symbol"), \
+         patch("live_loop.append_decision_log"), \
+         patch("live_loop.log_news_debate"), \
+         patch("live_loop.write_cycle_export"):
+        started = [p.start() for p in (extra_patches or [])]
+        try:
+            result = live_loop.main()
+        finally:
+            for p in (extra_patches or []):
+                p.stop()
+    return result, started
+
+
+def test_main_passes_rolling_breakers_into_process_pending_trades():
+    # main()'s real call site for process_pending_trades is otherwise untested
+    # -- every other test calls that function directly with hand-built
+    # arguments. This branch already shipped one signature-mismatch bug on this
+    # exact function, and a missing rolling_breakers kwarg would silently let an
+    # approved proposal execute against only the DAILY breaker while main()'s
+    # own proposal gate requires the rolling ones too.
+    patcher = patch("live_loop.process_pending_trades")
+    result, (mock_process_pending,) = _main_with_patches(extra_patches=[patcher])
+
+    assert result == 0
+    mock_process_pending.assert_called_once()
+    assert "rolling_breakers" in mock_process_pending.call_args.kwargs
+    breakers = mock_process_pending.call_args.kwargs["rolling_breakers"]
+    assert breakers  # the real list main() built, not None/empty
+    assert all(hasattr(b, "can_open_new_trade") for b in breakers)
+
+
+def test_main_does_not_stamp_rebalance_month_when_a_buy_was_only_proposed():
+    # A tier-1 rebalance buy is now only PROPOSED, not executed. Stamping
+    # last_rebalance_month regardless means an unapproved proposal that expires
+    # at end of day silently skips the drift correction for a whole month,
+    # because should_rebalance_this_month won't fire again until the next one.
+    rebalance_state = {"last_rebalance_month": None}
+
+    def fake_rebalance(*args, **kwargs):
+        kwargs["pending_trades"]["SPY"] = {
+            "issue_number": 42, "side": "buy", "qty": 2.0, "price_at_proposal": 100.0,
+            "stop_price": None, "target_price": None, "tier": 1,
+            "proposed_date": kwargs["today"].isoformat(),
+        }
+        return [RebalanceOrder(symbol="SPY", side="buy", qty=2.0)]
+
+    patcher = patch("live_loop.run_tier1_rebalance", side_effect=fake_rebalance)
+    result, (mock_rebalance,) = _main_with_patches(
+        extra_patches=[patcher], rebalance_state=rebalance_state, should_rebalance=True,
+    )
+
+    assert result == 0
+    mock_rebalance.assert_called_once()
+    assert rebalance_state["last_rebalance_month"] is None  # retried next cycle, not skipped
+
+
+def test_main_stamps_rebalance_month_when_no_buy_is_left_pending():
+    # The complement: a rebalance that produced nothing to approve (no orders,
+    # or sells only -- sells still execute immediately) is genuinely done for
+    # the month and must stamp, or it would re-run every single cycle forever.
+    rebalance_state = {"last_rebalance_month": None}
+    patcher = patch("live_loop.run_tier1_rebalance",
+                    return_value=[RebalanceOrder(symbol="SPY", side="sell", qty=2.0)])
+    result, _ = _main_with_patches(
+        extra_patches=[patcher], rebalance_state=rebalance_state, should_rebalance=True,
+    )
+
+    assert result == 0
+    assert rebalance_state["last_rebalance_month"] == datetime.now(ET).strftime("%Y-%m")
+
+
 # --- tier-scoped equity/cash settlement (sub-project 2a/2b)
 
 def test_process_symbol_uses_tier_equity_for_sizing_when_tagged():
@@ -1706,3 +1858,144 @@ def test_process_pending_trades_one_symbols_api_failure_does_not_block_others():
     assert "AAPL" in pending_trades  # its own error left it untouched, retried next cycle
     assert "SERV" not in pending_trades  # rejected and closed despite AAPL's error
     mock_close.assert_called_once()
+
+
+def test_process_pending_trades_refuses_approved_buy_whose_tier_has_no_pool():
+    # Companion to process_symbol's tier=None refusal: a row persisted by an
+    # earlier build (or a hand-edited pending_trades.csv) can still carry a tier
+    # that isn't a tier_pools key. Debiting it raises KeyError *after* the order
+    # is submitted, so it must be caught in the re-validation chain and refused
+    # before any order goes out -- never submitted-then-crashed.
+    fake_bar = MagicMock(close=100.0)
+    pending_trades = {
+        "AAPL": {
+            "issue_number": 13, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": None, "proposed_date": "2024-01-08",
+        },
+    }
+    trading_client = MagicMock()
+    drawdown_breaker = MagicMock()
+    drawdown_breaker.can_open_new_trade.return_value = True
+    with patch("live_loop.trade_approval.get_owner_reaction", return_value="approved"), \
+         patch("live_loop.trade_approval.close_issue") as mock_close, \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]):
+        process_pending_trades(
+            pending_trades, today=date(2024, 1, 8), trading_client=trading_client,
+            drawdown_breaker=drawdown_breaker, github_token="tok", repo="me/graywind",
+            owner_username="me", tier_pools={1: 0.0, 2: 500.0, 3: 0.0}, open_positions={},
+            data_client=MagicMock(),
+        )
+    trading_client.submit_order.assert_not_called()
+    mock_close.assert_called_once()
+    assert "tier" in mock_close.call_args.args[1]
+    assert pending_trades == {}
+
+
+class _PoolsThatFailOnWrite(dict):
+    """tier_pools whose debit raises -- stands in for any post-submit_order
+    bookkeeping failure inside the approved-and-executing path."""
+
+    def __setitem__(self, key, value):
+        raise RuntimeError("tier pool write failed")
+
+
+def test_process_pending_trades_clears_row_when_bookkeeping_after_the_order_fails():
+    # Final-review CRITICAL fix (part 2): once submit_order() has succeeded the
+    # trade is irreversibly real, so the pending_trades row must be dropped
+    # immediately -- before the tier_pools debit, the open_positions update and
+    # close_issue. Otherwise ANY exception in that tail is swallowed by the
+    # outer per-symbol except, the row survives, and the next cycle re-validates
+    # clean and submits the SAME order again, every cycle, until the price
+    # drifts past tolerance or the day ends.
+    fake_bar = MagicMock(close=101.0)  # within 2% of the 100.0 proposal price
+    pending_trades = {
+        "AAPL": {
+            "issue_number": 14, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2024-01-08",
+        },
+    }
+    trading_client = MagicMock()
+    drawdown_breaker = MagicMock()
+    drawdown_breaker.can_open_new_trade.return_value = True
+    with patch("live_loop.trade_approval.get_owner_reaction", return_value="approved"), \
+         patch("live_loop.trade_approval.close_issue"), \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]):
+        process_pending_trades(
+            pending_trades, today=date(2024, 1, 8), trading_client=trading_client,
+            drawdown_breaker=drawdown_breaker, github_token="tok", repo="me/graywind",
+            owner_username="me", tier_pools=_PoolsThatFailOnWrite({1: 0.0, 2: 500.0, 3: 0.0}),
+            open_positions={}, data_client=MagicMock(),
+        )
+    trading_client.submit_order.assert_called_once()
+    assert pending_trades == {}  # never left behind to be resubmitted next cycle
+
+
+def test_process_pending_trades_force_removes_stale_row_when_close_issue_keeps_failing():
+    # A stuck row is a permanent, silent, per-symbol outage: duplicate-proposal
+    # suppression in process_symbol/run_tier1_rebalance is keyed on
+    # `symbol in pending_trades`, so a row that can never be deleted means that
+    # symbol can never be proposed again. Expiring a proposal is local
+    # bookkeeping -- it must not be gated on GitHub accepting the closing
+    # comment.
+    pending_trades = {
+        "AAPL": {
+            "issue_number": 15, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2024-01-05",
+        },
+    }
+    with patch("live_loop.trade_approval.close_issue",
+               side_effect=RuntimeError("issue deleted out-of-band (404)")) as mock_close, \
+         patch("live_loop.trade_approval.get_owner_reaction") as mock_reaction:
+        process_pending_trades(
+            pending_trades, today=date(2024, 1, 8), trading_client=MagicMock(),
+            drawdown_breaker=MagicMock(), github_token="tok", repo="me/graywind",
+            owner_username="me", tier_pools={1: 0.0, 2: 0.0, 3: 0.0}, open_positions={},
+            data_client=MagicMock(),
+        )
+    mock_close.assert_called_once()
+    mock_reaction.assert_not_called()
+    assert pending_trades == {}  # removed despite close_issue never succeeding
+
+
+def test_process_pending_trades_force_removes_a_row_that_cannot_even_be_date_checked():
+    # Backstop for the same property one level out: whatever raises while
+    # resolving a symbol, a row that is not from today must never survive the
+    # cycle. Here the row is malformed (no proposed_date at all, e.g. a
+    # hand-edited pending_trades.csv), so it raises before any branch can
+    # handle it -- without the purge in the outer except it would be stuck
+    # forever and disable AAPL permanently.
+    pending_trades = {
+        "AAPL": {
+            "issue_number": 16, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2,
+        },
+    }
+    with patch("live_loop.trade_approval.close_issue"), \
+         patch("live_loop.trade_approval.get_owner_reaction"):
+        process_pending_trades(
+            pending_trades, today=date(2024, 1, 8), trading_client=MagicMock(),
+            drawdown_breaker=MagicMock(), github_token="tok", repo="me/graywind",
+            owner_username="me", tier_pools={1: 0.0, 2: 0.0, 3: 0.0}, open_positions={},
+            data_client=MagicMock(),
+        )
+    assert pending_trades == {}
+
+
+def test_process_pending_trades_keeps_todays_row_after_a_transient_error():
+    # The flip side of the purge above: a row proposed TODAY that hit a
+    # transient error must still be retried next cycle, not thrown away.
+    pending_trades = {
+        "AAPL": {
+            "issue_number": 17, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2024-01-08",
+        },
+    }
+    with patch("live_loop.trade_approval.get_owner_reaction",
+               side_effect=RuntimeError("transient GitHub API error")):
+        process_pending_trades(
+            pending_trades, today=date(2024, 1, 8), trading_client=MagicMock(),
+            drawdown_breaker=MagicMock(), github_token="tok", repo="me/graywind",
+            owner_username="me", tier_pools={1: 0.0, 2: 0.0, 3: 0.0}, open_positions={},
+            data_client=MagicMock(),
+        )
+    assert "AAPL" in pending_trades

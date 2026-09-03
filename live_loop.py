@@ -314,7 +314,26 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 rsi=rsi, sma_fast=sma_fast, sma_slow=sma_slow,
             ))
         if decision.action == "buy":
-            if symbol in pending_trades:
+            if tier is None:
+                # Restores the semantics the pre-approval direct-execution code
+                # had via its own `tier is not None` guard (still visible on the
+                # sell path above). A symbol on WATCHLIST but missing from
+                # SYMBOL_TIER would otherwise be proposed with tier=None, which
+                # round-trips through pending_trades.csv as None and then
+                # KeyErrors on `tier_pools[None]` at execution time -- AFTER the
+                # order is submitted -- leaving the row in place to be
+                # resubmitted every cycle. It would also create a GitHub issue
+                # labelled literally "tier:None". tier_config.py calls
+                # SYMBOL_TIER "a living list", so refusing here is what keeps
+                # the next watchlist addition from arming that loop.
+                symbol_statuses[symbol] = {
+                    "position_open": False, "shares": None, "entry_price": None,
+                    "current_price": current_price, "action": "skipped",
+                    "reason": "symbol has no tier in SYMBOL_TIER; not proposing a buy",
+                }
+                print(f"{symbol}: buy signal but symbol has no tier in SYMBOL_TIER, "
+                      f"refusing to propose", file=sys.stderr)
+            elif symbol in pending_trades:
                 symbol_statuses[symbol] = {
                     "position_open": False, "shares": None, "entry_price": None,
                     "current_price": current_price, "action": "pending",
@@ -391,7 +410,6 @@ def run_tier1_rebalance(trading_client, data_client, tier_pools, pending_trades=
         return []
     pending_trades = {} if pending_trades is None else pending_trades
     if today is None:
-        from datetime import date as date_type
         today = datetime.now(ET).date()
 
     now = datetime.now(ET)
@@ -472,10 +490,21 @@ def process_pending_trades(pending_trades, today, trading_client, drawdown_break
         trade = pending_trades[symbol]
         try:
             if trade["proposed_date"] != today.isoformat():
-                trade_approval.close_issue(
-                    trade["issue_number"], "expired -- no decision by end of trading day.",
-                    github_token, repo, session=session,
-                )
+                # Expiring a proposal is local bookkeeping; it must not be gated
+                # on GitHub accepting the closing comment. If the issue was
+                # deleted or transferred out-of-band, close_issue 404s forever,
+                # and because duplicate-proposal suppression in process_symbol
+                # and run_tier1_rebalance is keyed on `symbol in
+                # pending_trades`, an undeletable row is a permanent, silent,
+                # per-symbol outage. Close best-effort, delete unconditionally.
+                try:
+                    trade_approval.close_issue(
+                        trade["issue_number"], "expired -- no decision by end of trading day.",
+                        github_token, repo, session=session,
+                    )
+                except Exception as exc:
+                    print(f"{symbol}: expiring proposal but failed to close GitHub issue "
+                          f"#{trade['issue_number']}: {exc}", file=sys.stderr)
                 del pending_trades[symbol]
                 continue
 
@@ -516,6 +545,14 @@ def process_pending_trades(pending_trades, today, trading_client, drawdown_break
                 failure_reason = "rolling drawdown breaker no longer allows new trades"
             elif symbol in open_positions:
                 failure_reason = "position already opened since this proposal was made"
+            elif trade["tier"] not in tier_pools:
+                # Companion to process_symbol's tier=None refusal: a row
+                # persisted by an earlier build (or a hand-edited
+                # pending_trades.csv) can still carry a tier that isn't a
+                # tier_pools key. Debiting it raises KeyError, and that raise
+                # would land AFTER submit_order -- so catch it here, before any
+                # order goes out, rather than submitting and then crashing.
+                failure_reason = f"tier {trade['tier']!r} has no capital pool; cannot settle this buy"
 
             if failure_reason is not None:
                 trade_approval.close_issue(
@@ -528,6 +565,18 @@ def process_pending_trades(pending_trades, today, trading_client, drawdown_break
                 symbol=symbol, qty=trade["qty"], side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
             )
             trading_client.submit_order(order)
+            # Dropped from pending_trades the instant the order is real, BEFORE
+            # the tier_pools debit, the open_positions/symbol_statuses updates
+            # and close_issue. Any exception in that tail is swallowed by the
+            # outer per-symbol except, so leaving the row in place would let the
+            # next cycle re-validate it clean and submit the SAME order again,
+            # every cycle, until the price drifts past
+            # PRICE_STALENESS_TOLERANCE or the day ends. `trade` is a local
+            # reference to the same dict, so everything below still reads the
+            # proposal's fields normally. Closing the GitHub issue is
+            # best-effort bookkeeping, not a gate on whether the trade is
+            # considered resolved -- same reasoning, applied one step earlier.
+            del pending_trades[symbol]
             tier_pools[trade["tier"]] -= trade["qty"] * current_price
             if trade["tier"] != 1:
                 open_positions[symbol] = {
@@ -543,17 +592,6 @@ def process_pending_trades(pending_trades, today, trading_client, drawdown_break
                 "timestamp": now.isoformat(), "symbol": symbol, "side": "buy",
                 "qty": trade["qty"], "price": current_price, "reason": "approved via GitHub issue",
             })
-            # The order is already submitted and pending_trades is already
-            # cleared at this point -- a tier-1 buy is deliberately never
-            # added to open_positions (see above), so if this del were
-            # deferred until after close_issue and close_issue then raised
-            # (transient GitHub error), the outer except would leave the row
-            # in place and the next cycle would re-validate clean and
-            # resubmit the SAME order, double-executing a tier-1 buy with no
-            # open_positions guard to catch it. Closing the GitHub issue is
-            # now best-effort bookkeeping, not a gate on whether the trade is
-            # considered resolved.
-            del pending_trades[symbol]
             print(f"{symbol}: executed approved buy for {trade['qty']} shares")
             try:
                 trade_approval.close_issue(
@@ -565,7 +603,24 @@ def process_pending_trades(pending_trades, today, trading_client, drawdown_break
                 print(f"{symbol}: order executed but failed to close GitHub issue "
                       f"#{trade['issue_number']}: {exc}", file=sys.stderr)
         except Exception as exc:
-            print(f"{symbol}: error resolving pending trade, will retry next cycle: {exc}", file=sys.stderr)
+            # Backstop for the property the expiry branch above already
+            # guarantees on its own path: whatever raises while resolving a
+            # symbol, a row that is not from TODAY must never survive the
+            # cycle. A row that can never be deleted is a permanent, silent,
+            # per-symbol outage, since duplicate-proposal suppression in
+            # process_symbol/run_tier1_rebalance is keyed on
+            # `symbol in pending_trades`. Today's rows are still retried next
+            # cycle as before -- only a stale one is force-dropped, and the
+            # drop itself does no I/O so it cannot raise again.
+            stale = pending_trades.get(symbol)
+            if stale is not None and stale.get("proposed_date") != today.isoformat():
+                del pending_trades[symbol]
+                print(f"{symbol}: error resolving pending trade proposed "
+                      f"{stale.get('proposed_date')!r}; force-dropping the stale row: {exc}",
+                      file=sys.stderr)
+            else:
+                print(f"{symbol}: error resolving pending trade, will retry next cycle: {exc}",
+                      file=sys.stderr)
 
 
 def main():
@@ -680,11 +735,28 @@ def main():
 
         if should_rebalance_this_month(rebalance_state["last_rebalance_month"], today):
             try:
-                run_tier1_rebalance(
+                orders = run_tier1_rebalance(
                     trading_client, data_client, tier_pools, pending_trades=pending_trades,
                     github_token=github_token, repo=repo, account_label=account_label, today=today,
                 )
-                rebalance_state["last_rebalance_month"] = today.strftime("%Y-%m")
+                # Rebalance buys are now only PROPOSED, not executed. Stamping
+                # the month regardless would mean an unapproved proposal that
+                # expires at end of day silently skips tier 1's drift
+                # correction for a WHOLE month, since should_rebalance_this_month
+                # won't fire again until the next one. Only stamp once no buy
+                # this rebalance wanted is still sitting unresolved in
+                # pending_trades -- which covers both a freshly-created proposal
+                # and one this call skipped because the symbol was already
+                # pending. Sells (risk-reducing, still immediate) and an empty
+                # order list stamp normally.
+                unresolved_buys = [
+                    o.symbol for o in orders if o.side == "buy" and o.symbol in pending_trades
+                ]
+                if unresolved_buys:
+                    print(f"tier1 rebalance: buy proposals awaiting approval "
+                          f"({', '.join(unresolved_buys)}); not marking this month done yet")
+                else:
+                    rebalance_state["last_rebalance_month"] = today.strftime("%Y-%m")
             except Exception as exc:
                 print(f"tier1 rebalance: error, will retry next cycle: {exc}", file=sys.stderr)
 
