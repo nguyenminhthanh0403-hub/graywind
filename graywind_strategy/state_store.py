@@ -42,6 +42,11 @@ DECISION_LOG_FIELDS = [
     "timestamp", "symbol", "action", "reason", "rsi", "sma_fast", "sma_slow",
     "vix", "sentiment", "days_to_earnings", "macro_breaches", "sector_gates",
 ]
+PENDING_TRADES_FILENAME = "pending_trades.csv"
+PENDING_TRADES_FIELDS = [
+    "symbol", "issue_number", "side", "qty", "price_at_proposal",
+    "stop_price", "target_price", "tier", "proposed_date",
+]
 
 
 def load_state(state_dir=DEFAULT_STATE_DIR):
@@ -197,3 +202,41 @@ def append_decision_log(rows, state_dir=DEFAULT_STATE_DIR):
         if not file_exists:
             writer.writeheader()
         writer.writerows(rows)
+
+
+def load_pending_trades(state_dir=DEFAULT_STATE_DIR):
+    pending_trades = {}
+    path = os.path.join(state_dir, PENDING_TRADES_FILENAME)
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                pending_trades[row["symbol"]] = {
+                    "issue_number": int(row["issue_number"]),
+                    "side": row["side"],
+                    "qty": float(row["qty"]),
+                    "price_at_proposal": float(row["price_at_proposal"]),
+                    "stop_price": float(row["stop_price"]) if row["stop_price"] else None,
+                    "target_price": float(row["target_price"]) if row["target_price"] else None,
+                    "tier": int(row["tier"]) if row["tier"] else None,
+                    "proposed_date": row["proposed_date"],
+                }
+    return pending_trades
+
+
+def save_pending_trades(pending_trades, state_dir=DEFAULT_STATE_DIR):
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, PENDING_TRADES_FILENAME), "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=PENDING_TRADES_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        for symbol, trade in pending_trades.items():
+            writer.writerow({
+                "symbol": symbol,
+                "issue_number": trade["issue_number"],
+                "side": trade["side"],
+                "qty": trade["qty"],
+                "price_at_proposal": trade["price_at_proposal"],
+                "stop_price": trade["stop_price"] if trade["stop_price"] is not None else "",
+                "target_price": trade["target_price"] if trade["target_price"] is not None else "",
+                "tier": trade["tier"] if trade["tier"] is not None else "",
+                "proposed_date": trade["proposed_date"],
+            })

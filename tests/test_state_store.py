@@ -6,7 +6,7 @@ from datetime import date
 from graywind_strategy.state_store import (
     load_state, save_state, load_tier_pools, save_tier_pools,
     load_rebalance_state, save_rebalance_state, append_decision_log,
-    load_equity_history, save_equity_history,
+    load_equity_history, save_equity_history, load_pending_trades, save_pending_trades,
 )
 
 
@@ -269,3 +269,42 @@ def test_append_decision_log_is_a_noop_on_empty_rows(tmp_path):
     state_dir = str(tmp_path)
     append_decision_log([], state_dir=state_dir)
     assert not os.path.exists(os.path.join(state_dir, "decision_log.csv"))
+
+
+def test_load_pending_trades_returns_empty_dict_when_no_file_exists(tmp_path):
+    assert load_pending_trades(state_dir=str(tmp_path / "nonexistent")) == {}
+
+
+def test_save_then_load_round_trips_pending_trades(tmp_path):
+    state_dir = str(tmp_path)
+    pending_trades = {
+        "AAPL": {
+            "issue_number": 42, "side": "buy", "qty": 3.0, "price_at_proposal": 190.5,
+            "stop_price": 185.0, "target_price": 200.0, "tier": 2, "proposed_date": "2026-08-26",
+        },
+        "SPY": {
+            "issue_number": 43, "side": "buy", "qty": 1.0, "price_at_proposal": 550.0,
+            "stop_price": None, "target_price": None, "tier": 1, "proposed_date": "2026-08-26",
+        },
+    }
+    save_pending_trades(pending_trades, state_dir=state_dir)
+    loaded = load_pending_trades(state_dir=state_dir)
+    assert loaded == pending_trades
+
+
+def test_save_pending_trades_creates_state_dir_if_missing(tmp_path):
+    state_dir = str(tmp_path / "new_dir")
+    save_pending_trades({}, state_dir=state_dir)
+    assert os.path.exists(os.path.join(state_dir, "pending_trades.csv"))
+
+
+def test_save_pending_trades_overwrites_previous_contents(tmp_path):
+    state_dir = str(tmp_path)
+    save_pending_trades({
+        "AAPL": {
+            "issue_number": 1, "side": "buy", "qty": 1.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2026-08-25",
+        },
+    }, state_dir=state_dir)
+    save_pending_trades({}, state_dir=state_dir)
+    assert load_pending_trades(state_dir=state_dir) == {}
