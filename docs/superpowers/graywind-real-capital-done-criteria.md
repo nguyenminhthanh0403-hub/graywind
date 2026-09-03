@@ -21,9 +21,26 @@ These are the judgment calls the audit refused to invent. They are now decided:
 | Question | Decision |
 |---|---|
 | Real capital at Phase 3 start | **$500** |
+| Real capital scale-up ceiling (added 2026-09-03) | **$1,000** — only after the $500 tranche meets the advance bar below, not before |
 | Kill condition | **Graywind loses to SPY buy-and-hold over the burn-in window** |
 | Phase-3 advance bar | **Deferred** until ≥20 real trades exist, then set from real data |
 | Goal | Positive expected return in the **3–10%** band with bounded drawdown |
+
+### On scaling beyond $500
+
+**Decided 2026-09-03:** the real-capital ceiling is **$1,000**, to be scaled up to
+*from* the $500 first tranche only **after that $500 tranche proves itself** — i.e. only
+after the still-deferred Phase-3 advance bar above is both set and met using real data
+from the $500 tranche. $1,000 is not a second tranche size to jump to independently; it
+is the ceiling the $500 tranche is allowed to grow into once it has earned that with real
+trades, not paper ones. Until the advance bar is set and met, real capital stays at $500
+and this figure is aspirational only.
+
+At $1,000, both the tier-2 pool ($200) and tier-3 pool ($100) remain under both
+`position_sizing.py` thresholds (`low_capital_threshold=$5000`,
+`small_account_threshold=$2000`) — same sizing regime as $500, just twice the absolute
+dollars. See `docs/superpowers/graywind-tier1-pool-credit-timing-fix-handoff.md`'s sibling
+handoff (tactical-universe diversification) for the concrete per-symbol math at this size.
 
 ### On the $500 figure
 
@@ -178,7 +195,9 @@ sustained `MacroDataUnavailable` closes it.
 - It does not authorize real-capital wiring. No real-money keys exist in this repo today
   and none should be added until the advance bar above is written and met.
 - It does not set the advance bar. That is a separate, required decision.
-- It does not extend to sizing beyond the first $500 tranche. Scaling is its own decision.
+- It does not authorize scaling past $500 today. The $1,000 ceiling (added 2026-09-03) is
+  a target, not a green light — it applies only once the $500 tranche has met the advance
+  bar above using real trade data.
 
 ## Related
 
