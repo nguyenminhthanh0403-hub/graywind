@@ -1306,26 +1306,53 @@ def test_run_tier1_rebalance_returns_empty_when_no_tier1_symbols():
     assert orders == []
 
 
-def test_run_tier1_rebalance_submits_orders_and_updates_tier_pool_cash():
+def test_run_tier1_rebalance_proposes_buy_instead_of_executing():
     fake_bar = MagicMock(close=100.0)
     trading_client = MagicMock()
     trading_client.get_all_positions.return_value = [MagicMock(symbol="VTI", qty="5")]
     tier_pools = {1: 200.0, 2: 0.0, 3: 0.0}
+    pending_trades = {}
     with patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"VTI": 1.0}, clear=True), \
-         patch("live_loop.fetch_bars", return_value=[fake_bar]):
-        orders = run_tier1_rebalance(trading_client, MagicMock(), tier_pools)
-    # tier1_equity = 200.0 cash + 5.0 held * 100.0 price = 700.0
-    # target_value = 700.0 * 1.0 = 700.0; current_value = 5.0 * 100.0 = 500.0
-    # drift = (500.0 - 700.0) / 700.0 =~ -0.286 < -0.05 -> buy (700-500)/100 = 2.0 shares
+         patch("live_loop.fetch_bars", return_value=[fake_bar]), \
+         patch("live_loop.trade_approval.propose_trade", return_value=201) as mock_propose:
+        orders = run_tier1_rebalance(
+            trading_client, MagicMock(), tier_pools, pending_trades=pending_trades,
+            github_token="tok", repo="me/graywind", account_label="100k", today=date(2026, 8, 26),
+        )
+    # Same underlying drift math as before this task -- see the original test's comment:
+    # tier1_equity=700.0, target=700.0, current=500.0, drift=-0.286 -> buy 2.0 shares.
     assert len(orders) == 1
     assert orders[0].symbol == "VTI"
     assert orders[0].side == "buy"
     assert orders[0].qty == 2.0
+    trading_client.submit_order.assert_not_called()
+    mock_propose.assert_called_once_with(
+        symbol="VTI", side="buy", qty=2.0, price=100.0, tier=1, account_label="100k",
+        reasoning="tier-1 monthly drift rebalance", github_token="tok", repo="me/graywind",
+        session=requests,
+    )
+    assert tier_pools[1] == 200.0  # unchanged -- only execution (Task 5) touches this
+    assert pending_trades["VTI"] == {
+        "issue_number": 201, "side": "buy", "qty": 2.0, "price_at_proposal": 100.0,
+        "stop_price": None, "target_price": None, "tier": 1, "proposed_date": "2026-08-26",
+    }
+
+
+def test_run_tier1_rebalance_sell_still_executes_immediately():
+    fake_bar = MagicMock(close=100.0)
+    trading_client = MagicMock()
+    trading_client.get_all_positions.return_value = [MagicMock(symbol="VTI", qty="7")]
+    tier_pools = {1: 0.0, 2: 0.0, 3: 0.0}
+    with patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"VTI": 0.6}, clear=True), \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]), \
+         patch("live_loop.trade_approval.propose_trade") as mock_propose:
+        # tier1_equity = 0.0 + 7*100 = 700.0; target = 700*0.6 = 420.0; current = 700.0;
+        # drift = (700-420)/700 = 0.4 > 0.05 -> sell (700-420)/100 = 2.8 shares.
+        orders = run_tier1_rebalance(trading_client, MagicMock(), tier_pools)
+    assert orders[0].side == "sell"
     trading_client.submit_order.assert_called_once()
-    submitted = trading_client.submit_order.call_args[0][0]
-    assert submitted.symbol == "VTI"
-    assert submitted.side == OrderSide.BUY
-    assert tier_pools[1] == 0.0  # 200.0 - 2.0 * 100.0
+    mock_propose.assert_not_called()
+    assert tier_pools[1] == 280.0  # 0.0 + 2.8 * 100.0 -- sell still settles immediately
 
 
 def test_run_tier1_rebalance_skips_symbol_with_no_recent_bars():

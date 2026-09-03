@@ -375,15 +375,23 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         print(f"{symbol}: already holding {position['shares']} shares, skipping entry evaluation")
 
 
-def run_tier1_rebalance(trading_client, data_client, tier_pools):
+def run_tier1_rebalance(trading_client, data_client, tier_pools, pending_trades=None,
+                         github_token=None, repo=None, account_label=None, today=None,
+                         session=requests):
     """I/O wrapper around tier1_rebalance.compute_rebalance_orders(): fetches
     each tier-1 symbol's latest bar and Alpaca's real current holdings,
-    computes the rebalance orders, submits them, and updates tier_pools[1]
-    in place to reflect the fills. No-ops entirely (zero I/O) when
-    TIER1_SYMBOL_WEIGHTS is empty -- see tier_config.py.
+    computes the rebalance orders, and settles them -- sells execute
+    immediately (risk-reducing, stays automatic); buys are proposed via a
+    GitHub issue instead of submitted directly (docs/superpowers/specs/
+    2026-08-26-graywind-trade-approval-advisor-design.md). No-ops entirely
+    (zero I/O) when TIER1_SYMBOL_WEIGHTS is empty -- see tier_config.py.
     """
     if not TIER1_SYMBOL_WEIGHTS:
         return []
+    pending_trades = {} if pending_trades is None else pending_trades
+    if today is None:
+        from datetime import date as date_type
+        today = datetime.now(ET).date()
 
     now = datetime.now(ET)
     current_prices = {}
@@ -403,15 +411,30 @@ def run_tier1_rebalance(trading_client, data_client, tier_pools):
         current_prices=current_prices, target_weights=TIER1_SYMBOL_WEIGHTS,
     )
     for order in orders:
+        if order.side == "buy":
+            if order.symbol in pending_trades:
+                print(f"{order.symbol}: already has a pending trade proposal, skipping rebalance buy")
+                continue
+            issue_number = trade_approval.propose_trade(
+                symbol=order.symbol, side="buy", qty=order.qty, price=current_prices[order.symbol],
+                tier=1, account_label=account_label, reasoning="tier-1 monthly drift rebalance",
+                github_token=github_token, repo=repo, session=session,
+            )
+            pending_trades[order.symbol] = {
+                "issue_number": issue_number, "side": "buy", "qty": order.qty,
+                "price_at_proposal": current_prices[order.symbol], "stop_price": None,
+                "target_price": None, "tier": 1, "proposed_date": today.isoformat(),
+            }
+            print(f"{order.symbol}: proposed tier-1 rebalance buy for {order.qty} shares (issue #{issue_number})")
+            continue
         market_order = MarketOrderRequest(
             symbol=order.symbol, qty=order.qty,
-            side=OrderSide.BUY if order.side == "buy" else OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
+            side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
         )
         trading_client.submit_order(market_order)
         notional = order.qty * current_prices[order.symbol]
-        tier_pools[1] += notional if order.side == "sell" else -notional
-        print(f"{order.symbol}: submitted tier-1 rebalance {order.side} for {order.qty} shares")
+        tier_pools[1] += notional
+        print(f"{order.symbol}: submitted tier-1 rebalance sell for {order.qty} shares")
     return orders
 
 
