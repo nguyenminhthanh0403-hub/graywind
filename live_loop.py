@@ -50,6 +50,7 @@ from graywind_strategy.dashboard_export import write_cycle_export, log_news_deba
 from graywind_strategy.state_store import (
     append_decision_log, load_state, save_state, load_tier_pools, save_tier_pools,
     load_rebalance_state, save_rebalance_state, load_equity_history, save_equity_history,
+    load_pending_trades, save_pending_trades,
 )
 from graywind_strategy.tier_config import SYMBOL_TIER, TIER1_SYMBOL_WEIGHTS
 from graywind_strategy.tier1_rebalance import compute_rebalance_orders, should_rebalance_this_month
@@ -438,6 +439,123 @@ def run_tier1_rebalance(trading_client, data_client, tier_pools, pending_trades=
     return orders
 
 
+PRICE_STALENESS_TOLERANCE = 0.02
+
+
+def process_pending_trades(pending_trades, today, trading_client, drawdown_breaker,
+                            github_token, repo, owner_username, tier_pools, open_positions,
+                            data_client, cycle_trades=None, symbol_statuses=None, session=requests):
+    """Resolves every open trade-approval proposal once per cycle: expires a
+    stale (not-today) proposal, closes a rejected one, executes an approved
+    one only after re-validating price/drawdown/position-not-already-open
+    against fresh current state (time has passed since the proposal was
+    created). One symbol's API failure must not block resolving the others
+    this cycle -- same fail-isolation convention as the WATCHLIST loop in
+    main().
+    """
+    if cycle_trades is None:
+        cycle_trades = []
+    if symbol_statuses is None:
+        symbol_statuses = {}
+
+    for symbol in list(pending_trades.keys()):
+        trade = pending_trades[symbol]
+        try:
+            if trade["proposed_date"] != today.isoformat():
+                trade_approval.close_issue(
+                    trade["issue_number"], "expired -- no decision by end of trading day.",
+                    github_token, repo, session=session,
+                )
+                del pending_trades[symbol]
+                continue
+
+            try:
+                decision = trade_approval.get_owner_reaction(
+                    trade["issue_number"], owner_username, github_token, repo, session=session,
+                )
+            except trade_approval.IssueNotFound:
+                del pending_trades[symbol]
+                continue
+
+            if decision == "rejected":
+                trade_approval.close_issue(
+                    trade["issue_number"], "rejected.", github_token, repo, session=session,
+                )
+                del pending_trades[symbol]
+                continue
+
+            if decision != "approved":
+                continue  # still waiting, leave it open
+
+            now = datetime.now(ET)
+            bars = fetch_bars(data_client, symbol, now - SIGNAL_LOOKBACK, now)
+            if not bars:
+                continue  # can't re-validate without a current price -- try again next cycle
+            current_price = bars[-1].close
+            price_drift = abs(current_price - trade["price_at_proposal"]) / trade["price_at_proposal"]
+
+            failure_reason = None
+            if price_drift > PRICE_STALENESS_TOLERANCE:
+                failure_reason = (
+                    f"price moved {price_drift:.1%} since proposal, "
+                    f"exceeding {PRICE_STALENESS_TOLERANCE:.0%} tolerance"
+                )
+            elif not drawdown_breaker.can_open_new_trade():
+                failure_reason = "drawdown breaker no longer allows new trades"
+            elif symbol in open_positions:
+                failure_reason = "position already opened since this proposal was made"
+
+            if failure_reason is not None:
+                trade_approval.close_issue(
+                    trade["issue_number"], f"not executed: {failure_reason}.", github_token, repo, session=session,
+                )
+                del pending_trades[symbol]
+                continue
+
+            order = MarketOrderRequest(
+                symbol=symbol, qty=trade["qty"], side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
+            )
+            trading_client.submit_order(order)
+            tier_pools[trade["tier"]] -= trade["qty"] * current_price
+            if trade["tier"] != 1:
+                open_positions[symbol] = {
+                    "entry_price": current_price, "shares": trade["qty"],
+                    "stop": trade["stop_price"], "target": trade["target_price"],
+                    "opened_date": today.isoformat(),
+                }
+                symbol_statuses[symbol] = {
+                    "position_open": True, "shares": trade["qty"], "entry_price": current_price,
+                    "current_price": current_price, "action": "buy", "reason": "approved via GitHub issue",
+                }
+            cycle_trades.append({
+                "timestamp": now.isoformat(), "symbol": symbol, "side": "buy",
+                "qty": trade["qty"], "price": current_price, "reason": "approved via GitHub issue",
+            })
+            # The order is already submitted and pending_trades is already
+            # cleared at this point -- a tier-1 buy is deliberately never
+            # added to open_positions (see above), so if this del were
+            # deferred until after close_issue and close_issue then raised
+            # (transient GitHub error), the outer except would leave the row
+            # in place and the next cycle would re-validate clean and
+            # resubmit the SAME order, double-executing a tier-1 buy with no
+            # open_positions guard to catch it. Closing the GitHub issue is
+            # now best-effort bookkeeping, not a gate on whether the trade is
+            # considered resolved.
+            del pending_trades[symbol]
+            print(f"{symbol}: executed approved buy for {trade['qty']} shares")
+            try:
+                trade_approval.close_issue(
+                    trade["issue_number"],
+                    f"approved and executed: bought {trade['qty']} shares at ~{current_price}.",
+                    github_token, repo, session=session,
+                )
+            except Exception as exc:
+                print(f"{symbol}: order executed but failed to close GitHub issue "
+                      f"#{trade['issue_number']}: {exc}", file=sys.stderr)
+        except Exception as exc:
+            print(f"{symbol}: error resolving pending trade, will retry next cycle: {exc}", file=sys.stderr)
+
+
 def main():
     if not is_market_hours():
         print("outside market hours, exiting")
@@ -451,9 +569,13 @@ def main():
         print("ERROR: one or more required API keys are not set in the environment", file=sys.stderr)
         return 1
     deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
+    github_token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    owner_username = repo.split("/")[0] if repo else ""
 
     state_dir = os.environ.get("GRAYWIND_STATE_DIR", "state")
     dashboard_dir = os.environ.get("GRAYWIND_DASHBOARD_DIR", "dashboard-data")
+    account_label = "small" if state_dir == "state/small" else "100k"
 
     trading_client = TradingClient(api_key, api_secret, paper=True)
     data_client = StockHistoricalDataClient(api_key, api_secret)
@@ -478,6 +600,7 @@ def main():
     debate_cache = {}
     debate_rows = []
     state = load_state(state_dir=state_dir)
+    pending_trades = load_pending_trades(state_dir=state_dir)
     tier_pools = load_tier_pools(state_dir=state_dir)
     rebalance_state = load_rebalance_state(state_dir=state_dir)
     pdt_throttle = _restore_pdt_throttle(state)
@@ -519,6 +642,11 @@ def main():
         baseline_established = True
         drawdown_breaker.start_new_day(today, starting_equity)
         drawdown_breaker.update_equity(equity)
+        process_pending_trades(
+            pending_trades, today, trading_client, drawdown_breaker, github_token, repo,
+            owner_username, tier_pools, open_positions, data_client,
+            cycle_trades=cycle_trades, symbol_statuses=symbol_statuses,
+        )
         # Guarded exactly as backtester.py does: record_equity rejects
         # non-positive equity, and this sits above the WATCHLIST loop with no
         # `except` between it and the cycle body. An unguarded raise on a wiped-out
@@ -531,7 +659,10 @@ def main():
 
         if should_rebalance_this_month(rebalance_state["last_rebalance_month"], today):
             try:
-                run_tier1_rebalance(trading_client, data_client, tier_pools)
+                run_tier1_rebalance(
+                    trading_client, data_client, tier_pools, pending_trades=pending_trades,
+                    github_token=github_token, repo=repo, account_label=account_label, today=today,
+                )
                 rebalance_state["last_rebalance_month"] = today.strftime("%Y-%m")
             except Exception as exc:
                 print(f"tier1 rebalance: error, will retry next cycle: {exc}", file=sys.stderr)
@@ -572,6 +703,8 @@ def main():
                     rsi=latest["rsi"], sma_fast=latest["sma_fast"], sma_slow=latest["sma_slow"],
                     decision_rows=decision_rows,
                     llm_client=llm_client, debate_cache=debate_cache, debate_rows=debate_rows,
+                    pending_trades=pending_trades, github_token=github_token, repo=repo,
+                    account_label=account_label,
                 )
             except Exception as exc:
                 print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)
@@ -595,6 +728,7 @@ def main():
         }, state_dir=state_dir)
         save_tier_pools(tier_pools, state_dir=state_dir)
         save_rebalance_state(rebalance_state, state_dir=state_dir)
+        save_pending_trades(pending_trades, state_dir=state_dir)
         # Persist the longest window's rows (a superset of the shorter ones).
         # If get_account() failed this cycle nothing was recorded, so this
         # writes back what was loaded -- idempotent, never a data loss.
