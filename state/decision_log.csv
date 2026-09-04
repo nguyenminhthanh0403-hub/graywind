@@ -11,3 +11,4 @@ timestamp,symbol,action,reason,rsi,sma_fast,sma_slow,vix,sentiment,days_to_earni
 2026-09-03T12:57:35.337194-04:00,SERV,hold,no buy signal,46.69942021103142,4.8325,4.8485000000000005,,,,,
 2026-09-03T15:42:13.145464-04:00,SERV,hold,no buy signal,59.22234158775599,4.853,4.858666666666666,,,,,
 2026-09-04T12:50:09.268180-04:00,SERV,hold,no buy signal,57.53825176851252,4.828,4.83,,,,,
+2026-09-04T15:26:23.089363-04:00,SERV,hold,position size rounds to zero shares,68.55207690369497,4.8885,4.849333333333333,14.32,0.0,none,0,[]
