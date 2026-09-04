@@ -1,0 +1,19 @@
+name = "graywind-cron-trigger"
+main = "src/index.js"
+compatibility_date = "2026-09-03"
+
+# Cloudflare Cron Triggers are core scheduled-compute infra, not a bolted-on
+# git feature the way GitHub Actions' `schedule:` event is -- this is the
+# actual fix for the cadence collapse documented in live-trading.yml's
+# top-of-file comment. Full 15-min cadence restored here since the
+# reliability problem was GitHub's own scheduler, not this Worker's.
+[triggers]
+crons = ["*/15 13-20 * * 1-5"]
+
+# Non-secret: which repo/workflow to dispatch. GITHUB_PAT is set separately
+# via `wrangler secret put GITHUB_PAT` -- never put a real token in this
+# file, it's committed to the repo.
+[vars]
+GITHUB_OWNER = "nguyenminhthanh0403-hub"
+GITHUB_REPO = "graywind"
+GITHUB_WORKFLOW_FILE = "live-trading.yml"

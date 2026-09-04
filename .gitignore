@@ -9,3 +9,4 @@ venv/
 backtests/
 .pytest_cache/
 dashboard_export/
+node_modules/

@@ -208,6 +208,8 @@ tbody tr:hover td { background: var(--bg-2); }
 .pnl-cell.pos { color: var(--pos); }
 .pnl-cell.neg { color: var(--neg); }
 #trade-scroll, #narrative-scroll { max-height: 380px; overflow-y: auto; }
+.ref-table td.ref-cell { white-space: normal; }
+.ref-table td.ref-cell.watch { color: var(--txt-2); }
 
 /* ---------- Accounts grid ---------- */
 .accounts-grid {
@@ -271,6 +273,8 @@ footer strong { color: var(--txt-2); font-weight: 500; }
       <span class="tagline">Rule-based intraday equities strategy</span>
     </div>
   </div>
+
+  <section id="symbol-reference" aria-labelledby="symbol-reference-head"></section>
 
   <main id="app" aria-busy="true" class="accounts-grid">
     <section id="account-100k" class="account-col"><div class="empty-state">Loading live data…</div></section>
@@ -547,6 +551,61 @@ function buildPerformanceReport(report) {
     </section>`;
 }
 
+// Mirrors graywind_strategy/tier_config.py's TIER_TARGET_WEIGHTS -- update both together.
+const TIER_TARGET_WEIGHTS = { 1: 0.70, 2: 0.20, 3: 0.10 };
+
+// status: "live" = currently traded (in tier_config.py / live_loop.py WATCHLIST today).
+// "candidate" = decided sector/tier per graywind-tactical-diversification-handoff.md,
+// NOT YET written to tier_config.py/sector_config.py -- still gated behind burn-in.
+const SYMBOL_REFERENCE_DATA = [
+  { symbol: "AAPL", sector: "tech", tier: "2", status: "live", what: "iPhone/hardware ecosystem + services", watch: "Single-product concentration (iPhone still >50% of revenue); China exposure cuts both ways (manufacturing + sales market)" },
+  { symbol: "NVDA", sector: "tech", tier: "2", status: "candidate", what: "AI/datacenter GPU supplier, dominant position", watch: "Priced for perfection — any AI-capex slowdown from hyperscaler customers hits it disproportionately; export-control risk on China sales" },
+  { symbol: "MSFT", sector: "tech", tier: "2", status: "candidate", what: "Cloud (Azure) + enterprise software + OpenAI stake", watch: "Azure capex is a bet on AI demand materializing; EU/US antitrust scrutiny" },
+  { symbol: "XOM", sector: "energy", tier: "2", status: "candidate", what: "Integrated oil major", watch: "Tracks crude price directly — no oil-specific gate exists in Graywind yet, so this trades blind to OPEC+ decisions" },
+  { symbol: "CVX", sector: "energy", tier: "2", status: "candidate", what: "Integrated oil major", watch: "Highly correlated with XOM — holding both isn't much more diversification than one twice" },
+  { symbol: "JNJ", sector: "health", tier: "2", status: "candidate", what: "Diversified pharma + medtech", watch: "Litigation overhang (talc lawsuits recurring headline risk); patent-cliff risk on individual drugs" },
+  { symbol: "UNH", sector: "health", tier: "2", status: "candidate", what: "Largest US health insurer", watch: "Sensitive to US healthcare policy/regulation headlines (Medicare Advantage rates, DOJ scrutiny); real earnings-day volatility" },
+  { symbol: "CEG", sector: "nuclear", tier: "2", status: "candidate", what: "Largest US nuclear power generator", watch: "Increasingly an AI-capex proxy via datacenter power-purchase-agreement headlines (Microsoft, Meta); regulatory approval risk on those deals" },
+  { symbol: "CCJ", sector: "nuclear", tier: "2", status: "candidate", what: "Largest western uranium miner/fuel supplier", watch: "Tracks uranium spot price, not electricity price — different driver than CEG; geopolitical supply risk (Kazakhstan/Russia)" },
+  { symbol: "RGTI", sector: "quantum", tier: "2", status: "candidate", what: "Rigetti Computing, superconducting-qubit hardware", watch: "Narrative/hype stock — moves on quantum-computing headlines unrelated to its own fundamentals; heavy retail-trader gap risk" },
+  { symbol: "SERV", sector: "robotics", tier: "3", status: "live", what: "Serve Robotics, AI sidewalk delivery", watch: "Small-cap, single-customer-concentrated (Uber Eats), pre-profitability — the deliberate \"gamble\" slot" },
+  { symbol: "QUBT", sector: "quantum", tier: "3", status: "candidate", what: "Quantum Computing Inc., photonic/quantum-inspired", watch: "Extreme volatility; dilution risk — small quantum names frequently raise capital via share offerings" },
+  { symbol: "SPY", sector: "—", tier: "1", status: "live", what: "S&P 500 index ETF, buy-and-hold core", watch: "Deliberately ungated (two tested VIX/macro exposure-scaling variants both washed on Calmar ratio, see graywind-edge-thesis.md)" },
+];
+
+function buildSymbolReference() {
+  const rows = SYMBOL_REFERENCE_DATA.map(r => {
+    const statusTag = r.status === "live"
+      ? `<span class="side-tag buy">Live</span>`
+      : `<span class="side-tag flat">Candidate</span>`;
+    const range = r.range52w ? `52-week range ${r.range52w}. ` : "";
+    const weight = r.symbol === "SPY" ? `${(TIER_TARGET_WEIGHTS[1] * 100).toFixed(0)}% of every account's capital. ` : "";
+    return `<tr>
+      <td class="symbol-tag">${r.symbol}</td>
+      <td>${statusTag}</td>
+      <td>${r.sector}</td>
+      <td>${r.tier}</td>
+      <td class="ref-cell">${r.what}</td>
+      <td class="ref-cell watch">${weight}${range}${r.watch}</td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <div class="section-head">
+      <h2 id="symbol-reference-head">Symbol Reference</h2>
+      <span class="section-note">Live = currently traded by Graywind. Candidate = decided sector/tier, not yet promoted (gated behind burn-in) — see graywind-tactical-diversification-handoff.md.</span>
+    </div>
+    <div class="table-wrap">
+      <table class="ref-table">
+        <thead><tr>
+          <th>Symbol</th><th>Status</th><th>Sector</th><th>Tier</th>
+          <th>What it is</th><th>What to watch</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
 function renderEquityChart(accountId, equityRows) {
   const svg = d3.select(`#chart-${accountId}`);
   const wrap = document.getElementById(`chart-wrap-${accountId}`);
@@ -680,6 +739,13 @@ async function loadAccount(accountId, label, dataDir, containerEl) {
 }
 
 function main() {
+  try {
+    document.getElementById("symbol-reference").innerHTML = buildSymbolReference();
+  } catch (err) {
+    // Must not block either account from loading below -- this section is
+    // purely additive and independent of both accounts' render paths.
+    console.error("Failed to render symbol reference table:", err);
+  }
   loadAccount("100k", "$100k Account", "dashboard-data", document.getElementById("account-100k"));
   loadAccount("small", "$2k Account", "dashboard-data/small", document.getElementById("account-small"));
 }
