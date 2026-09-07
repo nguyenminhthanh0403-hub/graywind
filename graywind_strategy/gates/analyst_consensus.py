@@ -82,17 +82,36 @@ def load_cached_multiplier(symbol, as_of_date, state_dir=DEFAULT_STATE_DIR):
 
 def save_cached_multiplier(symbol, as_of_date, recommendation_mean, target_mean, multiplier,
                             state_dir=DEFAULT_STATE_DIR):
+    """Overwrites the cached row for `symbol`, keeping at most one row per
+    symbol rather than appending forever. Safe because
+    evaluate_analyst_consensus_multiplier only ever looks up date.today()'s
+    row (see its own guard) -- a superseded date's row for this symbol is
+    never read again once replaced, so pruning to the latest row per symbol
+    preserves every lookup this cache actually serves while keeping
+    load_cached_multiplier's linear scan bounded by watchlist size instead
+    of growing with the number of cycles ever run.
+    """
     os.makedirs(state_dir, exist_ok=True)
     path = os.path.join(state_dir, CACHE_FILENAME)
-    write_header = not os.path.exists(path)
-    with open(path, "a", newline="") as f:
+    rows_by_symbol = {}
+    if os.path.exists(path):
+        try:
+            with open(path, newline="") as f:
+                for row in csv.DictReader(f):
+                    if row.get("symbol"):
+                        rows_by_symbol[row["symbol"]] = row
+        except Exception:
+            # File-level error -- start fresh rather than propagating; this
+            # is a best-effort cache, not authoritative state.
+            rows_by_symbol = {}
+    rows_by_symbol[symbol] = {
+        "symbol": symbol,
+        "date": as_of_date.isoformat(),
+        "recommendation_mean": recommendation_mean,
+        "target_mean": target_mean,
+        "multiplier": multiplier,
+    }
+    with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CACHE_FIELDS, lineterminator="\n")
-        if write_header:
-            writer.writeheader()
-        writer.writerow({
-            "symbol": symbol,
-            "date": as_of_date.isoformat(),
-            "recommendation_mean": recommendation_mean,
-            "target_mean": target_mean,
-            "multiplier": multiplier,
-        })
+        writer.writeheader()
+        writer.writerows(rows_by_symbol.values())

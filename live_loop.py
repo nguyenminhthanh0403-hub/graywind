@@ -45,9 +45,11 @@ from graywind_strategy.risk.drawdown_breaker import (
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 from graywind_strategy.gates.news_debate import evaluate_shadow_debate
+from graywind_strategy.gates.sentiment_gate import SentimentDataUnavailable, fetch_recent_headlines
 from graywind_strategy import trade_approval
 from graywind_strategy.dashboard_export import write_cycle_export, log_news_debate
 from graywind_strategy.state_store import (
+    DEFAULT_STATE_DIR,
     append_decision_log, load_state, save_state, load_tier_pools, save_tier_pools,
     load_rebalance_state, save_rebalance_state, load_equity_history, save_equity_history,
     load_pending_trades, save_pending_trades, load_tier1_holdings, save_tier1_holdings,
@@ -207,7 +209,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                     rsi=None, sma_fast=None, sma_slow=None, decision_rows=None,
                     llm_client=None, debate_cache=None, debate_rows=None,
                     pending_trades=None, github_token=None, repo=None,
-                    account_label=None, session=requests):
+                    account_label=None, session=requests, state_dir=DEFAULT_STATE_DIR):
     """Resolves one symbol's decision for this cycle: sell-on-stop/target
     exit if a held position crossed its stop or target, otherwise
     decide_trade() for a fresh entry -- but only if the symbol isn't
@@ -247,6 +249,10 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
     positioned AFTER decide_trade() and the resulting buy/hold handling
     (rather than before it) so that a slow or hung debate call can never
     delay real order submission -- see final-review Fix 3.
+
+    `state_dir` is forwarded to decide_trade()'s analyst-consensus cache so
+    the dual-account setup's two processes don't share one cache file --
+    see decide_trade()'s own docstring.
     """
     if cycle_trades is None:
         cycle_trades = []
@@ -282,8 +288,25 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         # bar-by-bar loop in backtester.py) -- catches a same-cycle drawdown
         # breach triggered by this exit before evaluating later symbols in
         # this same cycle, rather than waiting for the next cycle's single
-        # per-cycle update in main().
-        drawdown_breaker.update_equity(equity)
+        # per-cycle update in main(). Re-polls real account equity instead of
+        # reusing the `equity` snapshot taken before this cycle's WATCHLIST
+        # loop began: that snapshot predates this cycle's per-symbol bar
+        # fetches (and this exit itself), so it's stale by however long
+        # those took -- reusing it unchanged is numerically identical to
+        # what update_equity already saw once this cycle and cannot reflect
+        # anything that happened since. A fresh read picks up whatever
+        # changed in that window; whether Alpaca's own equity figure lags
+        # a same-moment fill isn't verified here. Bounded to at most one
+        # extra get_account() call per exit per cycle (WATCHLIST is small).
+        # Falls back to the stale snapshot on a transient API error -- the
+        # exit order has already been submitted by this point, so this
+        # recheck failing must not crash the cycle or skip the drawdown
+        # check entirely.
+        try:
+            fresh_equity = float(trading_client.get_account().equity)
+        except Exception:
+            fresh_equity = equity
+        drawdown_breaker.update_equity(fresh_equity)
         print(f"{symbol}: submitted sell for {position['shares']} shares (stop/target exit)")
         position = None  # eligible for a fresh same-cycle entry below, same as the backtester
 
@@ -299,6 +322,19 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         pending_today = sum(
             1 for p in open_positions.values() if p["opened_date"] == today.isoformat()
         )
+        # Pre-fetched once (only when shadow mode is active) and threaded into
+        # both decide_trade's sentiment gate and evaluate_shadow_debate below,
+        # instead of each independently fetching the same symbol/date's
+        # headlines -- see final-review Fix on duplicate News API traffic.
+        # None here (llm_client not set, or the fetch itself failed) falls
+        # back to each call fetching its own copy, same as before this
+        # existed.
+        shared_headlines = None
+        if llm_client is not None:
+            try:
+                shared_headlines = fetch_recent_headlines(news_client, symbol, as_of=today)
+            except SentimentDataUnavailable:
+                shared_headlines = None
         decision = decide_trade(
             symbol=symbol, signal=signal, as_of_date=today,
             current_price=current_price, account_equity=sizing_equity,
@@ -307,6 +343,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
             fred_api_key=fred_api_key, news_client=news_client,
             finnhub_api_key=finnhub_api_key,
             pending_same_day_trades=pending_today,
+            state_dir=state_dir, headlines=shared_headlines,
         )
         if decision_rows is not None:
             decision_rows.append(_decision_log_row(
@@ -378,6 +415,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 debate_result = evaluate_shadow_debate(
                     llm_client=llm_client, news_client=news_client, symbol=symbol,
                     as_of_date=today, cache=debate_cache if debate_cache is not None else {},
+                    headlines=shared_headlines,
                 )
                 if debate_rows is not None:
                     debate_rows.append({
@@ -763,9 +801,22 @@ def main():
         account = trading_client.get_account()
         equity = float(account.equity)
         starting_equity = state["starting_equity"] if state["day"] == today.isoformat() else equity
-        baseline_established = True
-        drawdown_breaker.start_new_day(today, starting_equity)
-        drawdown_breaker.update_equity(equity)
+        # A same-day starting_equity was already validated positive when it
+        # was first established; a FRESH one (new day) is this cycle's own
+        # equity reading and can be <= 0 (wiped-out or margin-negative
+        # account). start_new_day raises on a non-positive value, and doing
+        # that unconditionally would both abandon this cycle's stop/target
+        # exit checks below and, since baseline_established was already set
+        # True, persist the bad reading -- crashing identically every cycle
+        # for the rest of the day. Skip establishing a baseline instead, and
+        # force the breaker closed via trip() so a wiped-out account still
+        # fails closed rather than a fresh breaker's default-open state.
+        if starting_equity > 0:
+            baseline_established = True
+            drawdown_breaker.start_new_day(today, starting_equity)
+            drawdown_breaker.update_equity(equity)
+        else:
+            drawdown_breaker.trip()
         # Guarded exactly as backtester.py does: record_equity rejects
         # non-positive equity, and this sits above the WATCHLIST loop with no
         # `except` between it and the cycle body. An unguarded raise on a wiped-out
@@ -855,7 +906,7 @@ def main():
                     decision_rows=decision_rows,
                     llm_client=llm_client, debate_cache=debate_cache, debate_rows=debate_rows,
                     pending_trades=pending_trades, github_token=github_token, repo=repo,
-                    account_label=account_label,
+                    account_label=account_label, state_dir=state_dir,
                 )
             except Exception as exc:
                 print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)

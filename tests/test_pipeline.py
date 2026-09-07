@@ -9,6 +9,7 @@ from graywind_strategy.gates.macro_gate import MacroDataUnavailable
 from graywind_strategy.gates.sentiment_gate import SentimentDataUnavailable
 from graywind_strategy.gates.vix_gate import VixDataUnavailable
 from graywind_strategy.gate_result import GateResult
+from graywind_strategy.state_store import DEFAULT_STATE_DIR
 from graywind_strategy.pipeline import (
     evaluate_analyst_consensus_multiplier,
     evaluate_earnings_gate,
@@ -55,6 +56,20 @@ def test_evaluate_sentiment_gate_forwards_as_of_date_to_fetch():
     assert result.passed is True
     assert result.value == 0.0  # sentiment_score([]) == 0.0 (neutral, no headlines)
     mock_fetch.assert_called_once_with(news_client, "AAPL", as_of=date(2024, 1, 8))
+
+
+def test_evaluate_sentiment_gate_reuses_given_headlines_instead_of_fetching():
+    # news_debate.py's shadow-mode debate fetches the same symbol/date
+    # headlines this gate would otherwise fetch on its own -- when the
+    # caller already has them (live_loop.py's process_symbol), reusing them
+    # here avoids a duplicate News API call every cycle.
+    with patch("graywind_strategy.pipeline.fetch_recent_headlines") as mock_fetch:
+        result = evaluate_sentiment_gate(
+            news_client=object(), symbol="AAPL", as_of_date=date(2024, 1, 8),
+            headlines=["Great quarter"],
+        )
+    mock_fetch.assert_not_called()
+    assert result.passed is True
 
 
 def test_evaluate_earnings_gate_fails_closed_on_fetch_error():
@@ -482,6 +497,88 @@ def test_evaluate_analyst_consensus_multiplier_fetches_scores_and_caches_on_a_mi
     mock_fetch.assert_called_once_with("AAPL")
     mock_save.assert_called_once_with(
         "AAPL", date.today(), recommendation_mean=1.0, target_mean=100.0, multiplier=1.075,
+        state_dir=DEFAULT_STATE_DIR,
+    )
+
+
+def test_evaluate_analyst_consensus_multiplier_forwards_state_dir_to_the_cache():
+    # Every other piece of live_loop state (positions, tier pools, pending
+    # trades, equity history) is loaded/saved through the caller's own
+    # `state_dir` -- the dual-account setup uses "state/small" for the small
+    # account and "state" for the 100k account. This cache was the one
+    # exception, always landing in analyst_consensus.py's own hardcoded
+    # DEFAULT_STATE_DIR regardless of the caller, so both account processes
+    # read/write the SAME cache file concurrently with no locking.
+    with patch("graywind_strategy.pipeline.load_cached_multiplier", return_value=1.05) as mock_load:
+        result = evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date.today(), current_price=100.0, state_dir="state/small",
+        )
+    assert result == 1.05
+    mock_load.assert_called_once_with("AAPL", date.today(), state_dir="state/small")
+
+
+def test_evaluate_analyst_consensus_multiplier_forwards_state_dir_on_a_cache_miss():
+    with patch("graywind_strategy.pipeline.load_cached_multiplier", return_value=None), \
+         patch("graywind_strategy.pipeline.fetch_analyst_consensus",
+               return_value=(1.0, 100.0)), \
+         patch("graywind_strategy.pipeline.save_cached_multiplier") as mock_save:
+        evaluate_analyst_consensus_multiplier(
+            symbol="AAPL", as_of_date=date.today(), current_price=100.0, state_dir="state/small",
+        )
+    mock_save.assert_called_once_with(
+        "AAPL", date.today(), recommendation_mean=1.0, target_mean=100.0, multiplier=1.075,
+        state_dir="state/small",
+    )
+
+
+def test_decide_trade_forwards_headlines_to_the_sentiment_gate():
+    # Lets a caller that already fetched this symbol/date's headlines this
+    # cycle (live_loop.py's process_symbol, for the shadow-mode debate) pass
+    # them through instead of the sentiment gate fetching its own duplicate
+    # copy.
+    with patch("graywind_strategy.pipeline.evaluate_vix_gate", return_value=True), \
+         patch("graywind_strategy.pipeline.evaluate_sentiment_gate", return_value=True) as mock_sentiment, \
+         patch("graywind_strategy.pipeline.evaluate_earnings_gate", return_value=True), \
+         patch("graywind_strategy.pipeline.evaluate_macro_gate", return_value=True), \
+         patch("graywind_strategy.pipeline.evaluate_sector_gates", return_value=True):
+        decide_trade(
+            symbol="AAPL",
+            signal="buy",
+            as_of_date=date(2024, 1, 8),
+            current_price=100.0,
+            account_equity=10000.0,
+            pdt_throttle=PDTThrottle(),
+            position_sizer=PositionSizer(),
+            drawdown_breaker_ok=True,
+            fred_api_key="k",
+            news_client=object(),
+            finnhub_api_key="k",
+            headlines=["Great quarter"],
+        )
+    mock_sentiment.assert_called_once()
+    assert mock_sentiment.call_args.kwargs["headlines"] == ["Great quarter"]
+
+
+def test_decide_trade_forwards_state_dir_to_the_analyst_consensus_multiplier():
+    with _passing_gates(), \
+         patch("graywind_strategy.pipeline.evaluate_analyst_consensus_multiplier",
+               return_value=1.0) as mock_multiplier:
+        decide_trade(
+            symbol="AAPL",
+            signal="buy",
+            as_of_date=date.today(),
+            current_price=100.0,
+            account_equity=10000.0,
+            pdt_throttle=PDTThrottle(),
+            position_sizer=PositionSizer(),
+            drawdown_breaker_ok=True,
+            fred_api_key="k",
+            news_client=object(),
+            finnhub_api_key="k",
+            state_dir="state/small",
+        )
+    mock_multiplier.assert_called_once_with(
+        symbol="AAPL", as_of_date=date.today(), current_price=100.0, state_dir="state/small",
     )
 
 
@@ -521,7 +618,7 @@ def test_decide_trade_applies_analyst_consensus_multiplier_to_shares_on_a_live_d
     assert decision.action == "buy"
     assert decision.shares == round(base_shares * 1.2, 4)
     mock_multiplier.assert_called_once_with(
-        symbol="AAPL", as_of_date=date.today(), current_price=100.0
+        symbol="AAPL", as_of_date=date.today(), current_price=100.0, state_dir=DEFAULT_STATE_DIR,
     )
 
 

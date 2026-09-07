@@ -62,6 +62,14 @@ class DrawdownBreaker:
     def can_open_new_trade(self):
         return not self._tripped
 
+    def trip(self):
+        """Forces the breaker closed without requiring start_new_day to have
+        succeeded first -- for a caller that can't establish a valid
+        starting-of-day baseline this cycle (e.g. equity <= 0) and must fail
+        closed rather than a fresh instance's default-open state.
+        """
+        self._tripped = True
+
 
 class RollingDrawdownBreaker:
     def __init__(self, window_days, max_loss_fraction):

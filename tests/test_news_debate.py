@@ -240,6 +240,24 @@ def test_evaluate_shadow_debate_returns_vader_and_debate_fields():
     assert result["debate_reasoning"] == "Strong beat outweighs bear case"
 
 
+def test_evaluate_shadow_debate_reuses_given_headlines_instead_of_fetching():
+    # pipeline.py's evaluate_sentiment_gate already fetches this same
+    # symbol/date's headlines earlier in the same decide_trade() call --
+    # when the caller (live_loop.py's process_symbol) already has them,
+    # reusing them here avoids a duplicate News API call every cycle.
+    news_client = MagicMock()
+    llm_client = _fake_llm_client_for_debate(score=0.7, reasoning="Strong beat outweighs bear case")
+
+    result = evaluate_shadow_debate(
+        llm_client=llm_client, news_client=news_client, symbol="AAPL",
+        as_of_date=None, cache={}, headlines=["Great quarter beat"],
+    )
+
+    news_client.get_news.assert_not_called()
+    assert result["vader_score"] > 0.0
+    assert result["debate_score"] == 0.7
+
+
 def test_evaluate_shadow_debate_propagates_headline_fetch_failure():
     news_client = MagicMock()
     news_client.get_news.side_effect = Exception("network error")

@@ -28,6 +28,7 @@ from graywind_strategy.gates.macro_gate import (
     MacroDataUnavailable, count_macro_breaches, fetch_bullion_macro_snapshot,
 )
 from graywind_strategy.gates.sector_gates import evaluate_sector_gates
+from graywind_strategy.state_store import DEFAULT_STATE_DIR
 from graywind_strategy.risk.position_sizing import QTY_DECIMALS
 from graywind_strategy.gates.sentiment_gate import (
     SENTIMENT_THRESHOLD,
@@ -64,9 +65,16 @@ def evaluate_vix_gate(fred_api_key, as_of_date=None, threshold=VIX_THRESHOLD):
     return GateResult(passed=vix_gate(vix_value, threshold), value=vix_value)
 
 
-def evaluate_sentiment_gate(news_client, symbol, as_of_date=None, threshold=SENTIMENT_THRESHOLD):
+def evaluate_sentiment_gate(news_client, symbol, as_of_date=None, threshold=SENTIMENT_THRESHOLD,
+                             headlines=None):
+    # `headlines`, when given, is reused instead of fetched -- lets a caller
+    # that already fetched this same symbol/date's headlines this cycle
+    # (live_loop.py's process_symbol, for the shadow-mode debate) avoid a
+    # duplicate News API call. None (the default) preserves the original
+    # fetch-it-yourself behavior for every other caller.
     try:
-        headlines = fetch_recent_headlines(news_client, symbol, as_of=as_of_date)
+        if headlines is None:
+            headlines = fetch_recent_headlines(news_client, symbol, as_of=as_of_date)
     except SentimentDataUnavailable:
         return GateResult(passed=False, detail="SentimentDataUnavailable")
     score = sentiment_score(headlines)
@@ -96,7 +104,7 @@ def evaluate_macro_gate(as_of_date, session=requests, required_breaches=2):
     return GateResult(passed=breaches < required_breaches, value=breaches)
 
 
-def evaluate_analyst_consensus_multiplier(symbol, as_of_date, current_price):
+def evaluate_analyst_consensus_multiplier(symbol, as_of_date, current_price, state_dir=DEFAULT_STATE_DIR):
     # `as_of_date` is computed by live_loop.py as datetime.now(ET).date() (Eastern
     # Time), but this guard compares it against date.today() (process-local
     # timezone). Safe by construction in production: GitHub Actions runs in
@@ -111,7 +119,7 @@ def evaluate_analyst_consensus_multiplier(symbol, as_of_date, current_price):
         # that isn't live "today".
         return 1.0
 
-    cached = load_cached_multiplier(symbol, as_of_date)
+    cached = load_cached_multiplier(symbol, as_of_date, state_dir=state_dir)
     if cached is not None:
         return cached
 
@@ -125,6 +133,7 @@ def evaluate_analyst_consensus_multiplier(symbol, as_of_date, current_price):
         save_cached_multiplier(
             symbol, as_of_date,
             recommendation_mean=recommendation_mean, target_mean=target_mean, multiplier=multiplier,
+            state_dir=state_dir,
         )
     except Exception:
         # Best-effort cache write -- a cache-write failure (disk full,
@@ -140,7 +149,8 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
                   fred_api_key, news_client, finnhub_api_key,
                   pending_same_day_trades=0,
                   gates_always_pass=False,
-                  stop_pct=0.02, take_profit_pct=0.03):
+                  stop_pct=0.02, take_profit_pct=0.03,
+                  state_dir=DEFAULT_STATE_DIR, headlines=None):
     """Decide whether to buy, hold, or block a trade for `symbol` as of `as_of_date`.
 
     `gates_always_pass`, when True, skips all five signal-augmentation
@@ -174,6 +184,20 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
     truncated at whichever gate short-circuited the function. Stays empty
     when gates_always_pass=True or signal != "buy" (no gates were ever
     evaluated).
+
+    `state_dir` is forwarded to the analyst-consensus cache
+    (evaluate_analyst_consensus_multiplier) exactly like every other piece of
+    live_loop state -- without it, the dual-account setup's two processes
+    would read/write the SAME cache file (analyst_consensus.py's hardcoded
+    default) concurrently with no locking, unlike positions/tier
+    pools/pending trades/equity history, which are all correctly isolated
+    per account.
+
+    `headlines`, when given, is forwarded to the sentiment gate instead of
+    it fetching its own copy -- lets a caller that already fetched this same
+    symbol/date's headlines this cycle (live_loop.py's process_symbol, for
+    the shadow-mode debate) avoid a duplicate News API call. None (the
+    default) preserves the original fetch-it-yourself behavior.
     """
     if signal != "buy":
         return TradeDecision(action="hold", reason="no buy signal")
@@ -187,7 +211,9 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
         gate_readings.append(vix_result)
         if not vix_result:
             return TradeDecision(action="blocked", reason="vix_gate", gate_readings=gate_readings)
-        sentiment_result = evaluate_sentiment_gate(news_client=news_client, symbol=symbol, as_of_date=as_of_date)
+        sentiment_result = evaluate_sentiment_gate(
+            news_client=news_client, symbol=symbol, as_of_date=as_of_date, headlines=headlines,
+        )
         gate_readings.append(sentiment_result)
         if not sentiment_result:
             return TradeDecision(action="blocked", reason="sentiment_gate", gate_readings=gate_readings)
@@ -219,7 +245,8 @@ def decide_trade(symbol, signal, as_of_date, current_price, account_equity,
     target_price = position_sizer.take_profit_price(current_price, take_profit_pct)
     shares = position_sizer.shares_to_buy(account_equity, current_price, stop_price)
     shares = round(shares * evaluate_analyst_consensus_multiplier(
-        symbol=symbol, as_of_date=as_of_date, current_price=current_price), QTY_DECIMALS)
+        symbol=symbol, as_of_date=as_of_date, current_price=current_price, state_dir=state_dir,
+    ), QTY_DECIMALS)
     if shares <= 0:
         return TradeDecision(action="hold", reason="position size rounds to zero shares", gate_readings=gate_readings)
 

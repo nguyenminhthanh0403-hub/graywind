@@ -26,9 +26,10 @@ class PDTThrottle:
         `record_day_trade`-ed) trades alone can't see this -- two different
         symbols can each be opened while only 2 are realized, both later
         close same-day, and produce a real 4th-day-trade violation neither
-        individual check caught. Callers computing pending state (currently
-        just the backtester; the live loop should too) reserve a slot for
-        every such at-risk position by passing its count in here.
+        individual check caught. Both the backtester and the live loop
+        (live_loop.py's process_symbol, via decide_trade's
+        pending_same_day_trades) compute this and reserve a slot for every
+        such at-risk position by passing its count in here.
         """
         self._prune(as_of)
         return len(self._day_trade_dates) + pending_count < self.MAX_DAY_TRADES

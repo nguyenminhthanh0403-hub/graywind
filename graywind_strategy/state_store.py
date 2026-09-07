@@ -24,6 +24,7 @@ new file (as equity_history.csv does) unless a migration path is written.
 import csv
 import os
 import sys
+import tempfile
 from datetime import date
 
 DEFAULT_STATE_DIR = "state"
@@ -51,6 +52,31 @@ PENDING_TRADES_FIELDS = [
 ]
 
 
+def _atomic_write_csv(path, fieldnames, rows):
+    """Writes `rows` to `path` as a CSV via a temp file + os.replace, mirroring
+    the pattern already used by backtest_gate.py's _append_trial. A process
+    killed mid-write (cron timeout, OOM, SIGTERM) can otherwise leave a
+    truncated file in a plain open(path, "w") -- the load_* functions below
+    read these files on every cycle, and several of them raise on a
+    malformed row, so a truncated snapshot used to crash every cycle
+    thereafter. Writing to a sibling temp file first means the swap either
+    lands completely or not at all -- the original file is never touched
+    until the new content is fully written.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".state_store_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
+        os.replace(tmp_path, path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
 def load_state(state_dir=DEFAULT_STATE_DIR):
     state = {"day_trade_dates": [], "day": None, "starting_equity": None, "open_positions": {}}
 
@@ -65,15 +91,31 @@ def load_state(state_dir=DEFAULT_STATE_DIR):
 
     positions_path = os.path.join(state_dir, POSITIONS_FILENAME)
     if os.path.exists(positions_path):
-        with open(positions_path, newline="") as f:
-            for row in csv.DictReader(f):
-                state["open_positions"][row["symbol"]] = {
-                    "entry_price": float(row["entry_price"]),
-                    "shares": float(row["shares"]),
-                    "stop": float(row["stop"]),
-                    "target": float(row["target"]),
-                    "opened_date": row["opened_date"],
-                }
+        try:
+            positions = {}
+            with open(positions_path, newline="") as f:
+                for row in csv.DictReader(f):
+                    positions[row["symbol"]] = {
+                        "entry_price": float(row["entry_price"]),
+                        "shares": float(row["shares"]),
+                        "stop": float(row["stop"]),
+                        "target": float(row["target"]),
+                        "opened_date": row["opened_date"],
+                    }
+            state["open_positions"] = positions
+        except (ValueError, KeyError, TypeError) as exc:
+            # Degrades like load_equity_history rather than raising: this sits
+            # above live_loop's try/finally, so an unguarded raise would abort
+            # the whole cycle, including the stop/target exit checks. Falling
+            # back to {} is safe -- reconcile_positions() (live_loop.py) already
+            # treats a broker position missing from local state as "unmanaged,
+            # warn loudly" rather than fabricating one.
+            print(
+                f"positions at {positions_path} are unreadable ({exc}); continuing with no "
+                "locally tracked open positions -- reconcile_positions will flag any broker "
+                "position this drops as unmanaged rather than crashing the whole cycle",
+                file=sys.stderr,
+            )
 
     return state
 
@@ -81,58 +123,79 @@ def load_state(state_dir=DEFAULT_STATE_DIR):
 def save_state(state, state_dir=DEFAULT_STATE_DIR):
     os.makedirs(state_dir, exist_ok=True)
 
-    with open(os.path.join(state_dir, OPERATIONAL_FILENAME), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=OPERATIONAL_FIELDS, lineterminator="\n")
-        writer.writeheader()
-        writer.writerow({
+    _atomic_write_csv(
+        os.path.join(state_dir, OPERATIONAL_FILENAME), OPERATIONAL_FIELDS,
+        [{
             "day": state["day"] or "",
             "starting_equity": state["starting_equity"] if state["starting_equity"] is not None else "",
             "day_trade_dates": ";".join(state["day_trade_dates"]),
-        })
+        }],
+    )
 
-    with open(os.path.join(state_dir, POSITIONS_FILENAME), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=POSITIONS_FIELDS, lineterminator="\n")
-        writer.writeheader()
-        for symbol, position in state["open_positions"].items():
-            writer.writerow({"symbol": symbol, **position})
+    _atomic_write_csv(
+        os.path.join(state_dir, POSITIONS_FILENAME), POSITIONS_FIELDS,
+        [{"symbol": symbol, **position} for symbol, position in state["open_positions"].items()],
+    )
 
 
 def load_tier_pools(state_dir=DEFAULT_STATE_DIR):
-    tier_pools = {1: 0.0, 2: 0.0, 3: 0.0}
+    defaults = {1: 0.0, 2: 0.0, 3: 0.0}
     path = os.path.join(state_dir, TIER_POOLS_FILENAME)
     if os.path.exists(path):
-        with open(path, newline="") as f:
-            for row in csv.DictReader(f):
-                tier_pools[int(row["tier"])] = float(row["cash"])
-    return tier_pools
+        try:
+            tier_pools = dict(defaults)
+            with open(path, newline="") as f:
+                for row in csv.DictReader(f):
+                    tier_pools[int(row["tier"])] = float(row["cash"])
+            return tier_pools
+        except (ValueError, KeyError, TypeError) as exc:
+            # See load_state's positions handling above for why this degrades
+            # instead of raising. Zeroed tier pools is the same fallback a
+            # brand-new deploy starts from, not a novel state.
+            print(
+                f"tier pools at {path} are unreadable ({exc}); continuing with zeroed tier "
+                "pools rather than crashing the whole cycle", file=sys.stderr,
+            )
+    return dict(defaults)
 
 
 def save_tier_pools(tier_pools, state_dir=DEFAULT_STATE_DIR):
     os.makedirs(state_dir, exist_ok=True)
-    with open(os.path.join(state_dir, TIER_POOLS_FILENAME), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=TIER_POOLS_FIELDS, lineterminator="\n")
-        writer.writeheader()
-        for tier, cash in tier_pools.items():
-            writer.writerow({"tier": tier, "cash": cash})
+    _atomic_write_csv(
+        os.path.join(state_dir, TIER_POOLS_FILENAME), TIER_POOLS_FIELDS,
+        [{"tier": tier, "cash": cash} for tier, cash in tier_pools.items()],
+    )
 
 
 def load_tier1_holdings(state_dir=DEFAULT_STATE_DIR):
-    holdings = {}
     path = os.path.join(state_dir, TIER1_HOLDINGS_FILENAME)
     if os.path.exists(path):
-        with open(path, newline="") as f:
-            for row in csv.DictReader(f):
-                holdings[row["symbol"]] = float(row["qty"])
-    return holdings
+        try:
+            holdings = {}
+            with open(path, newline="") as f:
+                for row in csv.DictReader(f):
+                    holdings[row["symbol"]] = float(row["qty"])
+            return holdings
+        except (ValueError, KeyError, TypeError) as exc:
+            # See load_state's positions handling above for why this degrades
+            # instead of raising. run_tier1_rebalance (live_loop.py) treats a
+            # symbol missing from last_known_holdings as "not decreased since
+            # last observed" (defaults to its current qty), so this never
+            # fabricates a phantom credit -- it just re-establishes tracking
+            # from the next cycle's fresh broker read.
+            print(
+                f"tier1 holdings at {path} are unreadable ({exc}); continuing with no known "
+                "holdings rather than crashing the whole cycle", file=sys.stderr,
+            )
+    return {}
 
 
 def save_tier1_holdings(holdings, state_dir=DEFAULT_STATE_DIR):
     os.makedirs(state_dir, exist_ok=True)
-    with open(os.path.join(state_dir, TIER1_HOLDINGS_FILENAME), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=TIER1_HOLDINGS_FIELDS, lineterminator="\n")
-        writer.writeheader()
-        for symbol, qty in holdings.items():
-            writer.writerow({"symbol": symbol, "qty": qty})
+    _atomic_write_csv(
+        os.path.join(state_dir, TIER1_HOLDINGS_FILENAME), TIER1_HOLDINGS_FIELDS,
+        [{"symbol": symbol, "qty": qty} for symbol, qty in holdings.items()],
+    )
 
 
 def load_rebalance_state(state_dir=DEFAULT_STATE_DIR):
@@ -226,31 +289,43 @@ def append_decision_log(rows, state_dir=DEFAULT_STATE_DIR):
 
 
 def load_pending_trades(state_dir=DEFAULT_STATE_DIR):
-    pending_trades = {}
     path = os.path.join(state_dir, PENDING_TRADES_FILENAME)
     if os.path.exists(path):
-        with open(path, newline="") as f:
-            for row in csv.DictReader(f):
-                pending_trades[row["symbol"]] = {
-                    "issue_number": int(row["issue_number"]),
-                    "side": row["side"],
-                    "qty": float(row["qty"]),
-                    "price_at_proposal": float(row["price_at_proposal"]),
-                    "stop_price": float(row["stop_price"]) if row["stop_price"] else None,
-                    "target_price": float(row["target_price"]) if row["target_price"] else None,
-                    "tier": int(row["tier"]) if row["tier"] else None,
-                    "proposed_date": row["proposed_date"],
-                }
-    return pending_trades
+        try:
+            pending_trades = {}
+            with open(path, newline="") as f:
+                for row in csv.DictReader(f):
+                    pending_trades[row["symbol"]] = {
+                        "issue_number": int(row["issue_number"]),
+                        "side": row["side"],
+                        "qty": float(row["qty"]),
+                        "price_at_proposal": float(row["price_at_proposal"]),
+                        "stop_price": float(row["stop_price"]) if row["stop_price"] else None,
+                        "target_price": float(row["target_price"]) if row["target_price"] else None,
+                        "tier": int(row["tier"]) if row["tier"] else None,
+                        "proposed_date": row["proposed_date"],
+                    }
+            return pending_trades
+        except (ValueError, KeyError, TypeError) as exc:
+            # See load_state's positions handling above for why this degrades
+            # instead of raising. A proposal's GitHub issue still exists even
+            # if this local row is dropped -- worst case, process_symbol's
+            # `symbol in pending_trades` dedup misses it and a duplicate
+            # proposal issue gets opened next cycle, which is recoverable;
+            # crashing the whole cycle over stops going unchecked is not.
+            print(
+                f"pending trades at {path} are unreadable ({exc}); continuing with no locally "
+                "tracked proposals rather than crashing the whole cycle", file=sys.stderr,
+            )
+    return {}
 
 
 def save_pending_trades(pending_trades, state_dir=DEFAULT_STATE_DIR):
     os.makedirs(state_dir, exist_ok=True)
-    with open(os.path.join(state_dir, PENDING_TRADES_FILENAME), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=PENDING_TRADES_FIELDS, lineterminator="\n")
-        writer.writeheader()
-        for symbol, trade in pending_trades.items():
-            writer.writerow({
+    _atomic_write_csv(
+        os.path.join(state_dir, PENDING_TRADES_FILENAME), PENDING_TRADES_FIELDS,
+        [
+            {
                 "symbol": symbol,
                 "issue_number": trade["issue_number"],
                 "side": trade["side"],
@@ -260,4 +335,7 @@ def save_pending_trades(pending_trades, state_dir=DEFAULT_STATE_DIR):
                 "target_price": trade["target_price"] if trade["target_price"] is not None else "",
                 "tier": trade["tier"] if trade["tier"] is not None else "",
                 "proposed_date": trade["proposed_date"],
-            })
+            }
+            for symbol, trade in pending_trades.items()
+        ],
+    )

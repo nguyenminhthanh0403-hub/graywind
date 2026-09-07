@@ -56,6 +56,15 @@ def test_update_equity_raises_if_called_before_start_new_day():
         breaker.update_equity(9800)
 
 
+def test_trip_forces_can_open_new_trade_false_without_start_new_day():
+    # Used by live_loop.py when a cycle can't establish a valid
+    # starting-of-day baseline (equity <= 0) and must fail closed instead
+    # of a fresh breaker's default-open state.
+    breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
+    breaker.trip()
+    assert breaker.can_open_new_trade() is False
+
+
 # --- RollingDrawdownBreaker -------------------------------------------------
 # Cold-start permissiveness is the safety-critical property here: this breaker
 # ships into a live cron whose state dir has no equity history at all, and a

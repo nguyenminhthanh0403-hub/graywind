@@ -159,7 +159,7 @@ def judge_verdict(llm_client, headlines, bull_argument, bear_argument):
     return Verdict(score=float(result["score"]), reasoning=result["reasoning"])
 
 
-def evaluate_shadow_debate(llm_client, news_client, symbol, as_of_date, cache):
+def evaluate_shadow_debate(llm_client, news_client, symbol, as_of_date, cache, headlines=None):
     """Fetches this symbol's recent headlines, scores them with VADER (same
     scoring the live sentiment gate uses), and runs the bull/bear/judge
     debate on the same headline set -- returning both side by side so the
@@ -190,8 +190,15 @@ def evaluate_shadow_debate(llm_client, news_client, symbol, as_of_date, cache):
     record of the live gate's decision, especially on a cycle where an
     earlier gate (e.g. vix) short-circuited decide_trade() before its own
     sentiment gate ever ran.
+
+    `headlines`, when given, is reused instead of fetched -- lets a caller
+    that already fetched this same symbol/date's headlines this cycle
+    (pipeline.py's decide_trade, via its own sentiment gate) avoid a
+    duplicate News API call. None (the default) preserves the original
+    fetch-it-yourself behavior described above.
     """
-    headlines = fetch_recent_headlines(news_client, symbol, as_of=as_of_date)
+    if headlines is None:
+        headlines = fetch_recent_headlines(news_client, symbol, as_of=as_of_date)
     vader_score = sentiment_score(headlines)
     vader_gate_result = sentiment_gate(vader_score)
 

@@ -1,3 +1,4 @@
+import csv
 from datetime import date
 from unittest.mock import MagicMock
 
@@ -190,6 +191,31 @@ def test_save_appends_rather_than_overwrites_other_symbols(tmp_path):
     )
     assert load_cached_multiplier("AAPL", date(2026, 8, 18), state_dir=str(tmp_path)) == 1.075
     assert load_cached_multiplier("MSFT", date(2026, 8, 18), state_dir=str(tmp_path)) == 1.1
+
+
+def test_save_cached_multiplier_prunes_the_prior_dated_row_for_the_same_symbol(tmp_path):
+    # evaluate_analyst_consensus_multiplier only ever looks up date.today()'s
+    # row for a symbol (see its own guard) -- a superseded date's row is
+    # never read again once a newer one is written, so the cache should keep
+    # at most one row per symbol instead of appending forever. Without this,
+    # load_cached_multiplier's linear scan re-reads an ever-growing,
+    # never-pruned file just to find today's 1-2 rows for the watchlist.
+    state_dir = str(tmp_path)
+    save_cached_multiplier(
+        "AAPL", date(2026, 8, 18),
+        recommendation_mean=2.1, target_mean=210.5, multiplier=1.075,
+        state_dir=state_dir,
+    )
+    save_cached_multiplier(
+        "AAPL", date(2026, 8, 19),
+        recommendation_mean=1.9, target_mean=215.0, multiplier=1.05,
+        state_dir=state_dir,
+    )
+    with open(tmp_path / "analyst_consensus.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [r["symbol"] for r in rows] == ["AAPL"]  # only the latest row survives
+    assert load_cached_multiplier("AAPL", date(2026, 8, 18), state_dir=state_dir) is None
+    assert load_cached_multiplier("AAPL", date(2026, 8, 19), state_dir=state_dir) == 1.05
 
 
 def test_load_cached_multiplier_treats_malformed_row_as_a_miss(tmp_path):

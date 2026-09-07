@@ -3,6 +3,8 @@ import os
 
 from datetime import date
 
+import pytest
+
 from graywind_strategy.state_store import (
     load_state, save_state, load_tier_pools, save_tier_pools,
     load_rebalance_state, save_rebalance_state, append_decision_log,
@@ -200,6 +202,80 @@ def test_saved_csvs_use_bare_lf_not_crlf(tmp_path):
         assert b"\r\n" not in content, f"{filename} contains CRLF line endings"
 
 
+def test_save_state_writes_atomically_leaving_no_stray_temp_files(tmp_path):
+    # save_state used to write operational.csv/positions.csv directly with
+    # plain open(path, "w"), so a process killed mid-write (cron timeout,
+    # OOM, SIGTERM) could leave a truncated file in place. Writing via a
+    # temp file + os.replace means the write either lands completely or not
+    # at all -- this checks the temp file doesn't leak on a normal save.
+    state_dir = str(tmp_path)
+    save_state({
+        "day_trade_dates": [], "day": "2024-01-08", "starting_equity": 9500.0,
+        "open_positions": {"AAPL": {"entry_price": 150.0, "shares": 10, "stop": 147.0, "target": 154.5, "opened_date": "2024-01-08"}},
+    }, state_dir=state_dir)
+    assert sorted(os.listdir(state_dir)) == ["operational.csv", "positions.csv"]
+
+
+def test_save_pending_trades_preserves_prior_file_when_write_fails_partway(tmp_path, monkeypatch):
+    # The real point of atomic writes: if the process dies partway through
+    # writing the new content, the OLD file must survive untouched rather
+    # than being left truncated -- the failure mode load_pending_trades'
+    # malformed-file handling above exists to cover, but is better avoided
+    # entirely here.
+    state_dir = str(tmp_path)
+    save_pending_trades({
+        "AAPL": {
+            "issue_number": 1, "side": "buy", "qty": 1.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2026-08-25",
+        },
+    }, state_dir=state_dir)
+    original_content = open(os.path.join(state_dir, "pending_trades.csv"), "rb").read()
+
+    import csv as csv_module
+    real_writeheader = csv_module.DictWriter.writeheader
+
+    def failing_writeheader(self):
+        raise RuntimeError("simulated crash mid-write")
+
+    monkeypatch.setattr(csv_module.DictWriter, "writeheader", failing_writeheader)
+    try:
+        with pytest.raises(RuntimeError):
+            save_pending_trades({}, state_dir=state_dir)
+    finally:
+        monkeypatch.setattr(csv_module.DictWriter, "writeheader", real_writeheader)
+
+    assert open(os.path.join(state_dir, "pending_trades.csv"), "rb").read() == original_content
+    assert sorted(os.listdir(state_dir)) == ["pending_trades.csv"]  # no stray .tmp file left behind
+
+
+def test_load_state_degrades_open_positions_to_empty_on_a_truncated_positions_file(tmp_path, capsys):
+    # A cron cancelled mid-write leaves a partial final line -- unlike
+    # load_equity_history, this loader used to have no protection against
+    # that and would crash every subsequent cycle. reconcile_positions()
+    # (live_loop.py) already treats a broker position missing from local
+    # state as "unmanaged, warn loudly" rather than fabricating one, so
+    # degrading to {} here is safe and consistent with that existing design.
+    state_dir = str(tmp_path)
+    save_state({
+        "day_trade_dates": [], "day": "2024-01-08", "starting_equity": 9500.0,
+        "open_positions": {"AAPL": {"entry_price": 150.0, "shares": 10, "stop": 147.0, "target": 154.5, "opened_date": "2024-01-08"}},
+    }, state_dir=state_dir)
+    with open(os.path.join(state_dir, "positions.csv"), "a") as f:
+        f.write("SERV,100.0,5")  # truncated row: missing stop/target/opened_date
+    state = load_state(state_dir=state_dir)
+    assert state["open_positions"] == {}
+    assert "unreadable" in capsys.readouterr().err
+
+
+def test_load_tier_pools_degrades_to_zero_defaults_on_a_malformed_file(tmp_path, capsys):
+    state_dir = str(tmp_path)
+    save_tier_pools({1: 700.0, 2: 200.0, 3: 100.0}, state_dir=state_dir)
+    with open(os.path.join(state_dir, "tier_pools.csv"), "a") as f:
+        f.write("4,not-a-num")
+    assert load_tier_pools(state_dir=state_dir) == {1: 0.0, 2: 0.0, 3: 0.0}
+    assert "unreadable" in capsys.readouterr().err
+
+
 def test_load_tier_pools_returns_zero_defaults_when_no_file_exists(tmp_path):
     tier_pools = load_tier_pools(state_dir=str(tmp_path / "nonexistent"))
     assert tier_pools == {1: 0.0, 2: 0.0, 3: 0.0}
@@ -210,6 +286,12 @@ def test_save_then_load_round_trips_tier_pools(tmp_path):
     save_tier_pools({1: 700.0, 2: 200.0, 3: 100.0}, state_dir=state_dir)
     tier_pools = load_tier_pools(state_dir=state_dir)
     assert tier_pools == {1: 700.0, 2: 200.0, 3: 100.0}
+
+
+def test_save_tier_pools_writes_atomically_leaving_no_stray_temp_files(tmp_path):
+    state_dir = str(tmp_path)
+    save_tier_pools({1: 700.0, 2: 200.0, 3: 100.0}, state_dir=state_dir)
+    assert os.listdir(state_dir) == ["tier_pools.csv"]
 
 
 def test_load_rebalance_state_returns_none_when_no_file_exists(tmp_path):
@@ -311,8 +393,31 @@ def test_save_pending_trades_overwrites_previous_contents(tmp_path):
     assert load_pending_trades(state_dir=state_dir) == {}
 
 
+def test_load_pending_trades_degrades_to_empty_on_a_malformed_file(tmp_path, capsys):
+    state_dir = str(tmp_path)
+    save_pending_trades({
+        "AAPL": {
+            "issue_number": 42, "side": "buy", "qty": 3.0, "price_at_proposal": 190.5,
+            "stop_price": 185.0, "target_price": 200.0, "tier": 2, "proposed_date": "2026-08-26",
+        },
+    }, state_dir=state_dir)
+    with open(os.path.join(state_dir, "pending_trades.csv"), "a") as f:
+        f.write("SPY,43,buy,1.0")  # truncated row: missing several trailing fields
+    assert load_pending_trades(state_dir=state_dir) == {}
+    assert "unreadable" in capsys.readouterr().err
+
+
 def test_load_tier1_holdings_returns_empty_dict_when_no_file_exists(tmp_path):
     assert load_tier1_holdings(state_dir=str(tmp_path / "nonexistent")) == {}
+
+
+def test_load_tier1_holdings_degrades_to_empty_on_a_malformed_file(tmp_path, capsys):
+    state_dir = str(tmp_path)
+    save_tier1_holdings({"SPY": 5.0}, state_dir=state_dir)
+    with open(os.path.join(state_dir, "tier1_holdings.csv"), "a") as f:
+        f.write("VTI,not-a-num")
+    assert load_tier1_holdings(state_dir=state_dir) == {}
+    assert "unreadable" in capsys.readouterr().err
 
 
 def test_save_then_load_round_trips_tier1_holdings(tmp_path):
@@ -320,6 +425,23 @@ def test_save_then_load_round_trips_tier1_holdings(tmp_path):
     holdings = {"SPY": 5.0, "VTI": 2.5}
     save_tier1_holdings(holdings, state_dir=state_dir)
     assert load_tier1_holdings(state_dir=state_dir) == holdings
+
+
+def test_save_tier1_holdings_writes_atomically_leaving_no_stray_temp_files(tmp_path):
+    state_dir = str(tmp_path)
+    save_tier1_holdings({"SPY": 5.0}, state_dir=state_dir)
+    assert os.listdir(state_dir) == ["tier1_holdings.csv"]
+
+
+def test_save_pending_trades_writes_atomically_leaving_no_stray_temp_files(tmp_path):
+    state_dir = str(tmp_path)
+    save_pending_trades({
+        "AAPL": {
+            "issue_number": 1, "side": "buy", "qty": 1.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2026-08-25",
+        },
+    }, state_dir=state_dir)
+    assert os.listdir(state_dir) == ["pending_trades.csv"]
 
 
 def test_save_tier1_holdings_creates_state_dir_if_missing(tmp_path):

@@ -98,7 +98,16 @@ def _call(symbol="AAPL", signal="hold", current_price=100.0, today=date(2024, 1,
           open_positions=None, trading_client=None, pdt_throttle=None, decide_return=None,
           drawdown_breaker=None, equity=10000.0, tier_pools=None, pending_trades=None):
     open_positions = {} if open_positions is None else open_positions
+    default_trading_client = trading_client is None
     trading_client = MagicMock() if trading_client is None else trading_client
+    if default_trading_client:
+        # A same-cycle stop/target exit re-polls real account equity (see
+        # process_symbol's drawdown_breaker.update_equity call below) rather
+        # than reusing the stale `equity` snapshot -- default it to match
+        # `equity` so every pre-existing test asserting update_equity's exact
+        # call arg keeps working unchanged. A test that wants to exercise a
+        # DIFFERENT fresh reading passes its own configured trading_client.
+        trading_client.get_account.return_value.equity = str(equity)
     pdt_throttle = MagicMock() if pdt_throttle is None else pdt_throttle
     drawdown_breaker = MagicMock() if drawdown_breaker is None else drawdown_breaker
     pending_trades = {} if pending_trades is None else pending_trades
@@ -148,6 +157,40 @@ def test_price_above_target_submits_sell_and_removes_position():
     order = trading_client.submit_order.call_args[0][0]
     assert order.side == OrderSide.SELL
     assert "AAPL" not in remaining
+    drawdown_breaker.update_equity.assert_called_once_with(10000.0)
+
+
+def test_stop_exit_uses_freshly_polled_equity_for_the_same_cycle_drawdown_check():
+    # `equity` is fetched once in main() before the WATCHLIST loop starts,
+    # then passed unchanged into every process_symbol call this cycle. Since
+    # Alpaca's account equity is already mark-to-market in real time, reusing
+    # that same stale value here can never reveal a breach caused by further
+    # price movement discovered while fetching THIS symbol's fresh bars (or
+    # by this exit itself) -- it's numerically identical to the value already
+    # fed to update_equity() once this cycle. A fresh get_account() poll
+    # (trading_client is already a process_symbol parameter) actually can.
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    trading_client = MagicMock()
+    trading_client.get_account.return_value.equity = "9500.0"
+    _, _, _, _, drawdown_breaker = _call(
+        symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client, equity=10000.0,
+    )
+    drawdown_breaker.update_equity.assert_called_once_with(9500.0)
+
+
+def test_stop_exit_falls_back_to_the_stale_equity_snapshot_when_the_fresh_poll_fails():
+    # The fresh re-poll above is a same-cycle nicety, not a hard requirement
+    # -- a transient Alpaca error here must not crash the whole cycle (the
+    # exit order has already been submitted by this point) nor skip the
+    # drawdown check entirely.
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    trading_client = MagicMock()
+    trading_client.get_account.side_effect = RuntimeError("Alpaca API down")
+    _, _, _, _, drawdown_breaker = _call(
+        symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client, equity=10000.0,
+    )
     drawdown_breaker.update_equity.assert_called_once_with(10000.0)
 
 
@@ -641,7 +684,8 @@ def test_process_symbol_records_debate_row_when_llm_client_given():
         "debate_score": 0.4, "debate_reasoning": "net bullish",
     }
     debate_rows = []
-    with patch("live_loop.evaluate_shadow_debate", return_value=fake_result) as mock_debate:
+    with patch("live_loop.evaluate_shadow_debate", return_value=fake_result) as mock_debate, \
+         patch("live_loop.fetch_recent_headlines", return_value=[]) as mock_fetch:
         live_loop.process_symbol(
             symbol="AAPL", signal="hold", current_price=150.0, today=date(2024, 1, 8),
             open_positions=open_positions, equity=10000.0,
@@ -654,9 +698,42 @@ def test_process_symbol_records_debate_row_when_llm_client_given():
         )
 
     mock_debate.assert_called_once()
+    # signal="hold" means decide_trade returns before ever touching headlines
+    # -- the pre-fetch above is gated only on llm_client, not signal, so it
+    # must still run exactly once here (for the debate), not zero or twice.
+    mock_fetch.assert_called_once()
     assert debate_rows == [{
         "timestamp": "2026-08-27T10:00:00-04:00", "symbol": "AAPL", **fake_result,
     }]
+
+
+def test_process_symbol_fetches_headlines_once_and_shares_them_with_decide_trade_and_debate():
+    # pipeline.py's sentiment gate and news_debate.py's shadow debate used to
+    # each independently fetch the same symbol/date's headlines -- doubling
+    # News API traffic every cycle for a feature (shadow mode) that never
+    # affects real trading. process_symbol should fetch once and thread the
+    # same headlines into both.
+    open_positions = {}
+    shared_headlines = ["Great quarter beat"]
+    with patch("live_loop.fetch_recent_headlines", return_value=shared_headlines) as mock_fetch, \
+         patch("live_loop.decide_trade",
+               return_value=TradeDecision(action="hold", reason="no buy signal")) as mock_decide, \
+         patch("live_loop.evaluate_shadow_debate", return_value={
+             "vader_score": 0.1, "vader_gate_result": True,
+             "debate_score": 0.4, "debate_reasoning": "net bullish",
+         }) as mock_debate:
+        live_loop.process_symbol(
+            symbol="AAPL", signal="buy", current_price=150.0, today=date(2024, 1, 8),
+            open_positions=open_positions, equity=10000.0,
+            pdt_throttle=MagicMock(can_open_day_trade=lambda *a, **kw: True),
+            position_sizer=MagicMock(), drawdown_breaker_ok=True, fred_api_key="k",
+            news_client=object(), finnhub_api_key="k", trading_client=MagicMock(),
+            drawdown_breaker=MagicMock(), llm_client=object(), debate_cache={}, debate_rows=[],
+        )
+
+    mock_fetch.assert_called_once()
+    assert mock_decide.call_args.kwargs["headlines"] == shared_headlines
+    assert mock_debate.call_args.kwargs["headlines"] == shared_headlines
 
 
 def test_process_symbol_debate_exception_does_not_block_real_decision_or_propagate():
@@ -924,6 +1001,31 @@ def test_main_survives_an_intraday_wipeout_without_abandoning_the_cycle(isolate_
         0.0, mock_load_equity_history, [], state=mid_day_wipeout_state,
     )
     assert mock_decide.called  # the cycle body still ran
+
+
+def test_main_survives_a_new_day_wipeout_without_crashing(isolate_equity_history):
+    # Distinct from the intraday-wipeout test above: here state["day"] is
+    # NOT today, so main() must compute a FRESH starting_equity from this
+    # cycle's own equity reading. If that reading is non-positive,
+    # DrawdownBreaker.start_new_day raises ValueError -- called with no
+    # `except` between it and the WATCHLIST loop, so an unguarded raise
+    # would abandon the whole cycle *including the stop/target exit checks*
+    # and, if it wrote the bad baseline first, crash identically every
+    # cycle for the rest of the day.
+    mock_load_equity_history, _ = isolate_equity_history
+    stale_day_state = {
+        "day_trade_dates": [],
+        "day": (date.today() - timedelta(days=1)).isoformat(),
+        "starting_equity": 10000.0,
+        "open_positions": {},
+    }
+    mock_decide = _run_main_with_equity(
+        0.0, mock_load_equity_history, [], state=stale_day_state,
+    )
+    assert mock_decide.called  # the cycle body still ran, not crashed
+    # A wiped-out account must fail closed, not default open just because
+    # the daily breaker was never successfully initialized this cycle.
+    assert mock_decide.call_args.kwargs["drawdown_breaker_ok"] is False
 
 
 def test_main_threads_graywind_state_dir_env_var_into_every_state_call(isolate_equity_history):
