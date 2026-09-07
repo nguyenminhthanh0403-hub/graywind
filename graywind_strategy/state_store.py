@@ -31,7 +31,9 @@ DEFAULT_STATE_DIR = "state"
 OPERATIONAL_FILENAME = "operational.csv"
 POSITIONS_FILENAME = "positions.csv"
 OPERATIONAL_FIELDS = ["day", "starting_equity", "day_trade_dates"]
-POSITIONS_FIELDS = ["symbol", "entry_price", "shares", "stop", "target", "opened_date"]
+POSITIONS_FIELDS = [
+    "symbol", "entry_price", "shares", "stop", "target", "opened_date", "pending_sell_order_id",
+]
 TIER_POOLS_FILENAME = "tier_pools.csv"
 TIER_POOLS_FIELDS = ["tier", "cash"]
 REBALANCE_FILENAME = "tier1_rebalance.csv"
@@ -95,13 +97,25 @@ def load_state(state_dir=DEFAULT_STATE_DIR):
             positions = {}
             with open(positions_path, newline="") as f:
                 for row in csv.DictReader(f):
-                    positions[row["symbol"]] = {
+                    position = {
                         "entry_price": float(row["entry_price"]),
                         "shares": float(row["shares"]),
                         "stop": float(row["stop"]),
                         "target": float(row["target"]),
                         "opened_date": row["opened_date"],
                     }
+                    # row.get(...), not row[...]: this column was added after
+                    # POSITIONS_FIELDS' original six, so an older file (or a
+                    # DictReader with no header for it) simply lacks the key
+                    # rather than raising KeyError. Included only when
+                    # actually set (not "" or missing) so an ordinary
+                    # position -- the overwhelming common case -- round-trips
+                    # to exactly its original shape, unaffected by this
+                    # column's existence.
+                    pending_sell_order_id = row.get("pending_sell_order_id")
+                    if pending_sell_order_id:
+                        position["pending_sell_order_id"] = pending_sell_order_id
+                    positions[row["symbol"]] = position
             state["open_positions"] = positions
         except (ValueError, KeyError, TypeError) as exc:
             # Degrades like load_equity_history rather than raising: this sits

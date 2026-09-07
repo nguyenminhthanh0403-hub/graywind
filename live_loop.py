@@ -35,7 +35,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.news import NewsClient
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.enums import OrderSide, OrderStatus, TimeInForce
 
 from fetch_alpaca_data import fetch_bars
 from graywind_strategy.pipeline import MACRO_UNAVAILABLE_DETAIL, decide_trade
@@ -102,6 +102,16 @@ DECISION_GATE_ORDER = ["vix", "sentiment", "earnings", "macro", "sector"]
 # not answer at all (as opposed to a breach count). scripts/check_macro_health.py
 # reads this exact string.
 MACRO_UNAVAILABLE_SENTINEL = "unavailable"
+
+# Terminal statuses for a stop/target exit's sell order that mean "will never
+# fill any further" -- confirmed against alpaca-py's installed OrderStatus
+# enum. A position's pending_sell_order_id is cleared on any of these (after
+# crediting tier_pools/PDT for whatever quantity DID fill, if any) so a
+# fresh stop/target check can retry it; anything else (NEW, ACCEPTED,
+# PENDING_NEW, PARTIALLY_FILLED, ...) is still in flight and left alone.
+TERMINAL_UNFILLED_ORDER_STATUSES = {
+    OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED, OrderStatus.DONE_FOR_DAY,
+}
 
 
 def _fmt_decision_value(value):
@@ -187,10 +197,19 @@ def reconcile_positions(trading_client, open_positions):
     WHETHER a position exists. Logs loudly on any mismatch rather than
     guessing -- this bot never fabricates stop/target values for a
     position it didn't itself open.
+
+    A position with `pending_sell_order_id` set is exempt from the "not
+    found at broker -> drop it" rule below: this function runs BEFORE
+    process_symbol every cycle, and the moment a stop/target exit's sell
+    actually fills, the broker stops reporting the position -- exactly the
+    disappearance process_symbol's settlement check (get_order_by_id) is
+    waiting to observe, with the real fill qty/price, to credit tier_pools
+    and record the day trade. Dropping it here first would silently skip
+    that credit and recording every time.
     """
     real_positions = {p.symbol for p in trading_client.get_all_positions()}
     for symbol in list(open_positions.keys()):
-        if symbol not in real_positions:
+        if symbol not in real_positions and not open_positions[symbol].get("pending_sell_order_id"):
             print(f"{symbol}: WARNING - locally tracked position not found at broker, "
                   f"dropping from local state", file=sys.stderr)
             del open_positions[symbol]
@@ -199,6 +218,36 @@ def reconcile_positions(trading_client, open_positions):
             print(f"{symbol}: WARNING - broker reports a position not tracked locally; "
                   f"not managed by this bot until resolved manually", file=sys.stderr)
     return open_positions
+
+
+def _settle_sell_fill(position, tier, tier_pools, pdt_throttle, order):
+    """Credits tier_pools and records a day-trade for a CONFIRMED fill (full
+    or partial) of a stop/target exit's sell order -- using the order's real
+    filled_qty/filled_avg_price, not the price that triggered the exit or an
+    approximation. Does not touch open_positions/position["shares"]; the
+    caller (process_symbol) decides what that fill means for local tracking
+    (full fill -> delete the position; partial -> shrink shares by
+    filled_qty).
+
+    Compares against the FILL date (`order.filled_at`), not whatever
+    cycle's `today` happens to be running when this settlement is noticed --
+    the confirming cycle can land on a later day than the one that submitted
+    the order, and PDT must count the day the trade actually realized, not
+    the day this process happened to observe it.
+    """
+    filled_qty = float(order.filled_qty)
+    filled_price = float(order.filled_avg_price)
+    if tier is not None and tier_pools is not None:
+        tier_pools[tier] += filled_qty * filled_price
+    # opened_date is stored/compared here as an ISO string (round-trips
+    # through CSV via state_store.py); backtester.py's equivalent comparison
+    # uses a `date` object instead since it never leaves memory -- a future
+    # refactor unifying the two representations must preserve each caller's
+    # own idiom.
+    opened_date = datetime.fromisoformat(position["opened_date"]).date()
+    filled_date = order.filled_at.date()
+    if opened_date == filled_date:
+        pdt_throttle.record_day_trade(filled_date)
 
 
 def process_symbol(symbol, signal, current_price, today, open_positions, equity,
@@ -263,27 +312,99 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
     tier = SYMBOL_TIER.get(symbol)
 
     position = open_positions.get(symbol)
-    if position is not None and (current_price <= position["stop"] or current_price >= position["target"]):
+
+    # Resolves a sell submitted on a PRIOR cycle before touching anything
+    # else for this symbol. live_loop.py is a fresh process every invocation
+    # (see module docstring), so a submitted order's fill can only be
+    # confirmed on a LATER cycle, via the persisted `pending_sell_order_id`
+    # (state_store.py's POSITIONS_FIELDS). This is what defers the
+    # tier_pools credit and the open_positions deletion to a CONFIRMED fill
+    # instead of applying them optimistically at submission time -- a sell
+    # Alpaca later rejects/cancels used to overcredit the pool for a sale
+    # that never happened, and drop the position from local tracking while
+    # the broker still held it, leaving its stop/target unmonitored forever.
+    if position is not None and position.get("pending_sell_order_id"):
+        pending_order_id = position["pending_sell_order_id"]
+        try:
+            order = trading_client.get_order_by_id(pending_order_id)
+        except Exception as exc:
+            # A lookup failure (transient API error, an id Alpaca no longer
+            # recognizes, a hand-edited state file) has nothing to do with
+            # the order's real status. Left unguarded, this propagates out
+            # of process_symbol and wedges the position forever -- identical
+            # to what process_pending_trades already guards against for a
+            # stale proposal row ("a row that can never be deleted is a
+            # permanent, silent, per-symbol outage"). Clearing the marker
+            # restores self-healing: if the order is genuinely still live,
+            # the resubmit below gets a 403 insufficient-qty from Alpaca
+            # (caught, noisy, harmless); if the position is actually gone,
+            # next cycle's reconcile_positions drops it via the pre-existing
+            # "unmanaged, warn loudly" path.
+            print(f"{symbol}: could not check sell order {pending_order_id}'s status "
+                  f"({exc}); clearing it and retrying this cycle", file=sys.stderr)
+            position.pop("pending_sell_order_id", None)
+            order = None
+        if order is None:
+            pass  # falls through to the fresh stop/target check below
+        elif order.status == OrderStatus.FILLED:
+            _settle_sell_fill(position, tier, tier_pools, pdt_throttle, order)
+            print(f"{symbol}: sell order {position['pending_sell_order_id']} settlement "
+                  f"confirmed ({order.filled_qty} shares @ {order.filled_avg_price})")
+            del open_positions[symbol]
+            position = None
+        elif order.status in TERMINAL_UNFILLED_ORDER_STATUSES:
+            filled_qty = float(order.filled_qty or 0)
+            if filled_qty > 0:
+                # A DAY order that partially filled before being
+                # canceled/expired/rejected -- credit the pool for the
+                # partial fill and shrink the tracked share count by exactly
+                # that much, so the remaining shares stay correctly sized
+                # (`committed`, below) and still get evaluated against the
+                # same stop/target.
+                #
+                # KNOWN GAP, not closed here: if the remainder ALSO fills
+                # same-day on a later retry, this records two day trades
+                # for what PDT counts as a single open-and-close, throttling
+                # earlier than reality. Bounded (at most one extra count per
+                # split fill) and fails closed (over-counts, never under-),
+                # so left as-is rather than restructured under this fix.
+                _settle_sell_fill(position, tier, tier_pools, pdt_throttle, order)
+                position["shares"] -= filled_qty
+                print(f"{symbol}: sell order {position['pending_sell_order_id']} partially "
+                      f"filled ({order.filled_qty} shares @ {order.filled_avg_price}) before "
+                      f"{order.status.value}; {position['shares']} shares remain")
+            else:
+                print(f"{symbol}: sell order {position['pending_sell_order_id']} did not fill "
+                      f"({order.status.value}); eligible to retry")
+            position.pop("pending_sell_order_id", None)
+            # Falls through to the fresh stop/target check below, same cycle.
+        else:
+            # Still in flight (new/accepted/pending_new/partially_filled/...)
+            # -- treat exactly like an ordinary held position this cycle:
+            # skip a resubmission (one is already working) and skip a fresh
+            # entry (decide_trade) below.
+            symbol_statuses[symbol] = {
+                "position_open": True, "shares": position["shares"], "entry_price": position["entry_price"],
+                "current_price": current_price, "action": "hold",
+                "reason": f"sell order {position['pending_sell_order_id']} pending settlement ({order.status.value})",
+            }
+            print(f"{symbol}: sell order {position['pending_sell_order_id']} still pending "
+                  f"({order.status.value}), skipping this cycle")
+            return
+
+    if position is not None and not position.get("pending_sell_order_id") and (
+        current_price <= position["stop"] or current_price >= position["target"]
+    ):
         order = MarketOrderRequest(
             symbol=symbol, qty=position["shares"],
             side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
         )
-        trading_client.submit_order(order)
-        if tier is not None and tier_pools is not None:
-            tier_pools[tier] += position["shares"] * current_price
+        submitted_order = trading_client.submit_order(order)
+        position["pending_sell_order_id"] = str(submitted_order.id)
         cycle_trades.append({
             "timestamp": cycle_timestamp, "symbol": symbol, "side": "sell",
             "qty": position["shares"], "price": current_price, "reason": "stop/target exit",
         })
-        # opened_date is stored/compared here as an ISO string (round-trips
-        # through CSV via state_store.py); backtester.py's equivalent
-        # comparison uses a `date` object instead since it never leaves
-        # memory -- a future refactor unifying the two representations must
-        # preserve each caller's own idiom.
-        opened_date = datetime.fromisoformat(position["opened_date"]).date()
-        if opened_date == today:
-            pdt_throttle.record_day_trade(today)
-        del open_positions[symbol]
         # Mirrors the backtester's per-exit update_equity call (see the
         # bar-by-bar loop in backtester.py) -- catches a same-cycle drawdown
         # breach triggered by this exit before evaluating later symbols in
@@ -307,8 +428,16 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         except Exception:
             fresh_equity = equity
         drawdown_breaker.update_equity(fresh_equity)
-        print(f"{symbol}: submitted sell for {position['shares']} shares (stop/target exit)")
-        position = None  # eligible for a fresh same-cycle entry below, same as the backtester
+        print(f"{symbol}: submitted sell for {position['shares']} shares (stop/target exit), "
+              f"awaiting settlement (order {position['pending_sell_order_id']})")
+        # Deliberately NOT set to None here (unlike before this fix): a
+        # position pending settlement stays tracked, so it falls into the
+        # "already holding" branch below rather than being eligible for a
+        # fresh same-cycle re-entry. open_positions is keyed by symbol --
+        # there's no way to represent "old position pending exit" and "new
+        # position just opened" for the same symbol at once, and waiting for
+        # the exit's settlement to confirm is the safe direction to be wrong
+        # in, since the sell isn't guaranteed to fill.
 
     if position is None:
         if tier is not None and tier_pools is not None:

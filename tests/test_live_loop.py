@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 import requests
-from alpaca.trading.enums import OrderSide
+from alpaca.trading.enums import OrderSide, OrderStatus
 
 from graywind_strategy import trade_approval
 from graywind_strategy.gate_result import GateResult
@@ -131,33 +131,180 @@ def _call(symbol="AAPL", signal="hold", current_price=100.0, today=date(2024, 1,
 # 1. A held position whose price crosses the stop or target results in a
 # sell order being submitted and removed from open_positions.
 
-def test_price_below_stop_submits_sell_and_removes_position():
+def test_price_below_stop_submits_sell_and_marks_position_pending_settlement():
+    # Deliberate behavior change (final-review Fix on tier-2/3 sell
+    # settlement): a stop/target exit no longer credits tier_pools or drops
+    # the position from open_positions at submission time -- if the sell is
+    # later rejected/canceled by the broker, that used to overcredit the
+    # pool for a sale that never happened and stop tracking a position the
+    # broker still held. The position now stays tracked with
+    # pending_sell_order_id set, and is only cleared once a LATER cycle
+    # observes the order's real terminal status via get_order_by_id.
     open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    trading_client = MagicMock()
+    trading_client.submit_order.return_value.id = "order-1"
+    trading_client.get_account.return_value.equity = "10000.0"
     _, trading_client, _, remaining, drawdown_breaker = _call(
         symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client,
     )
     trading_client.submit_order.assert_called_once()
     order = trading_client.submit_order.call_args[0][0]
     assert order.symbol == "AAPL"
     assert order.qty == 10
     assert order.side == OrderSide.SELL
-    assert "AAPL" not in remaining
+    assert "AAPL" in remaining
+    assert remaining["AAPL"]["pending_sell_order_id"] == "order-1"
     # Minor C: a stop/target exit triggers an immediate drawdown_breaker
     # update, mirroring the backtester's per-exit update -- not deferred to
     # the next cycle's single per-cycle call in main().
     drawdown_breaker.update_equity.assert_called_once_with(10000.0)
 
 
-def test_price_above_target_submits_sell_and_removes_position():
+def test_price_above_target_submits_sell_and_marks_position_pending_settlement():
     open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    trading_client = MagicMock()
+    trading_client.submit_order.return_value.id = "order-1"
+    trading_client.get_account.return_value.equity = "10000.0"
     _, trading_client, _, remaining, drawdown_breaker = _call(
         symbol="AAPL", current_price=104.0, open_positions=open_positions,
+        trading_client=trading_client,
     )
     trading_client.submit_order.assert_called_once()
     order = trading_client.submit_order.call_args[0][0]
     assert order.side == OrderSide.SELL
-    assert "AAPL" not in remaining
+    assert "AAPL" in remaining
+    assert remaining["AAPL"]["pending_sell_order_id"] == "order-1"
     drawdown_breaker.update_equity.assert_called_once_with(10000.0)
+
+
+def test_pending_sell_confirmed_filled_credits_pool_and_clears_position():
+    order = MagicMock()
+    order.status = OrderStatus.FILLED
+    order.filled_qty = "10"
+    order.filled_avg_price = "96.5"
+    order.filled_at = datetime(2024, 1, 8, 15, 55, tzinfo=ET)
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+
+    open_positions = {
+        "AAPL": _position(stop=98.0, target=103.0, opened_date="2024-01-08"),
+    }
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+    tier_pools = {1: 0.0, 2: 500.0, 3: 0.0}
+
+    _, _, pdt_throttle, remaining, _ = _call(
+        symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client, tier_pools=tier_pools,
+    )
+
+    trading_client.get_order_by_id.assert_called_once_with("order-1")
+    trading_client.submit_order.assert_not_called()  # settlement resolved, no resubmission
+    assert "AAPL" not in remaining
+    assert tier_pools[2] == 500.0 + 10 * 96.5
+    assert pdt_throttle.record_day_trade.call_args[0][0] == date(2024, 1, 8)
+
+
+def test_pending_sell_canceled_with_no_fill_clears_marker_and_resubmits_same_cycle():
+    # The sell never filled (e.g. a trading halt) -- clear the stale marker
+    # and let the ordinary stop/target check below retry it THIS cycle,
+    # since price still triggers the exit.
+    order = MagicMock()
+    order.status = OrderStatus.CANCELED
+    order.filled_qty = "0"
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+    trading_client.submit_order.return_value.id = "order-2"
+
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+
+    _, trading_client, _, remaining, _ = _call(
+        symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client,
+    )
+
+    trading_client.submit_order.assert_called_once()  # retried
+    assert remaining["AAPL"]["pending_sell_order_id"] == "order-2"  # the NEW order, not the stale one
+
+
+def test_pending_sell_partial_fill_before_expiry_credits_partial_and_shrinks_position():
+    order = MagicMock()
+    order.status = OrderStatus.EXPIRED
+    order.filled_qty = "4"
+    order.filled_avg_price = "96.5"
+    order.filled_at = datetime(2024, 1, 8, 15, 55, tzinfo=ET)
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+
+    open_positions = {
+        "AAPL": _position(shares=10, stop=98.0, target=103.0, opened_date="2024-01-08"),
+    }
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+    tier_pools = {1: 0.0, 2: 500.0, 3: 0.0}
+
+    _, _, pdt_throttle, remaining, _ = _call(
+        symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client, tier_pools=tier_pools,
+    )
+
+    assert tier_pools[2] == 500.0 + 4 * 96.5
+    assert pdt_throttle.record_day_trade.call_args[0][0] == date(2024, 1, 8)
+    # The remaining 6 shares stay tracked (still past their stop, so the
+    # marker being cleared lets the fresh check below retry them).
+    assert remaining["AAPL"]["shares"] == 6
+
+
+def test_pending_sell_still_in_flight_skips_resubmission_and_fresh_entry():
+    order = MagicMock()
+    order.status = OrderStatus.PARTIALLY_FILLED
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+
+    mock_decide, trading_client, _, remaining, _ = _call(
+        symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client,
+    )
+
+    trading_client.submit_order.assert_not_called()
+    mock_decide.assert_not_called()
+    assert remaining["AAPL"]["pending_sell_order_id"] == "order-1"
+
+
+def test_pending_sell_lookup_failure_clears_marker_and_retries_same_cycle(capsys):
+    # get_order_by_id can fail for reasons that have nothing to do with the
+    # order's real status (transient API error, an id Alpaca no longer
+    # recognizes, a hand-edited state file). Left unguarded, this raises out
+    # of process_symbol -- main()'s per-symbol try/except catches it and
+    # retries next cycle, but get_order_by_id fails identically every time,
+    # so the position wedges forever with its stop/target never re-checked:
+    # a permanent, silent, per-symbol outage, the same failure class
+    # process_pending_trades already guards against for stale proposal rows
+    # ("a row that can never be deleted is a permanent, silent, per-symbol
+    # outage"). Clearing the marker and falling through restores
+    # self-healing: if the order is genuinely still live, the resubmit below
+    # gets a 403 insufficient-qty from Alpaca (caught, noisy, harmless); if
+    # the position is actually gone, next cycle's reconcile_positions drops
+    # it via the pre-existing "unmanaged, warn loudly" path.
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.side_effect = RuntimeError("order not found")
+    trading_client.submit_order.return_value.id = "order-2"
+    trading_client.get_account.return_value.equity = "10000.0"
+
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+
+    _, trading_client, _, remaining, _ = _call(
+        symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client,
+    )
+
+    trading_client.submit_order.assert_called_once()  # retried, not wedged
+    assert remaining["AAPL"]["pending_sell_order_id"] == "order-2"  # the NEW order, not the stale one
+    assert "order-1" in capsys.readouterr().err  # loud, not silent
 
 
 def test_stop_exit_uses_freshly_polled_equity_for_the_same_cycle_drawdown_check():
@@ -208,20 +355,37 @@ def test_price_between_stop_and_target_does_not_sell():
 # 2. A same-day-opened position that closes same-day records a day-trade
 # via pdt_throttle.record_day_trade; one that closes on a later day does not.
 
-def test_same_day_exit_records_day_trade():
+def test_stop_exit_submission_does_not_record_day_trade_until_settlement_confirmed():
+    # Day-trade recording is deferred to settlement confirmation (a later
+    # cycle, alongside the tier_pools credit -- see the pending-sell tests
+    # below) since a submitted-but-unconfirmed sell may never actually fill.
+    # Submission alone must not record anything yet.
     open_positions = {"AAPL": _position(stop=98.0, target=103.0, opened_date="2024-01-08")}
     _, _, pdt_throttle, _, _ = _call(
         symbol="AAPL", current_price=97.0, today=date(2024, 1, 8),
         open_positions=open_positions,
     )
-    pdt_throttle.record_day_trade.assert_called_once_with(date(2024, 1, 8))
+    pdt_throttle.record_day_trade.assert_not_called()
 
 
-def test_later_day_exit_does_not_record_day_trade():
+def test_settlement_confirmed_on_a_later_day_than_opened_does_not_record_day_trade():
+    # Compares against the FILL date, not whatever cycle's `today` happens
+    # to be running when the settlement is noticed -- confirmation can land
+    # a day (or more) after the sell was actually submitted and filled.
+    order = MagicMock()
+    order.status = OrderStatus.FILLED
+    order.filled_qty = "10"
+    order.filled_avg_price = "96.5"
+    order.filled_at = datetime(2024, 1, 9, 9, 35, tzinfo=ET)  # filled the day AFTER opened_date
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+
     open_positions = {"AAPL": _position(stop=98.0, target=103.0, opened_date="2024-01-08")}
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+
     _, _, pdt_throttle, _, _ = _call(
-        symbol="AAPL", current_price=97.0, today=date(2024, 1, 9),  # closes the next day
-        open_positions=open_positions,
+        symbol="AAPL", current_price=97.0, today=date(2024, 1, 9),
+        open_positions=open_positions, trading_client=trading_client,
     )
     pdt_throttle.record_day_trade.assert_not_called()
 
@@ -256,17 +420,31 @@ def test_pending_same_day_trades_counts_other_same_day_positions_only():
     assert mock_decide.call_args.kwargs["pending_same_day_trades"] == 1
 
 
-def test_pending_same_day_trades_excludes_own_just_deleted_entry():
-    # AAPL crosses its target and gets sold+deleted this same cycle, then is
-    # re-evaluated for a fresh entry -- its own now-deleted entry must not
-    # be double counted alongside SPY's still-open same-day position.
+def test_pending_same_day_trades_excludes_own_just_settled_entry():
+    # AAPL's stop/target sell (submitted a PRIOR cycle) is confirmed filled
+    # THIS cycle, freeing it up for a fresh entry evaluation this same
+    # cycle (unlike a just-SUBMITTED, still-unconfirmed exit, which no
+    # longer gets same-cycle re-entry -- see the pending-sell tests above).
+    # Its own now-deleted entry must not be double counted alongside SPY's
+    # still-open same-day position.
+    order = MagicMock()
+    order.status = OrderStatus.FILLED
+    order.filled_qty = "10"
+    order.filled_avg_price = "104.0"
+    order.filled_at = datetime(2024, 1, 8, 15, 55, tzinfo=ET)
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+
     open_positions = {
         "AAPL": _position(stop=98.0, target=103.0, opened_date="2024-01-08"),
         "SPY": _position(shares=5, stop=400.0, target=420.0, opened_date="2024-01-08"),
     }
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+
     mock_decide, _, _, _, _ = _call(
-        symbol="AAPL", signal="buy", current_price=104.0,  # crosses target -> sell, then re-eval
+        symbol="AAPL", signal="buy", current_price=104.0,
         today=date(2024, 1, 8), open_positions=open_positions,
+        trading_client=trading_client,
     )
     assert mock_decide.call_args.kwargs["pending_same_day_trades"] == 1  # SPY only
 
@@ -826,6 +1004,28 @@ def test_reconcile_positions_does_not_fabricate_broker_only_position(capsys):
     assert "SERV" not in result
     err = capsys.readouterr().err
     assert "SERV" in err and "WARNING" in err
+
+
+def test_reconcile_positions_does_not_drop_a_position_with_a_pending_sell(capsys):
+    # reconcile_positions runs BEFORE process_symbol every cycle (main()).
+    # The moment a stop/target exit's sell actually fills, the broker no
+    # longer reports the position -- if reconcile_positions dropped it here
+    # (the ordinary "not found at broker" rule), process_symbol's
+    # settlement check (get_order_by_id) would never run, silently skipping
+    # the tier_pools credit and PDT day-trade recording that check exists to
+    # do with the REAL fill qty/price. A pending sell must be left in place
+    # for process_symbol to resolve, even though the broker already agrees
+    # the position is gone.
+    trading_client = MagicMock()
+    trading_client.get_all_positions.return_value = []  # the sell already filled
+    position = _position()
+    position["pending_sell_order_id"] = "order-1"
+    open_positions = {"AAPL": position}
+    result = live_loop.reconcile_positions(trading_client, open_positions)
+    assert "AAPL" in result
+    assert result["AAPL"] is position
+    err = capsys.readouterr().err
+    assert err == ""  # no false "unexpectedly missing" warning for an expected disappearance
 
 
 def test_reconcile_positions_leaves_matching_position_completely_unchanged(capsys):
@@ -1564,7 +1764,11 @@ def test_process_symbol_buy_proposal_does_not_touch_tier_pool_cash():
     assert tier_pools[2] == 500.0  # unchanged -- only execution (Task 5) touches this
 
 
-def test_process_symbol_stop_exit_increments_tier_pool_cash():
+def test_process_symbol_stop_exit_submission_does_not_touch_tier_pool_cash_yet():
+    # Deferred to settlement confirmation -- see
+    # test_pending_sell_confirmed_filled_credits_pool_and_clears_position
+    # above for the credited case. Crediting at submission time (the old
+    # behavior) overcredits the pool if the sell is later rejected/canceled.
     with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True):
         open_positions = {"AAPL": _position(shares=2.0, stop=98.0, target=103.0)}
         tier_pools = {1: 0.0, 2: 500.0, 3: 0.0}
@@ -1572,7 +1776,7 @@ def test_process_symbol_stop_exit_increments_tier_pool_cash():
             symbol="AAPL", current_price=97.0, open_positions=open_positions,
             tier_pools=tier_pools,
         )
-    assert tier_pools[2] == 694.0  # 500.0 + 2.0 * 97.0
+    assert tier_pools[2] == 500.0  # unchanged until settlement is confirmed
 
 
 def test_process_symbol_tier_equity_includes_other_same_tier_positions():

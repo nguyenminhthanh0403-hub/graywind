@@ -99,6 +99,38 @@ def test_save_then_load_round_trips_open_positions(tmp_path):
     }
 
 
+def test_save_then_load_round_trips_a_pending_sell_order_id(tmp_path):
+    # A position with a sell submitted but not yet confirmed settled
+    # persists its order id across cycles (live_loop.py is a fresh process
+    # each run) so a later cycle can resolve it via get_order_by_id.
+    state_dir = str(tmp_path)
+    save_state({
+        "day_trade_dates": [], "day": "2024-01-08", "starting_equity": 10000.0,
+        "open_positions": {
+            "AAPL": {
+                "entry_price": 150.0, "shares": 10, "stop": 147.0, "target": 154.5,
+                "opened_date": "2024-01-08", "pending_sell_order_id": "order-123",
+            },
+        },
+    }, state_dir=state_dir)
+    state = load_state(state_dir=state_dir)
+    assert state["open_positions"]["AAPL"]["pending_sell_order_id"] == "order-123"
+
+
+def test_load_state_omits_pending_sell_order_id_when_never_set(tmp_path):
+    # An ordinary position (the overwhelming common case) must round-trip to
+    # EXACTLY its original shape -- no stray key with an empty-string or
+    # None value -- so every pre-existing caller/test that doesn't know
+    # about pending sells is unaffected.
+    state_dir = str(tmp_path)
+    save_state({
+        "day_trade_dates": [], "day": "2024-01-08", "starting_equity": 10000.0,
+        "open_positions": {"AAPL": {"entry_price": 150.0, "shares": 10, "stop": 147.0, "target": 154.5, "opened_date": "2024-01-08"}},
+    }, state_dir=state_dir)
+    state = load_state(state_dir=state_dir)
+    assert "pending_sell_order_id" not in state["open_positions"]["AAPL"]
+
+
 def test_save_then_load_round_trips_multiple_open_positions(tmp_path):
     state_dir = str(tmp_path)
     save_state({
@@ -167,7 +199,10 @@ def test_save_writes_two_separate_csv_files(tmp_path):
     assert os.path.exists(os.path.join(state_dir, "positions.csv"))
     with open(os.path.join(state_dir, "positions.csv"), newline="") as f:
         rows = list(csv.DictReader(f))
-    assert rows == [{"symbol": "AAPL", "entry_price": "150.0", "shares": "10", "stop": "147.0", "target": "154.5", "opened_date": "2024-01-08"}]
+    assert rows == [{
+        "symbol": "AAPL", "entry_price": "150.0", "shares": "10", "stop": "147.0",
+        "target": "154.5", "opened_date": "2024-01-08", "pending_sell_order_id": "",
+    }]
 
 
 def test_save_overwrites_previous_positions_rather_than_appending(tmp_path):
