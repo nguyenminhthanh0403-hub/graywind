@@ -76,6 +76,17 @@ def test_fetch_bullion_headlines_raises_when_stale_past_ceiling():
         fetch_bullion_headlines(session=session)
 
 
+def test_fetch_bullion_headlines_raises_on_empty_headlines_list():
+    now = datetime.now(timezone.utc)
+    fresh = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = {"generated_at": fresh, "headlines": []}
+    session = MagicMock()
+    session.get.return_value = _fake_response(payload)
+
+    with pytest.raises(MacroNewsUnavailable):
+        fetch_bullion_headlines(session=session)
+
+
 from graywind_strategy.gates.macro_debate import MacroEvent, evaluate_macro_events
 
 
@@ -137,6 +148,20 @@ def test_evaluate_macro_events_raises_on_malformed_response():
 
     with pytest.raises(KeyError):
         evaluate_macro_events(fake_client, [{"headline": "x"}])
+
+
+def test_evaluate_macro_events_raises_on_out_of_range_probability():
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = _fake_tool_response(
+        "submit_macro_events",
+        {"events": [
+            {"event": "Fed cuts rates in December", "probability": 60.0,
+             "implication": "Bullish for rate-sensitive equities"},
+        ]},
+    )
+
+    with pytest.raises(ValueError):
+        evaluate_macro_events(fake_client, [{"headline": "Fed signals pause"}])
 
 
 from unittest.mock import patch

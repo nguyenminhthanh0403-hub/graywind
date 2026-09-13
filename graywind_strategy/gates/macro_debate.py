@@ -10,6 +10,12 @@ Provider: same DeepSeek client (already wired for news_debate.py) -- no new
 secret, no new dependency. See news_debate.py's module docstring for why
 `extra_body={"thinking": {"type": "disabled"}}` is required on every call
 (DeepSeek-v4-flash otherwise rejects a forced tool_choice with an HTTP 400).
+
+Also see news_debate.py's module docstring for why the tool schema's
+`strict: true` (below) is a harmless no-op on the standard (non-`/beta`)
+endpoint this module also uses -- DeepSeek does not enforce it server-side
+there, which is why `evaluate_macro_events` below validates `probability`
+itself instead of trusting the schema's `minimum`/`maximum` alone.
 """
 import json
 from dataclasses import dataclass
@@ -57,6 +63,15 @@ def fetch_bullion_headlines(session=requests):
             f"Bullion news feed is {age} old, older than the "
             f"{STALENESS_CEILING_HOURS}h staleness ceiling"
         )
+    if not headlines:
+        # A fresh feed with zero recent headlines is not the same as a dead
+        # feed, but sending `_headlines_block([])` -- "(no recent
+        # headlines)" -- to the LLM still leaves the prompt demanding 1-5
+        # events, so the model has nothing to ground a real read in and can
+        # only fabricate predictions from nothing. Those would get logged
+        # indistinguishably from a real read, since this log is the
+        # feature's only artifact.
+        raise MacroNewsUnavailable("Bullion news feed returned zero headlines")
     return headlines
 
 
@@ -123,14 +138,25 @@ def evaluate_macro_events(llm_client, headlines):
         "for markets.\n\nHeadlines:\n" + _headlines_block(headlines)
     )
     result = _tool_call(llm_client, prompt, SUBMIT_EVENTS_TOOL_NAME, _EVENTS_TOOL_SCHEMA)
-    return [
-        MacroEvent(
+    events = []
+    for item in result["events"]:
+        probability = float(item["probability"])
+        # The tool schema declares minimum: 0.0, maximum: 1.0, but DeepSeek
+        # does not enforce that server-side on the standard endpoint this
+        # module uses (see the module docstring) -- a model returning 60
+        # for "60%" would otherwise silently write 60.0 into the log, which
+        # is this feature's only artifact and therefore otherwise
+        # undetectable.
+        if not (0.0 <= probability <= 1.0):
+            raise ValueError(
+                f"macro_debate: probability {probability} out of range [0.0, 1.0]"
+            )
+        events.append(MacroEvent(
             event=item["event"],
-            probability=float(item["probability"]),
+            probability=probability,
             implication=item["implication"],
-        )
-        for item in result["events"]
-    ]
+        ))
+    return events
 
 
 def evaluate_macro_debate(llm_client, session=requests):

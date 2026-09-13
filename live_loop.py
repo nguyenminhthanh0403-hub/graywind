@@ -20,8 +20,9 @@ needs to be sold.
 Requires: ALPACA_API_KEY, ALPACA_API_SECRET, FRED_API_KEY, FINNHUB_API_KEY
 in the environment. See .env.example. DEEPSEEK_API_KEY is optional -- when
 unset, `llm_client` stays None and only the shadow-mode news-debate logging
-(news_debate_log.csv) is disabled; the rest of the trading cycle (real
-gates, sizing, order submission) is completely unaffected.
+(news_debate_log.csv, macro_debate_log.csv) is disabled; the rest of the
+trading cycle (real gates, sizing, order submission) is completely
+unaffected.
 """
 import os
 import sys
@@ -252,9 +253,12 @@ def _settle_sell_fill(position, tier, tier_pools, pdt_throttle, order):
 
 
 def run_macro_debate_cycle(llm_client, cycle_timestamp, macro_debate_rows):
-    """Runs the Bullion macro-event shadow debate once for this cycle
-    (not once per WATCHLIST symbol -- Bullion's feed is market-wide, not
-    symbol-specific) and appends timestamped rows to macro_debate_rows.
+    """Runs the Bullion macro-event shadow debate once per cycle, main
+    account only (not once per WATCHLIST symbol -- Bullion's feed is
+    market-wide, not symbol-specific -- and not on the small-account job,
+    which would double the Bullion fetch + DeepSeek call for a duplicate
+    log; see the account_label guard at this function's call site) and
+    appends timestamped rows to macro_debate_rows.
     Fails open: any exception (Bullion fetch, staleness, malformed LLM
     output) is caught, printed to stderr, and produces no row this cycle --
     it must never affect the real trading cycle. See
@@ -1018,11 +1022,6 @@ def main():
                 print(f"tier1 rebalance: error, will retry next cycle: {exc}", file=sys.stderr)
 
         now = datetime.now(ET)
-        if llm_client is not None:
-            run_macro_debate_cycle(
-                llm_client=llm_client, cycle_timestamp=cycle_timestamp,
-                macro_debate_rows=macro_debate_rows,
-            )
         for symbol in WATCHLIST:
             # A single symbol's failure (a transient network error fetching
             # bars, a gate's API call timing out, an order rejected by
@@ -1063,6 +1062,27 @@ def main():
                 )
             except Exception as exc:
                 print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)
+
+        # Runs AFTER the WATCHLIST loop finishes (not before it): Bullion's
+        # feed is market-wide, not symbol-specific, so this has nothing to
+        # do with any one symbol's decision, but placed before the loop it
+        # would sit in front of EVERY symbol's stop/target exit check and
+        # buy/sell decision -- a slow or hung Bullion fetch / DeepSeek call
+        # would delay real order submission for the whole cycle. Same
+        # reasoning as process_symbol's own news-debate placement (see
+        # "See final-review Fix 3" above) applied at the cycle level instead
+        # of per-symbol. Gated on account_label == "100k" as well as
+        # llm_client: Bullion's feed is account-independent, so running this
+        # in both the main and small-account jobs would double the Bullion
+        # fetch + DeepSeek call per cycle and write byte-identical rows into
+        # two separate CSVs -- see the "Only on the main job -- macro data is
+        # account-independent" precedent in .github/workflows/live-trading.yml
+        # for the macro-gate health check.
+        if llm_client is not None and account_label == "100k":
+            run_macro_debate_cycle(
+                llm_client=llm_client, cycle_timestamp=cycle_timestamp,
+                macro_debate_rows=macro_debate_rows,
+            )
     finally:
         # Must always run, with whatever confirmed progress (submitted
         # orders reflected in open_positions, recorded day-trades reflected
@@ -1105,11 +1125,20 @@ def main():
         # propagate out of main() and fail the whole job -- fails open, per
         # the spec's mandate that shadow mode never affects the rest of the
         # cycle. See final-review Fix 2.
+        #
+        # Two independent try/except blocks, not one shared block: sharing
+        # one meant a log_news_debate failure skipped log_macro_debate
+        # entirely (silently losing that cycle's in-memory macro rows) and
+        # mislabeled the stderr message "news debate" even when the macro
+        # writer was the one that actually failed.
         try:
             log_news_debate(debate_rows, dashboard_dir=dashboard_dir)
-            log_macro_debate(macro_debate_rows, dashboard_dir=dashboard_dir)
         except Exception as exc:
             print(f"news debate log write failed, skipping: {exc}", file=sys.stderr)
+        try:
+            log_macro_debate(macro_debate_rows, dashboard_dir=dashboard_dir)
+        except Exception as exc:
+            print(f"macro debate log write failed, skipping: {exc}", file=sys.stderr)
     return 0
 
 
