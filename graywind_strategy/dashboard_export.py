@@ -94,3 +94,25 @@ def log_news_debate(rows, dashboard_dir=DEFAULT_DASHBOARD_DIR):
         if not file_exists:
             writer.writeheader()
         writer.writerows(rows)
+
+
+MACRO_DEBATE_LOG_FILENAME = "macro_debate_log.csv"
+MACRO_DEBATE_LOG_FIELDS = ["timestamp", "event", "probability", "implication"]
+
+
+def log_macro_debate(rows, dashboard_dir=DEFAULT_DASHBOARD_DIR):
+    """Appends shadow-mode macro-event-debate rows to
+    <dashboard_dir>/macro_debate_log.csv -- same append-forever semantics
+    as log_news_debate (list of rows, no-op on empty, header written once).
+    See docs/superpowers/specs/2026-09-12-graywind-bullion-macro-debate-design.md.
+    """
+    if not rows:
+        return
+    os.makedirs(dashboard_dir, exist_ok=True)
+    path = os.path.join(dashboard_dir, MACRO_DEBATE_LOG_FILENAME)
+    file_exists = os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=MACRO_DEBATE_LOG_FIELDS, lineterminator="\n")
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(rows)

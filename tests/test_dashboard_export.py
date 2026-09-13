@@ -200,3 +200,37 @@ def test_log_news_debate_writes_bare_lf_not_crlf(tmp_path):
     )
     content = open(os.path.join(dashboard_dir, "news_debate_log.csv"), "rb").read()
     assert b"\r\n" not in content
+
+
+from graywind_strategy.dashboard_export import (
+    MACRO_DEBATE_LOG_FIELDS,
+    MACRO_DEBATE_LOG_FILENAME,
+    log_macro_debate,
+)
+
+
+def test_log_macro_debate_appends_rows_and_writes_header_once(tmp_path):
+    dashboard_dir = str(tmp_path)
+    row1 = {
+        "timestamp": "2026-09-12T10:00:00-04:00", "event": "Fed cuts rates",
+        "probability": 0.6, "implication": "Bullish for rate-sensitive equities",
+    }
+    row2 = {
+        "timestamp": "2026-09-12T10:15:00-04:00", "event": "CPI comes in hot",
+        "probability": 0.3, "implication": "Bearish for growth stocks",
+    }
+
+    log_macro_debate([row1], dashboard_dir=dashboard_dir)
+    log_macro_debate([row2], dashboard_dir=dashboard_dir)
+
+    path = os.path.join(dashboard_dir, MACRO_DEBATE_LOG_FILENAME)
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [r["event"] for r in rows] == ["Fed cuts rates", "CPI comes in hot"]
+    assert list(rows[0].keys()) == MACRO_DEBATE_LOG_FIELDS
+
+
+def test_log_macro_debate_noop_on_empty_rows(tmp_path):
+    dashboard_dir = str(tmp_path)
+    log_macro_debate([], dashboard_dir=dashboard_dir)
+    assert not os.path.exists(os.path.join(dashboard_dir, MACRO_DEBATE_LOG_FILENAME))
