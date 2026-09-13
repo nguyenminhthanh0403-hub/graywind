@@ -74,3 +74,66 @@ def test_fetch_bullion_headlines_raises_when_stale_past_ceiling():
 
     with pytest.raises(MacroNewsUnavailable):
         fetch_bullion_headlines(session=session)
+
+
+from graywind_strategy.gates.macro_debate import MacroEvent, evaluate_macro_events
+
+
+def _fake_tool_response(tool_name, input_dict):
+    fake_tool_call = MagicMock()
+    fake_tool_call.function.name = tool_name
+    fake_tool_call.function.arguments = json.dumps(input_dict)
+    fake_message = MagicMock()
+    fake_message.tool_calls = [fake_tool_call]
+    fake_choice = MagicMock()
+    fake_choice.message = fake_message
+    fake_response = MagicMock()
+    fake_response.choices = [fake_choice]
+    return fake_response
+
+
+def test_evaluate_macro_events_parses_response_into_macro_events():
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = _fake_tool_response(
+        "submit_macro_events",
+        {"events": [
+            {"event": "Fed cuts rates in December", "probability": 0.6,
+             "implication": "Bullish for rate-sensitive equities"},
+        ]},
+    )
+
+    result = evaluate_macro_events(fake_client, [{"headline": "Fed signals pause"}])
+
+    assert result == [MacroEvent(
+        event="Fed cuts rates in December", probability=0.6,
+        implication="Bullish for rate-sensitive equities",
+    )]
+
+
+def test_evaluate_macro_events_forces_tool_and_disables_thinking():
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = _fake_tool_response(
+        "submit_macro_events", {"events": [
+            {"event": "e", "probability": 0.5, "implication": "i"},
+        ]},
+    )
+
+    evaluate_macro_events(fake_client, [{"headline": "Fed signals pause"}])
+
+    call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+    assert call_kwargs["tool_choice"] == {
+        "type": "function", "function": {"name": "submit_macro_events"},
+    }
+    assert call_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    prompt_text = call_kwargs["messages"][0]["content"]
+    assert "Fed signals pause" in prompt_text
+
+
+def test_evaluate_macro_events_raises_on_malformed_response():
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = _fake_tool_response(
+        "submit_macro_events", {"events": [{"event": "e"}]},
+    )
+
+    with pytest.raises(KeyError):
+        evaluate_macro_events(fake_client, [{"headline": "x"}])

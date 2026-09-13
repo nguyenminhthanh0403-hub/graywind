@@ -58,3 +58,76 @@ def fetch_bullion_headlines(session=requests):
             f"{STALENESS_CEILING_HOURS}h staleness ceiling"
         )
     return headlines
+
+
+_EVENTS_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "events": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "event": {"type": "string"},
+                    "probability": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "implication": {"type": "string"},
+                },
+                "required": ["event", "probability", "implication"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["events"],
+    "additionalProperties": False,
+}
+
+
+def _headlines_block(headlines):
+    if not headlines:
+        return "(no recent headlines)"
+    return "\n".join(f"- {h['headline']}" for h in headlines)
+
+
+def _tool_call(llm_client, prompt, tool_name, schema):
+    response = llm_client.chat.completions.create(
+        model=NEWS_DEBATE_MODEL,
+        max_tokens=NEWS_DEBATE_MAX_TOKENS,
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "description": "Submit 1-5 macro events implied by these headlines, "
+                                "each with a probability and what it implies for markets.",
+                "parameters": schema,
+                "strict": True,
+            },
+        }],
+        tool_choice={"type": "function", "function": {"name": tool_name}},
+        messages=[{"role": "user", "content": prompt}],
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    for tool_call in response.choices[0].message.tool_calls or []:
+        if tool_call.function.name == tool_name:
+            return json.loads(tool_call.function.arguments)
+    raise ValueError(f"macro_debate: no {tool_name} tool call in response")
+
+
+def evaluate_macro_events(llm_client, headlines):
+    prompt = (
+        "You are a macro markets analyst. Given these recent market-wide "
+        "headlines, identify 1-5 concrete events they suggest might happen "
+        "(policy moves, economic releases, geopolitical developments), each "
+        "with a probability from 0.0 to 1.0 and a one-sentence implication "
+        "for markets.\n\nHeadlines:\n" + _headlines_block(headlines)
+    )
+    result = _tool_call(llm_client, prompt, SUBMIT_EVENTS_TOOL_NAME, _EVENTS_TOOL_SCHEMA)
+    return [
+        MacroEvent(
+            event=item["event"],
+            probability=float(item["probability"]),
+            implication=item["implication"],
+        )
+        for item in result["events"]
+    ]
