@@ -45,9 +45,10 @@ from graywind_strategy.risk.drawdown_breaker import (
 from graywind_strategy.risk.pdt_throttle import PDTThrottle
 from graywind_strategy.risk.position_sizing import PositionSizer
 from graywind_strategy.gates.news_debate import evaluate_shadow_debate
+from graywind_strategy.gates.macro_debate import evaluate_macro_debate
 from graywind_strategy.gates.sentiment_gate import SentimentDataUnavailable, fetch_recent_headlines
 from graywind_strategy import trade_approval
-from graywind_strategy.dashboard_export import write_cycle_export, log_news_debate
+from graywind_strategy.dashboard_export import write_cycle_export, log_news_debate, log_macro_debate
 from graywind_strategy.state_store import (
     DEFAULT_STATE_DIR,
     append_decision_log, load_state, save_state, load_tier_pools, save_tier_pools,
@@ -248,6 +249,23 @@ def _settle_sell_fill(position, tier, tier_pools, pdt_throttle, order):
     filled_date = order.filled_at.date()
     if opened_date == filled_date:
         pdt_throttle.record_day_trade(filled_date)
+
+
+def run_macro_debate_cycle(llm_client, cycle_timestamp, macro_debate_rows):
+    """Runs the Bullion macro-event shadow debate once for this cycle
+    (not once per WATCHLIST symbol -- Bullion's feed is market-wide, not
+    symbol-specific) and appends timestamped rows to macro_debate_rows.
+    Fails open: any exception (Bullion fetch, staleness, malformed LLM
+    output) is caught, printed to stderr, and produces no row this cycle --
+    it must never affect the real trading cycle. See
+    docs/superpowers/specs/2026-09-12-graywind-bullion-macro-debate-design.md.
+    """
+    try:
+        for event in evaluate_macro_debate(llm_client=llm_client):
+            macro_debate_rows.append({"timestamp": cycle_timestamp, **event})
+    except Exception as exc:
+        print(f"macro debate shadow-mode error, skipping this cycle's row: {exc}",
+              file=sys.stderr)
 
 
 def process_symbol(symbol, signal, current_price, today, open_positions, equity,
@@ -889,6 +907,7 @@ def main():
     decision_rows = []
     debate_cache = {}
     debate_rows = []
+    macro_debate_rows = []
     state = load_state(state_dir=state_dir)
     pending_trades = load_pending_trades(state_dir=state_dir)
     tier_pools = load_tier_pools(state_dir=state_dir)
@@ -999,6 +1018,11 @@ def main():
                 print(f"tier1 rebalance: error, will retry next cycle: {exc}", file=sys.stderr)
 
         now = datetime.now(ET)
+        if llm_client is not None:
+            run_macro_debate_cycle(
+                llm_client=llm_client, cycle_timestamp=cycle_timestamp,
+                macro_debate_rows=macro_debate_rows,
+            )
         for symbol in WATCHLIST:
             # A single symbol's failure (a transient network error fetching
             # bars, a gate's API call timing out, an order rejected by
@@ -1083,6 +1107,7 @@ def main():
         # cycle. See final-review Fix 2.
         try:
             log_news_debate(debate_rows, dashboard_dir=dashboard_dir)
+            log_macro_debate(macro_debate_rows, dashboard_dir=dashboard_dir)
         except Exception as exc:
             print(f"news debate log write failed, skipping: {exc}", file=sys.stderr)
     return 0

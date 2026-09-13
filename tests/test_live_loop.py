@@ -2403,3 +2403,33 @@ def test_process_pending_trades_keeps_todays_row_after_a_transient_error():
             data_client=MagicMock(),
         )
     assert "AAPL" in pending_trades
+
+
+def test_run_macro_debate_cycle_appends_timestamped_rows():
+    rows = []
+    with patch(
+        "live_loop.evaluate_macro_debate",
+        return_value=[{"event": "e", "probability": 0.5, "implication": "i"}],
+    ):
+        live_loop.run_macro_debate_cycle(
+            llm_client=object(), cycle_timestamp="2026-09-12T10:00:00-04:00",
+            macro_debate_rows=rows,
+        )
+
+    assert rows == [{
+        "timestamp": "2026-09-12T10:00:00-04:00",
+        "event": "e", "probability": 0.5, "implication": "i",
+    }]
+
+
+def test_run_macro_debate_cycle_exception_does_not_raise_and_appends_nothing():
+    rows = []
+    with patch("live_loop.evaluate_macro_debate", side_effect=RuntimeError("stale feed")):
+        # Must not raise -- fail-open, same contract as process_symbol's
+        # news-debate handling.
+        live_loop.run_macro_debate_cycle(
+            llm_client=object(), cycle_timestamp="2026-09-12T10:00:00-04:00",
+            macro_debate_rows=rows,
+        )
+
+    assert rows == []
