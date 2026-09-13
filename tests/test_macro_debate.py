@@ -137,3 +137,30 @@ def test_evaluate_macro_events_raises_on_malformed_response():
 
     with pytest.raises(KeyError):
         evaluate_macro_events(fake_client, [{"headline": "x"}])
+
+
+from unittest.mock import patch
+
+from graywind_strategy.gates.macro_debate import evaluate_macro_debate
+
+
+def test_evaluate_macro_debate_returns_dicts_without_timestamp():
+    with patch(
+        "graywind_strategy.gates.macro_debate.fetch_bullion_headlines",
+        return_value=[{"headline": "Fed signals pause"}],
+    ), patch(
+        "graywind_strategy.gates.macro_debate.evaluate_macro_events",
+        return_value=[MacroEvent(event="e", probability=0.5, implication="i")],
+    ):
+        result = evaluate_macro_debate(llm_client=object())
+
+    assert result == [{"event": "e", "probability": 0.5, "implication": "i"}]
+
+
+def test_evaluate_macro_debate_propagates_fetch_failure():
+    with patch(
+        "graywind_strategy.gates.macro_debate.fetch_bullion_headlines",
+        side_effect=MacroNewsUnavailable("stale"),
+    ):
+        with pytest.raises(MacroNewsUnavailable):
+            evaluate_macro_debate(llm_client=object())

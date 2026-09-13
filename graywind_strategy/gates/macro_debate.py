@@ -131,3 +131,23 @@ def evaluate_macro_events(llm_client, headlines):
         )
         for item in result["events"]
     ]
+
+
+def evaluate_macro_debate(llm_client, session=requests):
+    """Fetches Bullion's market-wide headlines and runs the macro-event
+    debate on them, returning plain dicts (no timestamp -- the caller
+    stamps `cycle_timestamp` and appends to its own rows list, same
+    contract shape as news_debate.py::evaluate_shadow_debate).
+
+    Raises on any failure (headline fetch, staleness, malformed debate
+    output) -- does not catch anything itself. The caller
+    (live_loop.py::run_macro_debate_cycle) owns the fail-open catch, since
+    only the caller knows this is a shadow-mode-only call that must never
+    affect the real trade cycle.
+    """
+    headlines = fetch_bullion_headlines(session=session)
+    events = evaluate_macro_events(llm_client, headlines)
+    return [
+        {"event": e.event, "probability": e.probability, "implication": e.implication}
+        for e in events
+    ]
