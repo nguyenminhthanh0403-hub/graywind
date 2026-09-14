@@ -5,34 +5,43 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Graywind — Live Status</title>
 <meta name="description" content="Graywind — rule-based intraday equities strategy, live paper-trading burn-in.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%230e0e10' stroke='%23d4af6a' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23d4af6a'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%230c0f16' stroke='%23c9a15a' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23c9a15a'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Shippori+Mincho:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <style>
 :root{
-  --bg-0:#0e0e10;
-  --bg-1:#16161a;
-  --bg-2:#1d1d22;
-  --bg-3:#26262d;
-  --line:#2a2a31;
-  --line-soft:#232328;
-  --gold:#d4af6a;
-  --gold-soft:#c9b489;
-  --gold-dim:#8a7c5c;
-  --gold-bright:#f0d9a8;
-  --gold-wash:rgba(212,175,106,0.08);
-  --txt:#efeae0;
-  --txt-2:#aca795;
-  --txt-3:#82806f;
-  --pos:#7bd39a;
-  --pos-wash:rgba(123,211,154,0.12);
-  --neg:#ea7862;
-  --neg-wash:rgba(234,120,98,0.12);
+  /* Viego palette: black armor, gold filigree, ghost-fire teal -- swapped
+     in from the earlier Inkborn Fables (indigo/jade/vermillion) pass at
+     the user's request. Variable names kept as-is (--bg-0, --gold, --pos,
+     --neg, ...) since they're referenced throughout this file -- only the
+     hex values changed, so every existing rule picks up the new palette
+     for free. Red is kept but deliberately muted/quiet (not a headline
+     color here) since a trading dashboard still needs a loss signal. */
+  --bg-0:#07090a;            /* black */
+  --bg-1:#0e1416;            /* black, one step up */
+  --bg-2:#121a1c;            /* teal-black */
+  --bg-3:#1a2426;            /* teal-black, elevated */
+  --line:#223032;
+  --line-soft:#172020;
+  --gold:#caa25f;            /* gild */
+  --gold-soft:#d3b77e;
+  --gold-dim:#94804f;
+  --gold-bright:#ecd6a0;
+  --gold-wash:rgba(202,162,95,0.10);
+  --txt:#e9f3f0;             /* pale ghost-white, was warm rice-paper */
+  --txt-2:#a7bab6;
+  --txt-3:#71827e;
+  --pos:#35cbbe;             /* ghost-fire teal */
+  --pos-wash:rgba(53,203,190,0.14);
+  --neg:#c06a61;             /* muted wine -- quiet on purpose */
+  --neg-wash:rgba(192,106,97,0.12);
+  --seal-deep:#0d1f1e;       /* deep teal-black -- stamp mark fill only, not text */
   --radius:10px;
-  --font-display:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-  --font-mono:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display:'Shippori Mincho', serif;
+  --font-mono:'Shippori Mincho', serif;
+  --font-title:'Ma Shan Zheng', cursive;
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { color-scheme: dark; }
@@ -55,16 +64,16 @@ body {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 10px 20px;
-  padding-bottom: clamp(16px,3vw,22px);
-  margin-bottom: clamp(22px,4vw,34px);
-  border-bottom: 1px solid var(--line);
+  padding-bottom: clamp(14px,2.4vw,18px);
 }
-.wordmark { display: flex; align-items: baseline; gap: 10px; }
+.ink-divider { display: block; width: 100%; height: 14px; margin: 0 0 clamp(22px,4vw,34px); }
+.wordmark { display: flex; align-items: center; gap: 10px; }
+.seal { display: inline-flex; flex-shrink: 0; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.45)); }
 .wordmark h1 {
-  font-size: clamp(18px,3vw,23px);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  font-family: var(--font-title);
+  font-size: clamp(26px,4.4vw,34px);
+  font-weight: 400;
+  letter-spacing: 0.01em;
   color: var(--gold-bright);
 }
 .wordmark .tagline {
@@ -318,10 +327,33 @@ footer strong { color: var(--txt-2); font-weight: 500; }
 
   <div class="top-bar">
     <div class="wordmark">
+      <span class="seal" aria-hidden="true">
+        <svg viewBox="0 0 40 40" width="30" height="30">
+          <rect x="3" y="3" width="34" height="34" rx="5" transform="rotate(-5 20 20)" fill="var(--seal-deep)"/>
+          <rect x="7" y="7" width="26" height="26" rx="3" transform="rotate(-5 20 20)" fill="none" stroke="var(--gold)" stroke-width="1" opacity="0.7"/>
+          <path d="M13 26 C13 18 19 15 19 15 C19 15 17 20 21 21 C25 22 24 17 24 17 C24 17 29 20 27 27"
+                fill="none" stroke="var(--pos)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                opacity="0.95" transform="rotate(-5 20 20)"/>
+        </svg>
+      </span>
       <h1>Graywind</h1>
       <span class="tagline">Rule-based intraday equities strategy</span>
     </div>
   </div>
+  <svg class="ink-divider" viewBox="0 0 800 16" preserveAspectRatio="none" aria-hidden="true">
+    <defs>
+      <linearGradient id="ink-fade" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%" stop-color="var(--gold)" stop-opacity="0"/>
+        <stop offset="10%" stop-color="var(--gold)" stop-opacity="0.7"/>
+        <stop offset="90%" stop-color="var(--gold)" stop-opacity="0.7"/>
+        <stop offset="100%" stop-color="var(--gold)" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <path d="M0,8 C100,3 180,12 280,6 C400,-1 480,13 600,7 C680,3 740,10 800,8"
+          fill="none" stroke="url(#ink-fade)" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M0,9 C120,13 220,4 340,9 C460,14 540,2 660,8 C720,11 760,6 800,9"
+          fill="none" stroke="url(#ink-fade)" stroke-width="1" stroke-linecap="round" opacity="0.6"/>
+  </svg>
 
   <section id="symbol-reference" aria-labelledby="symbol-reference-head"></section>
 
