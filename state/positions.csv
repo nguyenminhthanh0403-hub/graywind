@@ -1,2 +1,2 @@
-symbol,entry_price,shares,stop,target,opened_date
-SPY,770.15,65.0,754.75,793.25,2026-08-19
+symbol,entry_price,shares,stop,target,opened_date,pending_sell_order_id
+SPY,770.15,65.0,754.75,793.25,2026-08-19,
