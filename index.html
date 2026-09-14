@@ -166,13 +166,14 @@ h2 {
   padding: clamp(10px,2vw,16px) clamp(6px,2vw,16px) clamp(6px,1.5vw,10px);
   position: relative;
 }
-#chart { width: 100%; height: 300px; display: block; overflow: visible; }
+#chart { width: 100%; height: 300px; display: block; overflow: visible; touch-action: none; }
 .area { fill: url(#equity-gradient); }
-.line { fill: none; stroke: var(--gold); stroke-width: 2; }
+.line { fill: none; stroke-width: 2; }
 .axis path, .axis line { stroke: var(--line); }
 .axis text { fill: var(--txt-3); font-family: var(--font-mono); font-size: 10.5px; }
 .crosshair-line { stroke: var(--gold-dim); stroke-width: 1; stroke-dasharray: 3,3; pointer-events: none; opacity: 0; }
-.crosshair-dot { fill: var(--gold-bright); stroke: var(--bg-1); stroke-width: 2; pointer-events: none; opacity: 0; }
+.crosshair-dot { stroke: var(--bg-1); stroke-width: 2; pointer-events: none; opacity: 0; }
+.selection-band { fill: var(--gold-wash); stroke: var(--gold-dim); stroke-width: 1; stroke-dasharray: 2,2; pointer-events: none; opacity: 0; }
 .chart-tooltip {
   position: absolute;
   pointer-events: none;
@@ -189,6 +190,54 @@ h2 {
   z-index: 2;
 }
 .chart-tooltip .tt-val { color: var(--gold-bright); font-weight: 600; }
+.chart-tooltip .tt-delta { margin-left: 6px; }
+.chart-tooltip .tt-delta.pos { color: var(--pos); }
+.chart-tooltip .tt-delta.neg { color: var(--neg); }
+
+/* ---------- Chart toolbar ---------- */
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 0 2px 10px;
+}
+.range-group, .mode-toggle {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 2px;
+}
+.range-btn, .mode-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--txt-2);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  padding: 5px 9px;
+  cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.range-btn:hover, .mode-btn:hover { color: var(--txt); }
+.range-btn.active, .mode-btn.active { background: var(--gold); color: var(--bg-0); }
+.toolbar-right { display: flex; align-items: center; gap: 10px; }
+.zoom-reset {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--gold-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 4px 2px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.zoom-reset:hover { color: var(--gold-bright); }
 .empty-state { padding: 32px 8px; text-align: center; color: var(--txt-3); font-size: 12.5px; }
 
 /* ---------- Tables ---------- */
@@ -606,80 +655,258 @@ function buildSymbolReference() {
     </div>`;
 }
 
-function renderEquityChart(accountId, equityRows) {
-  const svg = d3.select(`#chart-${accountId}`);
+const RANGE_OPTIONS = [
+  { key: "1D", days: 1 },
+  { key: "1W", days: 7 },
+  { key: "1M", days: 30 },
+  { key: "3M", days: 90 },
+  { key: "YTD", days: null },
+  { key: "All", days: null },
+];
+
+// accountId -> { data, range, customDomain, mode, tooltipEl }. Lives outside
+// the DOM so a window resize (which only redraws) doesn't lose the viewer's
+// chosen range/zoom/mode.
+const equityChartState = new Map();
+
+function rangeStartFor(rangeKey, latestTime, earliestTime) {
+  if (rangeKey === "All") return earliestTime;
+  if (rangeKey === "YTD") {
+    const jan1 = new Date(latestTime.getFullYear(), 0, 1);
+    return jan1 > earliestTime ? jan1 : earliestTime;
+  }
+  const days = RANGE_OPTIONS.find(o => o.key === rangeKey).days;
+  const start = new Date(latestTime.getTime() - days * 86400000);
+  return start > earliestTime ? start : earliestTime;
+}
+
+function getDisplayDomain(state) {
+  if (state.customDomain) return state.customDomain;
+  const latest = state.data[state.data.length - 1].time;
+  const earliest = state.data[0].time;
+  return [rangeStartFor(state.range, latest, earliest), latest];
+}
+
+function initEquityChart(accountId, equityRows) {
   const wrap = document.getElementById(`chart-wrap-${accountId}`);
+  const toolbar = document.getElementById(`chart-toolbar-${accountId}`);
+  const svg = d3.select(`#chart-${accountId}`);
+
+  const data = equityRows
+    .filter(r => r.equity !== "")
+    .map(r => ({ time: parseTimestamp(r.timestamp), equity: parseFloat(r.equity) }))
+    .sort((a, b) => a.time - b.time);
+
+  if (data.length === 0) {
+    toolbar.hidden = true;
+    const width = wrap.clientWidth;
+    svg.attr("viewBox", `0 0 ${width} 300`);
+    svg.selectAll("*").remove();
+    svg.append("text").attr("x", width / 2).attr("y", 150)
+      .attr("text-anchor", "middle").attr("fill", "var(--txt-3)").attr("font-size", 12.5)
+      .text("No equity data yet.");
+    return;
+  }
+
+  toolbar.hidden = false;
+  const state = { data, range: "All", customDomain: null, mode: "$" };
+  equityChartState.set(accountId, state);
+
+  toolbar.innerHTML = `
+    <div class="range-group" role="group" aria-label="Time range">
+      ${RANGE_OPTIONS.map(o => `<button type="button" class="range-btn${o.key === state.range ? " active" : ""}" data-range="${o.key}">${o.key}</button>`).join("")}
+    </div>
+    <div class="toolbar-right">
+      <button type="button" class="zoom-reset" id="zoom-reset-${accountId}" hidden>Reset zoom ↺</button>
+      <div class="mode-toggle" role="group" aria-label="Value mode">
+        <button type="button" class="mode-btn${state.mode === "$" ? " active" : ""}" data-mode="$">$</button>
+        <button type="button" class="mode-btn${state.mode === "%" ? " active" : ""}" data-mode="%">%</button>
+      </div>
+    </div>`;
+
+  toolbar.addEventListener("click", (event) => {
+    const rangeBtn = event.target.closest(".range-btn");
+    if (rangeBtn) {
+      state.range = rangeBtn.dataset.range;
+      state.customDomain = null;
+      toolbar.querySelectorAll(".range-btn").forEach(b => b.classList.toggle("active", b === rangeBtn));
+      drawEquityChart(accountId);
+      return;
+    }
+    const modeBtn = event.target.closest(".mode-btn");
+    if (modeBtn) {
+      state.mode = modeBtn.dataset.mode;
+      toolbar.querySelectorAll(".mode-btn").forEach(b => b.classList.toggle("active", b === modeBtn));
+      drawEquityChart(accountId);
+      return;
+    }
+    if (event.target.closest(".zoom-reset")) {
+      state.customDomain = null;
+      drawEquityChart(accountId);
+    }
+  });
+
+  // Created once and reused across redraws -- the previous version re-appended
+  // a tooltip div inside the render function itself, so every window resize
+  // (which called that function again) silently stacked up another one.
+  state.tooltipEl = d3.select(wrap).append("div").attr("class", "chart-tooltip");
+
+  drawEquityChart(accountId);
+}
+
+function drawEquityChart(accountId) {
+  const state = equityChartState.get(accountId);
+  if (!state) return;
+
+  const wrap = document.getElementById(`chart-wrap-${accountId}`);
+  const svg = d3.select(`#chart-${accountId}`);
+  const tooltip = state.tooltipEl;
   const width = wrap.clientWidth;
   const height = 300;
   const margin = { top: 16, right: 16, bottom: 26, left: 58 };
   svg.attr("viewBox", `0 0 ${width} ${height}`);
   svg.selectAll("*").remove();
 
-  const data = equityRows
-    .filter(r => r.equity !== "")
-    .map(r => ({ time: parseTimestamp(r.timestamp), equity: parseFloat(r.equity) }));
-
-  if (data.length === 0) {
-    svg.append("text").attr("x", width / 2).attr("y", height / 2)
-      .attr("text-anchor", "middle").attr("fill", "var(--txt-3)").attr("font-size", 12.5)
-      .text("No equity data yet.");
-    return;
+  const dataMin = state.data[0].time, dataMax = state.data[state.data.length - 1].time;
+  let [d0, d1] = getDisplayDomain(state);
+  if (d1 - d0 < 60000) {
+    // A single-point range (e.g. "1D" on a quiet day) would otherwise
+    // collapse the time scale -- pad it so the axis stays readable.
+    d0 = new Date(d0.getTime() - 30 * 60000);
+    d1 = new Date(d1.getTime() + 30 * 60000);
   }
 
-  const x = d3.scaleTime().domain(d3.extent(data, d => d.time)).range([margin.left, width - margin.right]);
-  const yMin = d3.min(data, d => d.equity), yMax = d3.max(data, d => d.equity);
-  const pad = Math.max((yMax - yMin) * 0.15, yMax * 0.002);
+  let slice = state.data.filter(d => d.time >= d0 && d.time <= d1);
+  if (slice.length < 2) slice = state.data.slice(-2);
+
+  document.getElementById(`zoom-reset-${accountId}`).hidden = !state.customDomain;
+
+  const baseEquity = slice[0].equity;
+  const toValue = state.mode === "%" ? d => ((d.equity - baseEquity) / baseEquity) * 100 : d => d.equity;
+  const netChange = ((slice[slice.length - 1].equity - baseEquity) / baseEquity) * 100;
+  const dirColor = netChange > 0.005 ? "var(--pos)" : netChange < -0.005 ? "var(--neg)" : "var(--gold)";
+
+  const x = d3.scaleTime().domain([d0, d1]).range([margin.left, width - margin.right]);
+  const values = slice.map(toValue);
+  const yMin = d3.min(values), yMax = d3.max(values);
+  const spread = yMax - yMin;
+  const minPad = state.mode === "%" ? 0.5 : Math.max(Math.abs(yMax), 1) * 0.002;
+  const pad = Math.max(spread * 0.15, minPad);
   const y = d3.scaleLinear().domain([yMin - pad, yMax + pad]).range([height - margin.bottom, margin.top]);
 
   const defs = svg.append("defs");
-  const grad = defs.append("linearGradient").attr("id", "equity-gradient").attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", 1);
-  grad.append("stop").attr("offset", "0%").attr("stop-color", "var(--gold)").attr("stop-opacity", 0.32);
-  grad.append("stop").attr("offset", "100%").attr("stop-color", "var(--gold)").attr("stop-opacity", 0);
+  const gradId = `equity-gradient-${accountId}`;
+  const grad = defs.append("linearGradient").attr("id", gradId).attr("x1", 0).attr("y1", 0).attr("x2", 0).attr("y2", 1);
+  grad.append("stop").attr("offset", "0%").attr("stop-color", dirColor).attr("stop-opacity", 0.32);
+  grad.append("stop").attr("offset", "100%").attr("stop-color", dirColor).attr("stop-opacity", 0);
 
-  const line = d3.line().x(d => x(d.time)).y(d => y(d.equity)).curve(d3.curveMonotoneX);
-  const area = d3.area().x(d => x(d.time)).y0(height - margin.bottom).y1(d => y(d.equity)).curve(d3.curveMonotoneX);
+  const line = d3.line().x(d => x(d.time)).y(d => y(toValue(d))).curve(d3.curveMonotoneX);
+  const area = d3.area().x(d => x(d.time)).y0(height - margin.bottom).y1(d => y(toValue(d))).curve(d3.curveMonotoneX);
 
-  const spanMs = x.domain()[1] - x.domain()[0];
+  const spanMs = d1 - d0;
   const xTickFormat = spanMs < 20 * 3600 * 1000 ? d3.timeFormat("%H:%M") : d3.timeFormat("%b %d");
+  const yTickFormat = state.mode === "%" ? pct : moneyCompact;
   svg.append("g").attr("class", "axis")
     .attr("transform", `translate(0,${height - margin.bottom})`)
     .call(d3.axisBottom(x).ticks(width > 520 ? 6 : 3).tickFormat(xTickFormat));
   svg.append("g").attr("class", "axis")
     .attr("transform", `translate(${margin.left},0)`)
-    .call(d3.axisLeft(y).ticks(5).tickFormat(moneyCompact));
+    .call(d3.axisLeft(y).ticks(5).tickFormat(yTickFormat));
 
-  svg.append("path").datum(data).attr("class", "area").attr("d", area);
-  svg.append("path").datum(data).attr("class", "line").attr("d", line);
+  svg.append("path").datum(slice).attr("class", "area").attr("fill", `url(#${gradId})`).attr("d", area);
+  svg.append("path").datum(slice).attr("class", "line").attr("stroke", dirColor).attr("d", line);
 
   const crossX = svg.append("line").attr("class", "crosshair-line").attr("y1", margin.top).attr("y2", height - margin.bottom);
-  const crossDot = svg.append("circle").attr("class", "crosshair-dot").attr("r", 4);
-  const tooltip = d3.select(wrap).append("div").attr("class", "chart-tooltip");
+  const crossDot = svg.append("circle").attr("class", "crosshair-dot").attr("fill", dirColor).attr("r", 4);
+  const selectionBand = svg.append("rect").attr("class", "selection-band")
+    .attr("y", margin.top).attr("height", Math.max(0, height - margin.top - margin.bottom));
   const bisect = d3.bisector(d => d.time).left;
 
-  svg.append("rect")
+  function pointAt(mx) {
+    const t = x.invert(mx);
+    let i = bisect(slice, t);
+    i = Math.min(Math.max(i, 0), slice.length - 1);
+    if (i > 0 && Math.abs(slice[i - 1].time - t) < Math.abs(slice[i].time - t)) i -= 1;
+    return slice[i];
+  }
+
+  function showTooltip(mx) {
+    const d = pointAt(mx);
+    const px = x(d.time), py = y(toValue(d));
+    crossX.attr("x1", px).attr("x2", px).style("opacity", 1);
+    crossDot.attr("cx", px).attr("cy", py).style("opacity", 1);
+    const pctFromStart = ((d.equity - baseEquity) / baseEquity) * 100;
+    const deltaClass = pctFromStart > 0.005 ? "pos" : pctFromStart < -0.005 ? "neg" : "";
+    tooltip.style("opacity", 1)
+      .style("left", Math.min(px + 12, width - 150) + "px")
+      .style("top", (py - 34) + "px")
+      .html(`${fmtTime(d.time)}<br><span class="tt-val">${money.format(d.equity)}</span><span class="tt-delta ${deltaClass}">${pct(pctFromStart)}</span>`);
+  }
+
+  let dragStart = null;
+
+  const overlay = svg.append("rect")
     .attr("x", margin.left).attr("y", margin.top)
     .attr("width", Math.max(0, width - margin.left - margin.right))
     .attr("height", Math.max(0, height - margin.top - margin.bottom))
     .attr("fill", "transparent")
+    .style("cursor", "crosshair")
     .on("mousemove", function (event) {
+      if (dragStart !== null) return;
       const [mx] = d3.pointer(event);
-      const t = x.invert(mx);
-      let i = bisect(data, t);
-      i = Math.min(Math.max(i, 0), data.length - 1);
-      const d = data[i];
-      const px = x(d.time), py = y(d.equity);
-      crossX.attr("x1", px).attr("x2", px).style("opacity", 1);
-      crossDot.attr("cx", px).attr("cy", py).style("opacity", 1);
-      tooltip.style("opacity", 1)
-        .style("left", Math.min(px + 12, width - 130) + "px")
-        .style("top", (py - 34) + "px")
-        .html(`${fmtTime(d.time)}<br><span class="tt-val">${money.format(d.equity)}</span>`);
+      showTooltip(mx);
     })
     .on("mouseleave", () => {
+      if (dragStart !== null) return;
       crossX.style("opacity", 0);
       crossDot.style("opacity", 0);
       tooltip.style("opacity", 0);
-    });
+    })
+    .on("dblclick", () => {
+      state.customDomain = null;
+      drawEquityChart(accountId);
+    })
+    .on("wheel", function (event) {
+      event.preventDefault();
+      const [mx] = d3.pointer(event);
+      const pivot = x.invert(mx);
+      const fullSpan = d1 - d0;
+      const factor = event.deltaY > 0 ? 1.2 : 0.8;
+      const fullExtent = Math.max(dataMax - dataMin, 60000);
+      const minSpan = 5 * 60000;
+      const newSpan = Math.min(Math.max(fullSpan * factor, minSpan), fullExtent);
+      const ratio = (pivot - d0) / fullSpan;
+      let newStart = new Date(pivot.getTime() - ratio * newSpan);
+      let newEnd = new Date(newStart.getTime() + newSpan);
+      if (newStart < dataMin) { newStart = dataMin; newEnd = new Date(newStart.getTime() + newSpan); }
+      if (newEnd > dataMax) { newEnd = dataMax; newStart = new Date(newEnd.getTime() - newSpan); }
+      state.customDomain = [newStart, newEnd];
+      drawEquityChart(accountId);
+    }, { passive: false });
+
+  overlay.call(
+    d3.drag()
+      .on("start", (event) => {
+        dragStart = event.x;
+        crossX.style("opacity", 0);
+        crossDot.style("opacity", 0);
+        tooltip.style("opacity", 0);
+      })
+      .on("drag", (event) => {
+        const bx0 = Math.min(dragStart, event.x), bx1 = Math.max(dragStart, event.x);
+        selectionBand.attr("x", bx0).attr("width", bx1 - bx0).style("opacity", 1);
+      })
+      .on("end", (event) => {
+        selectionBand.style("opacity", 0);
+        if (Math.abs(event.x - dragStart) > 6) {
+          const bx0 = Math.min(dragStart, event.x), bx1 = Math.max(dragStart, event.x);
+          const [t0, t1] = [x.invert(bx0), x.invert(bx1)];
+          if (t1 - t0 > 60000) state.customDomain = [t0, t1];
+        }
+        dragStart = null;
+        drawEquityChart(accountId);
+      })
+  );
 }
 
 function renderAccount(accountId, label, containerEl, statusRows, equityRows, tradeRows, performanceReport) {
@@ -697,15 +924,18 @@ function renderAccount(accountId, label, containerEl, statusRows, equityRows, tr
     ${buildHero(statusRows, equityRows, tradeRows)}
     <section aria-labelledby="equity-head-${accountId}">
       <div class="section-head"><h2 id="equity-head-${accountId}">Equity Curve</h2></div>
-      <div id="chart-wrap-${accountId}"><svg id="chart-${accountId}"></svg></div>
+      <div id="chart-wrap-${accountId}">
+        <div class="chart-toolbar" id="chart-toolbar-${accountId}"></div>
+        <svg id="chart-${accountId}"></svg>
+      </div>
     </section>
     ${buildPositions(statusRows)}
     ${buildTradeLog(tradeRows)}
     ${buildPerformanceReport(performanceReport)}`;
 
   renderFreshness(accountId, parseTimestamp(statusRows[0].last_cycle_timestamp));
-  renderEquityChart(accountId, equityRows);
-  window.addEventListener("resize", () => renderEquityChart(accountId, equityRows), { passive: true });
+  initEquityChart(accountId, equityRows);
+  window.addEventListener("resize", () => drawEquityChart(accountId), { passive: true });
 }
 
 function renderAccountUnavailable(accountId, label, containerEl, message) {
