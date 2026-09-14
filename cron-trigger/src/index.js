@@ -30,12 +30,19 @@ export default {
   },
 
   // Manual GET lets you confirm the trigger works right now instead of
-  // waiting for the next cron tick -- hit the Worker's *.workers.dev URL
-  // directly. Treat that URL as effectively secret: anyone with it can
-  // waste your Actions minutes by spamming dispatches, though they can't
-  // do anything worse -- GITHUB_PAT never leaves this Worker.
+  // waiting for the next cron tick: hit /?key=<TRIGGER_SECRET>. This used to
+  // be an unauthenticated GET -- "treat the URL as effectively secret" --
+  // but that's exactly what let something (never identified; no local cron/
+  // launchd job on this machine was responsible) hit it every 15 minutes
+  // on a Sunday, when the Worker's own weekday-only Cron Trigger correctly
+  // stayed silent. Harmless (live_loop.py's market-hours gate no-ops any
+  // out-of-window run) but wasteful, so this now requires TRIGGER_SECRET
+  // (set via `wrangler secret put TRIGGER_SECRET`) and 404s -- same as an
+  // unrecognized route -- on anything else, so a prober can't tell a wrong
+  // key from no route at all.
   async fetch(request, env) {
-    if (request.method !== "GET") {
+    const url = new URL(request.url);
+    if (request.method !== "GET" || url.searchParams.get("key") !== env.TRIGGER_SECRET) {
       return new Response("not found", { status: 404 });
     }
     const result = await triggerGraywindCycle(env);
