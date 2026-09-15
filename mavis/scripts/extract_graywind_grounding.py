@@ -19,7 +19,13 @@ ACCOUNTS = [
 
 
 def latest_decision_per_symbol(csv_path: Path) -> dict[str, dict]:
-    """Return the most recent decision row per symbol from a decision log."""
+    """Return the most recent decision row per symbol from a decision log.
+
+    Unlike read_pending_trades, a missing file is not a normal empty state
+    here -- it means the account/path is misconfigured -- so this
+    deliberately does not guard against it and lets FileNotFoundError
+    propagate.
+    """
     decisions: dict[str, dict] = {}
     with csv_path.open(newline="") as f:
         reader = csv.DictReader(f)
@@ -38,9 +44,13 @@ def read_pending_trades(csv_path: Path) -> list[dict]:
 
 
 def extract_watchlist(live_loop_path: Path) -> list[str]:
-    """Extract the WATCHLIST assignment from a live_loop.py file."""
+    """Extract the WATCHLIST assignment from a live_loop.py file.
+
+    Non-greedy up to the first "]" -- correct as long as ticker symbols
+    never contain a literal "]", which holds for real stock tickers.
+    """
     text = live_loop_path.read_text()
-    match = re.search(r"^WATCHLIST\s*=\s*(\[.*\])", text, re.MULTILINE)
+    match = re.search(r"^WATCHLIST\s*=\s*(\[.*?\])", text, re.MULTILINE | re.DOTALL)
     if not match:
         raise ValueError(f"WATCHLIST assignment not found in {live_loop_path}")
     return ast.literal_eval(match.group(1))

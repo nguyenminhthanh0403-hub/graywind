@@ -1,6 +1,7 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from pydantic import BaseModel
 
+import auth
 import grounding
 import graywind_grounding
 from providers import GROQ_MODEL, groq_answer
@@ -18,7 +19,7 @@ def status():
 
 
 @app.post("/ask")
-async def ask(req: AskRequest):
+async def ask(req: AskRequest, api_key: str = Depends(auth.require_api_key)):
     bullion_hits = grounding.retrieve(req.query)
     graywind_hits = graywind_grounding.retrieve(req.query)
 

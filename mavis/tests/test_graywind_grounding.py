@@ -13,6 +13,18 @@ def test_retrieve_returns_empty_for_unrelated_query():
     assert hits == []
 
 
+def test_retrieve_does_not_match_on_a_single_ordinary_word():
+    hits = graywind_grounding.retrieve("approval")
+
+    assert hits == []
+
+
+def test_retrieve_does_not_flood_on_the_universal_namespace_tag():
+    hits = graywind_grounding.retrieve("how is graywind doing lately")
+
+    assert hits == []
+
+
 def test_format_context_returns_none_for_no_hits():
     assert graywind_grounding.format_context([]) is None
 

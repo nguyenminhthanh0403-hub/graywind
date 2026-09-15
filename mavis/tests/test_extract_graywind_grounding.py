@@ -35,6 +35,11 @@ def test_latest_decision_per_symbol_keeps_last_row_per_symbol(tmp_path: Path):
     assert aapl["reason"] == "all checks passed"
 
 
+def test_latest_decision_per_symbol_raises_when_file_missing(tmp_path: Path):
+    with pytest.raises(FileNotFoundError):
+        latest_decision_per_symbol(tmp_path / "does_not_exist.csv")
+
+
 def test_read_pending_trades_returns_empty_list_when_file_missing(tmp_path: Path):
     assert read_pending_trades(tmp_path / "does_not_exist.csv") == []
 
@@ -68,6 +73,20 @@ def test_extract_watchlist_raises_when_missing(tmp_path: Path):
 
     with pytest.raises(ValueError):
         extract_watchlist(file_path)
+
+
+def test_extract_watchlist_parses_a_multiline_assignment(tmp_path: Path):
+    file_path = tmp_path / "live_loop.py"
+    file_path.write_text(
+        'SOME_OTHER = 1\n'
+        'WATCHLIST = [\n'
+        '    "AAPL",\n'
+        '    "SERV",\n'
+        ']\n'
+        'MORE = 2\n'
+    )
+
+    assert extract_watchlist(file_path) == ["AAPL", "SERV"]
 
 
 def test_build_facts_includes_watchlist_decisions_and_pending():
