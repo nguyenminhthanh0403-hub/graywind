@@ -20,7 +20,7 @@ manual-trade.yml per --account) -- see .env.example.
 """
 import argparse
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -40,6 +40,7 @@ from fetch_alpaca_data import fetch_bars
 from graywind_strategy import manual_actions_log, state_store
 from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker, build_rolling_breakers
 from graywind_strategy.tier_config import SYMBOL_TIER
+from live_loop import SIGNAL_LOOKBACK
 
 ET = ZoneInfo("America/New_York")
 
@@ -115,6 +116,71 @@ def handle_close_or_sell_partial(trading_client, state, symbol, qty):
         "reason": f"{symbol}: sell order {submitted.id} submitted for {sell_qty} shares; "
                   "settles on the next live cycle",
     }
+
+
+def handle_buy_more(trading_client, data_client, state, state_dir, tier_pools, symbol, qty, today):
+    if qty is None or qty <= 0:
+        return {"status": "rejected", "reason": f"{symbol}: buy_more requires a positive --qty"}
+
+    position = state["open_positions"].get(symbol)
+    if position is None:
+        return {"status": "rejected", "reason": f"{symbol}: no locally tracked open position to add to"}
+
+    tier = SYMBOL_TIER.get(symbol)
+    if tier is None:
+        return {"status": "rejected", "reason": f"{symbol}: no tier in SYMBOL_TIER; refusing to size a buy"}
+
+    account = trading_client.get_account()
+    equity = float(account.equity)
+    # Same formula main() uses (live_loop.py:955): reuse today's already-
+    # established baseline if one exists, otherwise this cycle's equity IS
+    # the baseline. Deliberately does not persist this via save_state -- if
+    # this runs before the day's first automated cycle, that cycle still
+    # establishes its own baseline the same way; a same-day difference of a
+    # few minutes' equity drift is an acceptable approximation for a paper
+    # account, not a correctness bug.
+    starting_equity = state["starting_equity"] if state["day"] == today.isoformat() else equity
+
+    drawdown_breaker = DrawdownBreaker(max_daily_loss_fraction=0.02)
+    if starting_equity > 0:
+        drawdown_breaker.start_new_day(today, starting_equity)
+        drawdown_breaker.update_equity(equity)
+    else:
+        drawdown_breaker.trip()
+    if not drawdown_breaker.can_open_new_trade():
+        return {"status": "rejected", "reason": f"{symbol}: daily drawdown breaker blocks new buys right now"}
+
+    rolling_breakers = build_rolling_breakers()
+    equity_history = state_store.load_equity_history(state_dir=state_dir)
+    for breaker in rolling_breakers:
+        breaker.load_history(equity_history)
+    if not all(b.can_open_new_trade() for b in rolling_breakers):
+        return {"status": "rejected", "reason": f"{symbol}: a rolling drawdown breaker blocks new buys right now"}
+
+    now = datetime.now(ET)
+    bars = fetch_bars(data_client, symbol, now - SIGNAL_LOOKBACK, now)
+    if not bars:
+        return {"status": "rejected", "reason": f"{symbol}: could not fetch a current price"}
+    current_price = bars[-1].close
+    cost = qty * current_price
+    pool_cash = tier_pools.get(tier, 0.0)
+    if cost > pool_cash:
+        return {
+            "status": "rejected",
+            "reason": f"{symbol}: tier {tier} pool has ${pool_cash:.2f}, needs ${cost:.2f}",
+        }
+
+    order = MarketOrderRequest(symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
+    try:
+        trading_client.submit_order(order)
+    except Exception as exc:
+        return {"status": "rejected", "reason": f"{symbol}: buy order submission failed ({exc})"}
+
+    total_shares = position["shares"] + qty
+    position["entry_price"] = (position["entry_price"] * position["shares"] + current_price * qty) / total_shares
+    position["shares"] = total_shares
+    tier_pools[tier] = pool_cash - cost
+    return {"status": "submitted", "reason": f"{symbol}: bought {qty} more shares at ~{current_price}"}
 
 
 if __name__ == "__main__":
