@@ -370,10 +370,22 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
             pass  # falls through to the fresh stop/target check below
         elif order.status == OrderStatus.FILLED:
             _settle_sell_fill(position, tier, tier_pools, pdt_throttle, order)
+            filled_qty = float(order.filled_qty)
             print(f"{symbol}: sell order {position['pending_sell_order_id']} settlement "
                   f"confirmed ({order.filled_qty} shares @ {order.filled_avg_price})")
-            del open_positions[symbol]
-            position = None
+            if filled_qty >= position["shares"] - 1e-6:
+                # A full-share fill -- either a close/stop/target exit, or a
+                # sell_partial whose qty happened to equal the full holding.
+                del open_positions[symbol]
+                position = None
+            else:
+                # A manual sell_partial (execute_manual_trade.py) filled for
+                # fewer shares than the position holds. Mirrors the
+                # TERMINAL_UNFILLED_ORDER_STATUSES partial-fill handling
+                # below: shrink shares by exactly what filled and keep the
+                # remainder under management instead of dropping it.
+                position["shares"] -= filled_qty
+                position.pop("pending_sell_order_id", None)
         elif order.status in TERMINAL_UNFILLED_ORDER_STATUSES:
             filled_qty = float(order.filled_qty or 0)
             if filled_qty > 0:

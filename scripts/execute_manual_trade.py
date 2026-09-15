@@ -84,5 +84,38 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def handle_close_or_sell_partial(trading_client, state, symbol, qty):
+    position = state["open_positions"].get(symbol)
+    if position is None:
+        return {"status": "rejected", "reason": f"{symbol}: no locally tracked open position"}
+
+    if qty is not None and qty <= 0:
+        return {"status": "rejected", "reason": f"{symbol}: qty must be positive"}
+
+    sell_qty = position["shares"] if qty is None else min(qty, position["shares"])
+
+    if not cancel_existing_pending_order(trading_client, position):
+        return {
+            "status": "rejected",
+            "reason": f"{symbol}: could not confirm cancellation of an existing pending "
+                      "order; try again next cycle",
+        }
+
+    order = MarketOrderRequest(
+        symbol=symbol, qty=sell_qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
+    )
+    try:
+        submitted = trading_client.submit_order(order)
+    except Exception as exc:
+        return {"status": "rejected", "reason": f"{symbol}: order submission failed ({exc})"}
+
+    position["pending_sell_order_id"] = str(submitted.id)
+    return {
+        "status": "submitted",
+        "reason": f"{symbol}: sell order {submitted.id} submitted for {sell_qty} shares; "
+                  "settles on the next live cycle",
+    }
+
+
 if __name__ == "__main__":
     sys.exit(1)  # placeholder entrypoint; replaced by main() in Task 6

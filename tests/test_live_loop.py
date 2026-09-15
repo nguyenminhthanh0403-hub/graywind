@@ -205,6 +205,42 @@ def test_pending_sell_confirmed_filled_credits_pool_and_clears_position():
     assert pdt_throttle.record_day_trade.call_args[0][0] == date(2024, 1, 8)
 
 
+def test_pending_sell_confirmed_filled_for_fewer_shares_than_held_shrinks_not_deletes():
+    # A manual sell_partial (execute_manual_trade.py) submits a sell order
+    # for fewer shares than the position holds. Unlike a stop/target exit or
+    # a manual close (both always sell the full holding), a full FILL of
+    # this order must shrink the position, not drop it from tracking.
+    order = MagicMock()
+    order.status = OrderStatus.FILLED
+    order.filled_qty = "4"
+    order.filled_avg_price = "96.5"
+    order.filled_at = datetime(2024, 1, 8, 15, 55, tzinfo=ET)
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+
+    open_positions = {
+        # Price stays between stop/target below so settlement's fall-through
+        # doesn't immediately resubmit a fresh exit for the remainder --
+        # that resubmission path is already covered by the sibling
+        # TERMINAL_UNFILLED partial-fill test above; this test isolates the
+        # FILLED-branch shrink-vs-delete decision itself.
+        "AAPL": _position(shares=10, stop=90.0, target=110.0, opened_date="2024-01-08"),
+    }
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+    tier_pools = {1: 0.0, 2: 500.0, 3: 0.0}
+
+    _, _, pdt_throttle, remaining, _ = _call(
+        symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client, tier_pools=tier_pools,
+    )
+
+    assert "AAPL" in remaining
+    assert remaining["AAPL"]["shares"] == 6
+    assert "pending_sell_order_id" not in remaining["AAPL"]
+    assert tier_pools[2] == 500.0 + 4 * 96.5
+    assert pdt_throttle.record_day_trade.call_args[0][0] == date(2024, 1, 8)
+
+
 def test_pending_sell_canceled_with_no_fill_clears_marker_and_resubmits_same_cycle():
     # The sell never filled (e.g. a trading halt) -- clear the stale marker
     # and let the ordinary stop/target check below retry it THIS cycle,
