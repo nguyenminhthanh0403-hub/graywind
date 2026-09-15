@@ -1,6 +1,6 @@
 .worktrees/
-data/
-alpaca_data/
+/data/
+/alpaca_data/
 __pycache__/
 *.pyc
 .venv/
