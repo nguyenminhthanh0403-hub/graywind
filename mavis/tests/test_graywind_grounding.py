@@ -25,6 +25,26 @@ def test_retrieve_does_not_flood_on_the_universal_namespace_tag():
     assert hits == []
 
 
+def test_a_symbol_tag_stays_strong_even_when_it_is_on_every_fact(monkeypatch):
+    # A single-symbol watchlist is a normal, plausible operational state --
+    # unlike "graywind" (always on every fact by construction), a symbol
+    # tag being on every fact here is just a data coincidence and must not
+    # get demoted to a weak term.
+    fake_facts = [
+        {"id": "watchlist", "tags": ["watchlist", "graywind", "aapl"], "text": "Graywind's active trading watchlist is AAPL."},
+        {"id": "pending-100k-13", "tags": ["pending", "graywind", "100k", "aapl"], "text": "Pending trade proposal for AAPL, tier 2, awaiting manual approval."},
+    ]
+    monkeypatch.setattr(graywind_grounding, "_FACTS", fake_facts)
+    monkeypatch.setattr(
+        graywind_grounding, "_STRONG_TERMS",
+        {tag for fact in fake_facts for tag in fact["tags"]} - {"graywind"},
+    )
+
+    hits = graywind_grounding.retrieve("AAPL pending trade")
+
+    assert any(h["id"] == "pending-100k-13" for h in hits)
+
+
 def test_format_context_returns_none_for_no_hits():
     assert graywind_grounding.format_context([]) is None
 

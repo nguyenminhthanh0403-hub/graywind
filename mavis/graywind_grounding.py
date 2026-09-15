@@ -5,7 +5,8 @@ no live reads are performed here.
 """
 import json
 import os
-import re
+
+from text_scoring import score_overlap, tokenize
 
 _GROUNDING_PATH = os.path.join(os.path.dirname(__file__), "data", "graywind_grounding.json")
 
@@ -17,27 +18,17 @@ with open(_GROUNDING_PATH, encoding="utf-8") as f:
 # as grounding.py's _STRONG_TERMS/MIN_SCORE=2. Tags are the deliberately
 # curated match points (symbols, "watchlist", "decision", "pending",
 # account names); a tag match counts double, a plain-text-only match once.
-# A tag present on every single fact (e.g. "graywind", used on all of
-# them as a namespace marker) carries zero discriminating power and is
-# excluded -- otherwise it alone would score >= MIN_SCORE against every
-# fact, regardless of what the query actually asked about.
-_all_tags = [tag for fact in _FACTS for tag in fact["tags"]]
-_STRONG_TERMS = {tag for tag in set(_all_tags) if _all_tags.count(tag) < len(_FACTS)}
+# "graywind" is a namespace marker build_facts() adds to every fact
+# unconditionally -- a structural certainty, not a data-dependent one --
+# so it carries zero discriminating power and is excluded by name. This
+# is deliberately NOT "any tag not on every fact" (a document-frequency
+# rule considered and rejected): with a single-symbol watchlist, that
+# symbol's own tag would legitimately appear on every fact too, and a
+# frequency-based rule would wrongly demote the one tag a query about
+# that symbol most needs to hit strong on.
+_STRUCTURAL_TAGS = {"graywind"}
+_STRONG_TERMS = {tag for fact in _FACTS for tag in fact["tags"]} - _STRUCTURAL_TAGS
 MIN_SCORE = 2
-STOPWORDS = {
-    "the", "a", "an", "is", "are", "was", "were", "of", "to", "and", "or", "in",
-    "on", "for", "with", "what", "why", "how", "does", "do", "did", "it",
-    "this", "that", "explain", "tell", "me", "about"
-}
-
-
-def _tokenize(text: str) -> set[str]:
-    cleaned = re.sub(r"[^0-9a-zA-Z]+", " ", text.lower())
-    return {
-        token
-        for token in cleaned.split()
-        if token not in STOPWORDS and len(token) > 1
-    }
 
 
 def retrieve(query: str, top_k: int = 5) -> list[dict]:
@@ -46,27 +37,24 @@ def retrieve(query: str, top_k: int = 5) -> list[dict]:
     scripts/extract_graywind_grounding.py -- no live account read
     happens here or at request time).
     """
-    query_tokens = _tokenize(query)
+    query_tokens = tokenize(query)
     if not query_tokens:
         return []
 
-    hits_with_score = []
+    scored = []
     for fact in _FACTS:
-        haystack_tokens = set(fact["tags"]) | _tokenize(fact["text"])
+        haystack_tokens = set(fact["tags"]) | tokenize(fact["text"])
         overlap = query_tokens & haystack_tokens
-        strong = overlap & _STRONG_TERMS
-        weak = overlap - _STRONG_TERMS
-        score = 2 * len(strong) + len(weak)
+        score = score_overlap(overlap, _STRONG_TERMS)
         if score >= MIN_SCORE:
-            hit = {
+            scored.append((score, {
                 "type": "graywind_fact",
                 "id": fact["id"],
                 "text": fact["text"],
-            }
-            hits_with_score.append((hit, score))
+            }))
 
-    hits_with_score.sort(key=lambda x: x[1], reverse=True)
-    return [hit for hit, _ in hits_with_score[:top_k]]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [item for score, item in scored[:top_k]]
 
 
 def format_context(hits: list[dict]) -> str | None:

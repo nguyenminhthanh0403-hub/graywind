@@ -46,8 +46,10 @@ def read_pending_trades(csv_path: Path) -> list[dict]:
 def extract_watchlist(live_loop_path: Path) -> list[str]:
     """Extract the WATCHLIST assignment from a live_loop.py file.
 
-    Non-greedy up to the first "]" -- correct as long as ticker symbols
-    never contain a literal "]", which holds for real stock tickers.
+    Non-greedy up to the first "]" -- correct as long as no ticker symbol
+    or inline comment before the list's real closing bracket contains a
+    literal "]". live_loop.py is this same project's own source, not
+    adversarial input, so that holds in practice.
     """
     text = live_loop_path.read_text()
     match = re.search(r"^WATCHLIST\s*=\s*(\[.*?\])", text, re.MULTILINE | re.DOTALL)
