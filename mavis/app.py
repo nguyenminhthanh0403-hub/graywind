@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 import grounding
+import graywind_grounding
 from providers import GROQ_MODEL, groq_answer
 
 app = FastAPI()
@@ -18,11 +19,17 @@ def status():
 
 @app.post("/ask")
 async def ask(req: AskRequest):
-    hits = grounding.retrieve(req.query)
-    context = grounding.format_context(hits)
+    bullion_hits = grounding.retrieve(req.query)
+    graywind_hits = graywind_grounding.retrieve(req.query)
+
+    context = "\n\n".join(filter(None, [
+        grounding.format_context(bullion_hits),
+        graywind_grounding.format_context(graywind_hits),
+    ])) or None
+
     answer = await groq_answer(req.query, context)
 
     return {
         "answer": answer,
-        "citations": hits,
+        "citations": bullion_hits + graywind_hits,
     }
