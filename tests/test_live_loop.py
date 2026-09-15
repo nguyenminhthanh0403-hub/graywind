@@ -310,6 +310,175 @@ def test_pending_sell_still_in_flight_skips_resubmission_and_fresh_entry():
     assert remaining["AAPL"]["pending_sell_order_id"] == "order-1"
 
 
+def test_pending_sell_still_in_flight_uncovered_target_breach_cancels_and_submits_full_exit():
+    # A manual set-stop/target call (execute_manual_trade.py) that only gave
+    # a stop price submits a stop-only order and marks
+    # pending_sell_order_covers="stop" -- the target leg has no broker-side
+    # protection. If price crosses the target while that stop order is still
+    # resting, live_loop must not just sit on its hands (the old bug the
+    # code review caught): it cancels the single-leg order and submits a
+    # real full exit.
+    order = MagicMock()
+    order.status = OrderStatus.NEW
+    order.filled_qty = "0"  # unfilled -- the resting order gets cleanly cancelled
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+    trading_client.submit_order.return_value.id = "order-2"
+    trading_client.get_account.return_value.equity = "10000.0"
+
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+    open_positions["AAPL"]["pending_sell_order_covers"] = "stop"
+
+    _, trading_client, _, remaining, drawdown_breaker = _call(
+        symbol="AAPL", current_price=104.0, open_positions=open_positions,
+        trading_client=trading_client,
+    )
+
+    trading_client.cancel_order_by_id.assert_called_once_with("order-1")
+    trading_client.submit_order.assert_called_once()
+    order_sent = trading_client.submit_order.call_args[0][0]
+    assert order_sent.side == OrderSide.SELL and order_sent.qty == 10
+    assert remaining["AAPL"]["pending_sell_order_id"] == "order-2"
+    assert "pending_sell_order_covers" not in remaining["AAPL"]
+    drawdown_breaker.update_equity.assert_called_once_with(10000.0)
+
+
+def test_pending_sell_still_in_flight_uncovered_stop_breach_cancels_and_submits_full_exit():
+    # Mirror of the target case: a target-only order (covers="target")
+    # resting while price falls through the stop must also trigger a real
+    # exit, not silent inaction.
+    order = MagicMock()
+    order.status = OrderStatus.NEW
+    order.filled_qty = "0"  # unfilled -- the resting order gets cleanly cancelled
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+    trading_client.submit_order.return_value.id = "order-2"
+    trading_client.get_account.return_value.equity = "10000.0"
+
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+    open_positions["AAPL"]["pending_sell_order_covers"] = "target"
+
+    _, trading_client, _, remaining, _ = _call(
+        symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client,
+    )
+
+    trading_client.cancel_order_by_id.assert_called_once_with("order-1")
+    trading_client.submit_order.assert_called_once()
+    assert remaining["AAPL"]["pending_sell_order_id"] == "order-2"
+
+
+def test_pending_sell_still_in_flight_covered_leg_breach_takes_no_extra_action():
+    # An OCO order (covers="both") resting while price crosses the stop is
+    # already protected at the broker -- must NOT cancel/resubmit, same as
+    # the no-covers-field legacy case above.
+    order = MagicMock()
+    order.status = OrderStatus.NEW
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+    open_positions["AAPL"]["pending_sell_order_covers"] = "both"
+
+    mock_decide, trading_client, _, remaining, _ = _call(
+        symbol="AAPL", current_price=97.0, open_positions=open_positions,
+        trading_client=trading_client,
+    )
+
+    trading_client.cancel_order_by_id.assert_not_called()
+    trading_client.submit_order.assert_not_called()
+    mock_decide.assert_not_called()
+    assert remaining["AAPL"]["pending_sell_order_id"] == "order-1"
+
+
+def test_pending_sell_still_in_flight_uncovered_breach_cancel_failure_retries_next_cycle(capsys):
+    # cancel_existing_pending_order fails closed (state unknown -- maybe the
+    # resting order already filled). Must not submit a second sell against
+    # shares that might already be gone; must leave the marker in place so
+    # the normal pending-order reconciliation retries next cycle.
+    order = MagicMock()
+    order.status = OrderStatus.NEW
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+    trading_client.cancel_order_by_id.side_effect = RuntimeError("already filled")
+
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+    open_positions["AAPL"]["pending_sell_order_covers"] = "stop"
+
+    _, trading_client, _, remaining, _ = _call(
+        symbol="AAPL", current_price=104.0, open_positions=open_positions,
+        trading_client=trading_client,
+    )
+
+    trading_client.submit_order.assert_not_called()
+    assert remaining["AAPL"]["pending_sell_order_id"] == "order-1"  # untouched, not resubmitted
+    assert "could not cancel resting order" in capsys.readouterr().err
+
+
+def test_pending_sell_still_in_flight_uncovered_breach_but_resting_order_already_partially_filled():
+    # Code-review finding: cancel_existing_pending_order can succeed at the
+    # API level while the order had already partially filled -- Alpaca only
+    # cancels the REMAINING unfilled qty. Submitting a fresh full-qty exit
+    # on top of that would be wrong (the broker no longer holds the full
+    # share count). Must fail closed exactly like an outright cancel
+    # failure, not resubmit.
+    order = MagicMock()
+    order.status = OrderStatus.NEW
+    order.filled_qty = "6"  # 6 of 10 shares already sold before this cycle's cancel
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+
+    open_positions = {"AAPL": _position(shares=10, stop=98.0, target=103.0)}
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+    open_positions["AAPL"]["pending_sell_order_covers"] = "stop"
+
+    _, trading_client, _, remaining, _ = _call(
+        symbol="AAPL", current_price=104.0, open_positions=open_positions,
+        trading_client=trading_client,
+    )
+
+    trading_client.cancel_order_by_id.assert_called_once_with("order-1")
+    trading_client.submit_order.assert_not_called()
+    assert remaining["AAPL"]["pending_sell_order_id"] == "order-1"  # untouched, not resubmitted
+
+
+def test_pending_sell_still_in_flight_uncovered_breach_success_still_records_symbol_status():
+    # Code-review finding: the success path (cancel + resubmit full exit)
+    # used to return immediately without ever writing a symbol_statuses
+    # entry, unlike every other branch -- silently dropping this symbol from
+    # dashboard_export's per-cycle status exactly on the cycle a real
+    # emergency exit was submitted. Must fall through to the same
+    # "already holding" fallback the ordinary stop/target exit path uses.
+    order = MagicMock()
+    order.status = OrderStatus.NEW
+    order.filled_qty = "0"  # unfilled -- the resting order gets cleanly cancelled
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = order
+    trading_client.submit_order.return_value.id = "order-2"
+    trading_client.get_account.return_value.equity = "10000.0"
+
+    open_positions = {"AAPL": _position(stop=98.0, target=103.0)}
+    open_positions["AAPL"]["pending_sell_order_id"] = "order-1"
+    open_positions["AAPL"]["pending_sell_order_covers"] = "stop"
+    symbol_statuses = {}
+
+    process_symbol(
+        symbol="AAPL", signal="hold", current_price=104.0, today=date(2024, 1, 8),
+        open_positions=open_positions, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+        drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+        trading_client=trading_client, drawdown_breaker=MagicMock(),
+        cycle_timestamp="2026-08-15T10:00:00-04:00", cycle_trades=[], symbol_statuses=symbol_statuses,
+    )
+
+    assert "AAPL" in symbol_statuses
+    assert symbol_statuses["AAPL"]["position_open"] is True
+    assert symbol_statuses["AAPL"]["action"] == "hold"
+
+
 def test_pending_sell_lookup_failure_clears_marker_and_retries_same_cycle(capsys):
     # get_order_by_id can fail for reasons that have nothing to do with the
     # order's real status (transient API error, an id Alpaca no longer

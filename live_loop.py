@@ -49,6 +49,7 @@ from graywind_strategy.gates.news_debate import evaluate_shadow_debate
 from graywind_strategy.gates.macro_debate import evaluate_macro_debate
 from graywind_strategy.gates.sentiment_gate import SentimentDataUnavailable, fetch_recent_headlines
 from graywind_strategy import trade_approval
+from graywind_strategy.order_cancel import cancel_existing_pending_order
 from graywind_strategy.dashboard_export import write_cycle_export, log_news_debate, log_macro_debate
 from graywind_strategy.state_store import (
     DEFAULT_STATE_DIR,
@@ -237,7 +238,11 @@ def _settle_sell_fill(position, tier, tier_pools, pdt_throttle, order):
     the order, and PDT must count the day the trade actually realized, not
     the day this process happened to observe it.
     """
-    filled_qty = float(order.filled_qty)
+    # order.filled_qty is typed Optional by alpaca-py -- `or 0` guards the
+    # same way the TERMINAL_UNFILLED branch already does two branches below
+    # this function's only other call site, even though a CONFIRMED fill
+    # should always carry a real quantity in practice.
+    filled_qty = float(order.filled_qty or 0)
     filled_price = float(order.filled_avg_price)
     if tier is not None and tier_pools is not None:
         tier_pools[tier] += filled_qty * filled_price
@@ -250,6 +255,53 @@ def _settle_sell_fill(position, tier, tier_pools, pdt_throttle, order):
     filled_date = order.filled_at.date()
     if opened_date == filled_date:
         pdt_throttle.record_day_trade(filled_date)
+
+
+def _submit_stop_target_exit(trading_client, position, symbol, current_price, cycle_timestamp,
+                              cycle_trades, drawdown_breaker, equity, reason):
+    """Submits a full-position market sell and marks it pending settlement.
+    Shared by the ordinary stop/target check (no order resting at all) and
+    the uncovered-leg check below (a single-leg manual stop/target order was
+    resting but didn't protect the OTHER leg, which just got breached) --
+    both end up wanting the identical submit-and-bookkeep sequence, just
+    reached from different conditions.
+    """
+    order = MarketOrderRequest(
+        symbol=symbol, qty=position["shares"],
+        side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
+    )
+    submitted_order = trading_client.submit_order(order)
+    position["pending_sell_order_id"] = str(submitted_order.id)
+    position.pop("pending_sell_order_covers", None)
+    cycle_trades.append({
+        "timestamp": cycle_timestamp, "symbol": symbol, "side": "sell",
+        "qty": position["shares"], "price": current_price, "reason": reason,
+    })
+    # Mirrors the backtester's per-exit update_equity call (see the
+    # bar-by-bar loop in backtester.py) -- catches a same-cycle drawdown
+    # breach triggered by this exit before evaluating later symbols in
+    # this same cycle, rather than waiting for the next cycle's single
+    # per-cycle update in main(). Re-polls real account equity instead of
+    # reusing the `equity` snapshot taken before this cycle's WATCHLIST
+    # loop began: that snapshot predates this cycle's per-symbol bar
+    # fetches (and this exit itself), so it's stale by however long
+    # those took -- reusing it unchanged is numerically identical to
+    # what update_equity already saw once this cycle and cannot reflect
+    # anything that happened since. A fresh read picks up whatever
+    # changed in that window; whether Alpaca's own equity figure lags
+    # a same-moment fill isn't verified here. Bounded to at most one
+    # extra get_account() call per exit per cycle (WATCHLIST is small).
+    # Falls back to the stale snapshot on a transient API error -- the
+    # exit order has already been submitted by this point, so this
+    # recheck failing must not crash the cycle or skip the drawdown
+    # check entirely.
+    try:
+        fresh_equity = float(trading_client.get_account().equity)
+    except Exception:
+        fresh_equity = equity
+    drawdown_breaker.update_equity(fresh_equity)
+    print(f"{symbol}: submitted sell for {position['shares']} shares ({reason}), "
+          f"awaiting settlement (order {position['pending_sell_order_id']})")
 
 
 def run_macro_debate_cycle(llm_client, cycle_timestamp, macro_debate_rows):
@@ -365,12 +417,13 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
             print(f"{symbol}: could not check sell order {pending_order_id}'s status "
                   f"({exc}); clearing it and retrying this cycle", file=sys.stderr)
             position.pop("pending_sell_order_id", None)
+            position.pop("pending_sell_order_covers", None)
             order = None
         if order is None:
             pass  # falls through to the fresh stop/target check below
         elif order.status == OrderStatus.FILLED:
             _settle_sell_fill(position, tier, tier_pools, pdt_throttle, order)
-            filled_qty = float(order.filled_qty)
+            filled_qty = float(order.filled_qty or 0)
             print(f"{symbol}: sell order {position['pending_sell_order_id']} settlement "
                   f"confirmed ({order.filled_qty} shares @ {order.filled_avg_price})")
             if filled_qty >= position["shares"] - 1e-6:
@@ -386,6 +439,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 # remainder under management instead of dropping it.
                 position["shares"] -= filled_qty
                 position.pop("pending_sell_order_id", None)
+                position.pop("pending_sell_order_covers", None)
         elif order.status in TERMINAL_UNFILLED_ORDER_STATUSES:
             filled_qty = float(order.filled_qty or 0)
             if filled_qty > 0:
@@ -411,59 +465,77 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 print(f"{symbol}: sell order {position['pending_sell_order_id']} did not fill "
                       f"({order.status.value}); eligible to retry")
             position.pop("pending_sell_order_id", None)
+            position.pop("pending_sell_order_covers", None)
             # Falls through to the fresh stop/target check below, same cycle.
         else:
-            # Still in flight (new/accepted/pending_new/partially_filled/...)
-            # -- treat exactly like an ordinary held position this cycle:
-            # skip a resubmission (one is already working) and skip a fresh
-            # entry (decide_trade) below.
-            symbol_statuses[symbol] = {
-                "position_open": True, "shares": position["shares"], "entry_price": position["entry_price"],
-                "current_price": current_price, "action": "hold",
-                "reason": f"sell order {position['pending_sell_order_id']} pending settlement ({order.status.value})",
-            }
-            print(f"{symbol}: sell order {position['pending_sell_order_id']} still pending "
-                  f"({order.status.value}), skipping this cycle")
-            return
+            # Still in flight (new/accepted/pending_new/partially_filled/...).
+            # A resting order set by handle_set_stop_target (Task 5) may only
+            # cover ONE leg (stop-only or target-only) -- see
+            # pending_sell_order_covers, written there and persisted by
+            # state_store.py. covers is None/absent for every other kind of
+            # resting sell order (close/sell-partial, or live_loop's own
+            # full-exit below), which always intends to exit the whole
+            # position and so counts as covering both legs. Only when a leg
+            # is genuinely uncovered do we check whether IT got breached
+            # while nothing at the broker was protecting it, and if so,
+            # cancel the single-leg order and submit a real full exit instead
+            # of silently riding past it until the resting order's own
+            # cycle-to-cycle status check happens to notice something.
+            covers = position.get("pending_sell_order_covers")
+            stop_covered = covers is None or covers in ("both", "stop")
+            target_covered = covers is None or covers in ("both", "target")
+            uncovered_breach = (
+                (not stop_covered and current_price <= position["stop"])
+                or (not target_covered and current_price >= position["target"])
+            )
+            if uncovered_breach:
+                pending_order_id = position["pending_sell_order_id"]
+                if cancel_existing_pending_order(trading_client, position):
+                    _submit_stop_target_exit(
+                        trading_client, position, symbol, current_price, cycle_timestamp,
+                        cycle_trades, drawdown_breaker, equity,
+                        "stop/target exit (uncovered leg breached while a single-leg order was resting)",
+                    )
+                    # Deliberately does NOT return here (unlike the cancel-
+                    # failure branch below): falls through to the same
+                    # "already holding" symbol_statuses fallback at the
+                    # bottom of this function that the ordinary stop/target
+                    # exit path (further down) also relies on. An early
+                    # return here would skip writing any symbol_statuses
+                    # entry for this cycle at all -- silently dropping this
+                    # symbol from dashboard_export's per-cycle status on
+                    # exactly the cycle a real emergency exit was submitted.
+                else:
+                    symbol_statuses[symbol] = {
+                        "position_open": True, "shares": position["shares"],
+                        "entry_price": position["entry_price"], "current_price": current_price,
+                        "action": "hold",
+                        "reason": f"uncovered leg breached but could not cancel resting order "
+                                  f"{pending_order_id}; retrying next cycle",
+                    }
+                    print(f"{symbol}: uncovered leg breached but could not cancel resting order "
+                          f"{pending_order_id}; will retry next cycle", file=sys.stderr)
+                    return
+            else:
+                # treat exactly like an ordinary held position this cycle --
+                # skip a resubmission (one is already working) and skip a
+                # fresh entry (decide_trade) below.
+                symbol_statuses[symbol] = {
+                    "position_open": True, "shares": position["shares"], "entry_price": position["entry_price"],
+                    "current_price": current_price, "action": "hold",
+                    "reason": f"sell order {position['pending_sell_order_id']} pending settlement ({order.status.value})",
+                }
+                print(f"{symbol}: sell order {position['pending_sell_order_id']} still pending "
+                      f"({order.status.value}), skipping this cycle")
+                return
 
     if position is not None and not position.get("pending_sell_order_id") and (
         current_price <= position["stop"] or current_price >= position["target"]
     ):
-        order = MarketOrderRequest(
-            symbol=symbol, qty=position["shares"],
-            side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
+        _submit_stop_target_exit(
+            trading_client, position, symbol, current_price, cycle_timestamp,
+            cycle_trades, drawdown_breaker, equity, "stop/target exit",
         )
-        submitted_order = trading_client.submit_order(order)
-        position["pending_sell_order_id"] = str(submitted_order.id)
-        cycle_trades.append({
-            "timestamp": cycle_timestamp, "symbol": symbol, "side": "sell",
-            "qty": position["shares"], "price": current_price, "reason": "stop/target exit",
-        })
-        # Mirrors the backtester's per-exit update_equity call (see the
-        # bar-by-bar loop in backtester.py) -- catches a same-cycle drawdown
-        # breach triggered by this exit before evaluating later symbols in
-        # this same cycle, rather than waiting for the next cycle's single
-        # per-cycle update in main(). Re-polls real account equity instead of
-        # reusing the `equity` snapshot taken before this cycle's WATCHLIST
-        # loop began: that snapshot predates this cycle's per-symbol bar
-        # fetches (and this exit itself), so it's stale by however long
-        # those took -- reusing it unchanged is numerically identical to
-        # what update_equity already saw once this cycle and cannot reflect
-        # anything that happened since. A fresh read picks up whatever
-        # changed in that window; whether Alpaca's own equity figure lags
-        # a same-moment fill isn't verified here. Bounded to at most one
-        # extra get_account() call per exit per cycle (WATCHLIST is small).
-        # Falls back to the stale snapshot on a transient API error -- the
-        # exit order has already been submitted by this point, so this
-        # recheck failing must not crash the cycle or skip the drawdown
-        # check entirely.
-        try:
-            fresh_equity = float(trading_client.get_account().equity)
-        except Exception:
-            fresh_equity = equity
-        drawdown_breaker.update_equity(fresh_equity)
-        print(f"{symbol}: submitted sell for {position['shares']} shares (stop/target exit), "
-              f"awaiting settlement (order {position['pending_sell_order_id']})")
         # Deliberately NOT set to None here (unlike before this fix): a
         # position pending settlement stays tracked, so it falls into the
         # "already holding" branch below rather than being eligible for a

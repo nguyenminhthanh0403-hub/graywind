@@ -38,36 +38,12 @@ from alpaca.trading.requests import (
 
 from fetch_alpaca_data import fetch_bars
 from graywind_strategy import manual_actions_log, state_store
+from graywind_strategy.order_cancel import cancel_existing_pending_order
 from graywind_strategy.risk.drawdown_breaker import DrawdownBreaker, build_rolling_breakers
 from graywind_strategy.tier_config import SYMBOL_TIER
 from live_loop import SIGNAL_LOOKBACK
 
 ET = ZoneInfo("America/New_York")
-
-
-def cancel_existing_pending_order(trading_client, position):
-    """A sell-side action must never leave two live orders against the same
-    shares. `position` may already carry a `pending_sell_order_id` from an
-    earlier stop/target order or a close/sell-partial still awaiting
-    next-cycle settlement.
-
-    A cancel failure is treated as "state unknown, do not proceed" rather
-    than trying to distinguish a transient API error from "the order
-    already filled" -- guessing wrong in the filled case would submit a
-    second real sell against shares that are already gone. Fails closed;
-    the caller surfaces this as a rejection and the position resolves
-    itself on the next live_loop cycle either way.
-    """
-    pending_id = position.get("pending_sell_order_id")
-    if not pending_id:
-        return True
-    try:
-        trading_client.cancel_order_by_id(pending_id)
-    except Exception as exc:
-        print(f"could not cancel existing pending order {pending_id}: {exc}", file=sys.stderr)
-        return False
-    position.pop("pending_sell_order_id", None)
-    return True
 
 
 def parse_args(argv=None):
@@ -125,6 +101,19 @@ def handle_buy_more(trading_client, data_client, state, state_dir, tier_pools, s
     position = state["open_positions"].get(symbol)
     if position is None:
         return {"status": "rejected", "reason": f"{symbol}: no locally tracked open position to add to"}
+    if position.get("pending_sell_order_id"):
+        # A resting sell order (full close/partial-sell, or a single-leg
+        # stop/target order) was sized for the CURRENT share count.
+        # Silently growing position["shares"] underneath it would either
+        # leave the newly bought shares with no stop/target protection at
+        # all (single-leg case) or make a resting close/sell-partial's qty
+        # wrong relative to the new total. Refuse instead -- the caller can
+        # retry once the resting order settles or is canceled.
+        return {
+            "status": "rejected",
+            "reason": f"{symbol}: a sell order ({position['pending_sell_order_id']}) is already "
+                      "resting on this position; cannot buy more until it resolves",
+        }
 
     tier = SYMBOL_TIER.get(symbol)
     if tier is None:
@@ -154,6 +143,15 @@ def handle_buy_more(trading_client, data_client, state, state_dir, tier_pools, s
     equity_history = state_store.load_equity_history(state_dir=state_dir)
     for breaker in rolling_breakers:
         breaker.load_history(equity_history)
+    # Mirrors live_loop.py's main(): record TODAY's live equity before
+    # checking can_open_new_trade(), not just whatever history was persisted
+    # by the last automated cycle. Without this, a rolling-window breach
+    # that happened today but hasn't been through an automated cycle yet
+    # (equity_history.csv still only has prior days) would silently let a
+    # manual buy-more through a drawdown level main() would have blocked.
+    if equity > 0:
+        for breaker in rolling_breakers:
+            breaker.record_equity(today, equity)
     if not all(b.can_open_new_trade() for b in rolling_breakers):
         return {"status": "rejected", "reason": f"{symbol}: a rolling drawdown breaker blocks new buys right now"}
 
@@ -181,6 +179,73 @@ def handle_buy_more(trading_client, data_client, state, state_dir, tier_pools, s
     position["shares"] = total_shares
     tier_pools[tier] = pool_cash - cost
     return {"status": "submitted", "reason": f"{symbol}: bought {qty} more shares at ~{current_price}"}
+
+
+def handle_set_stop_target(trading_client, state, symbol, stop_price, target_price):
+    position = state["open_positions"].get(symbol)
+    if position is None:
+        return {"status": "rejected", "reason": f"{symbol}: no locally tracked open position"}
+    if stop_price is None and target_price is None:
+        return {"status": "rejected", "reason": f"{symbol}: must supply a stop price, a target price, or both"}
+    if stop_price is not None and target_price is not None and stop_price >= target_price:
+        # Checked BEFORE canceling any existing resting order below -- a
+        # transposed pair would otherwise cancel real protection, then get
+        # rejected by Alpaca on submit, leaving the position with no
+        # resting order at all until the next retry or the ordinary
+        # stop/target check happens to catch it.
+        return {
+            "status": "rejected",
+            "reason": f"{symbol}: stop price ({stop_price}) must be below target price ({target_price})",
+        }
+
+    if not cancel_existing_pending_order(trading_client, position):
+        return {
+            "status": "rejected",
+            "reason": f"{symbol}: could not confirm cancellation of an existing pending "
+                      "order; try again next cycle",
+        }
+
+    shares = position["shares"]
+    if stop_price is not None and target_price is not None:
+        order = LimitOrderRequest(
+            symbol=symbol, qty=shares, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+            order_class=OrderClass.OCO, limit_price=target_price,
+            take_profit=TakeProfitRequest(limit_price=target_price),
+            stop_loss=StopLossRequest(stop_price=stop_price),
+        )
+    elif stop_price is not None:
+        order = StopOrderRequest(
+            symbol=symbol, qty=shares, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+            stop_price=stop_price,
+        )
+    else:
+        order = LimitOrderRequest(
+            symbol=symbol, qty=shares, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+            limit_price=target_price,
+        )
+
+    try:
+        submitted = trading_client.submit_order(order)
+    except Exception as exc:
+        return {"status": "rejected", "reason": f"{symbol}: stop/target order submission failed ({exc})"}
+
+    position["pending_sell_order_id"] = str(submitted.id)
+    # Recorded so live_loop.py knows which leg(s) this resting order actually
+    # enforces -- a stop-only or target-only order leaves the other leg with
+    # no broker-side protection, and live_loop must keep watching it locally
+    # instead of treating any pending_sell_order_id as full coverage (see
+    # order_cancel.py's docstring precedent for this kind of leaf-level fix).
+    if stop_price is not None and target_price is not None:
+        position["pending_sell_order_covers"] = "both"
+    elif stop_price is not None:
+        position["pending_sell_order_covers"] = "stop"
+    else:
+        position["pending_sell_order_covers"] = "target"
+    if stop_price is not None:
+        position["stop"] = stop_price
+    if target_price is not None:
+        position["target"] = target_price
+    return {"status": "submitted", "reason": f"{symbol}: stop/target order {submitted.id} resting at Alpaca"}
 
 
 if __name__ == "__main__":

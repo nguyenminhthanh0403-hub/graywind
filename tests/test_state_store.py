@@ -131,6 +131,36 @@ def test_load_state_omits_pending_sell_order_id_when_never_set(tmp_path):
     assert "pending_sell_order_id" not in state["open_positions"]["AAPL"]
 
 
+def test_save_then_load_round_trips_a_pending_sell_order_covers(tmp_path):
+    # A single-leg stop/target order (execute_manual_trade.py's
+    # handle_set_stop_target) records which leg it covers so live_loop.py
+    # can keep watching the other one across cycles -- this must survive
+    # the fresh-process reload the same way pending_sell_order_id does.
+    state_dir = str(tmp_path)
+    save_state({
+        "day_trade_dates": [], "day": "2024-01-08", "starting_equity": 10000.0,
+        "open_positions": {
+            "AAPL": {
+                "entry_price": 150.0, "shares": 10, "stop": 147.0, "target": 154.5,
+                "opened_date": "2024-01-08", "pending_sell_order_id": "order-123",
+                "pending_sell_order_covers": "stop",
+            },
+        },
+    }, state_dir=state_dir)
+    state = load_state(state_dir=state_dir)
+    assert state["open_positions"]["AAPL"]["pending_sell_order_covers"] == "stop"
+
+
+def test_load_state_omits_pending_sell_order_covers_when_never_set(tmp_path):
+    state_dir = str(tmp_path)
+    save_state({
+        "day_trade_dates": [], "day": "2024-01-08", "starting_equity": 10000.0,
+        "open_positions": {"AAPL": {"entry_price": 150.0, "shares": 10, "stop": 147.0, "target": 154.5, "opened_date": "2024-01-08"}},
+    }, state_dir=state_dir)
+    state = load_state(state_dir=state_dir)
+    assert "pending_sell_order_covers" not in state["open_positions"]["AAPL"]
+
+
 def test_save_then_load_round_trips_multiple_open_positions(tmp_path):
     state_dir = str(tmp_path)
     save_state({
@@ -202,6 +232,7 @@ def test_save_writes_two_separate_csv_files(tmp_path):
     assert rows == [{
         "symbol": "AAPL", "entry_price": "150.0", "shares": "10", "stop": "147.0",
         "target": "154.5", "opened_date": "2024-01-08", "pending_sell_order_id": "",
+        "pending_sell_order_covers": "",
     }]
 
 
