@@ -46,8 +46,10 @@ def read_recent_manual_actions(dashboard_dir, limit=10):
 
 
 def has_idempotency_key(dashboard_dir, idempotency_key):
-    # 500 is generous for a personal-project action log's realistic size;
-    # revisit only if this file ever grows large enough to make this slow.
+    # read_recent_manual_actions parses the WHOLE file regardless of limit
+    # (it slices after reading) -- this is O(file size), not O(500). Fine
+    # at this personal project's realistic volume (a handful of manual
+    # actions at most); revisit with a real bounded read if that changes.
     return any(
         row["idempotency_key"] == idempotency_key
         for row in read_recent_manual_actions(dashboard_dir, limit=500)
