@@ -1,1 +1,1 @@
-symbol,entry_price,shares,stop,target,opened_date,pending_sell_order_id
+symbol,entry_price,shares,stop,target,opened_date,pending_sell_order_id,pending_sell_order_covers
