@@ -33,6 +33,7 @@ POSITIONS_FILENAME = "positions.csv"
 OPERATIONAL_FIELDS = ["day", "starting_equity", "day_trade_dates"]
 POSITIONS_FIELDS = [
     "symbol", "entry_price", "shares", "stop", "target", "opened_date", "pending_sell_order_id",
+    "pending_sell_order_covers",
 ]
 TIER_POOLS_FILENAME = "tier_pools.csv"
 TIER_POOLS_FIELDS = ["tier", "cash"]
@@ -115,6 +116,9 @@ def load_state(state_dir=DEFAULT_STATE_DIR):
                     pending_sell_order_id = row.get("pending_sell_order_id")
                     if pending_sell_order_id:
                         position["pending_sell_order_id"] = pending_sell_order_id
+                    pending_sell_order_covers = row.get("pending_sell_order_covers")
+                    if pending_sell_order_covers:
+                        position["pending_sell_order_covers"] = pending_sell_order_covers
                     positions[row["symbol"]] = position
             state["open_positions"] = positions
         except (ValueError, KeyError, TypeError) as exc:
