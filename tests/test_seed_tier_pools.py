@@ -5,7 +5,7 @@ import pytest
 
 from graywind_strategy.state_store import load_tier_pools, save_tier_pools
 from scripts import seed_tier_pools
-from scripts.seed_tier_pools import compute_seed_split, main, pools_are_unfunded
+from scripts.seed_tier_pools import compute_seed_split, main, zero_tiers
 
 
 # --- compute_seed_split (pure) ---
@@ -60,14 +60,18 @@ def test_unmapped_open_position_does_not_affect_any_tier():
     assert seed == {1: 70_000.0, 2: 20_000.0, 3: 10_000.0}
 
 
-# --- pools_are_unfunded ---
+# --- zero_tiers ---
 
-def test_all_zero_is_unfunded():
-    assert pools_are_unfunded({1: 0.0, 2: 0.0, 3: 0.0}) is True
+def test_all_zero_are_all_zero_tiers():
+    assert zero_tiers({1: 0.0, 2: 0.0, 3: 0.0}) == {1, 2, 3}
 
 
-def test_any_nonzero_tier_is_not_unfunded():
-    assert pools_are_unfunded({1: 70_000.0, 2: 0.0, 3: 10_000.0}) is False
+def test_only_the_zero_tiers_are_returned():
+    assert zero_tiers({1: 70_000.0, 2: 0.0, 3: 10_000.0}) == {2}
+
+
+def test_no_zero_tiers_returns_empty_set():
+    assert zero_tiers({1: 70_000.0, 2: 5_000.0, 3: 10_000.0}) == set()
 
 
 # --- main() integration ---
@@ -90,17 +94,47 @@ def _read_output(github_output_path):
         return f.read()
 
 
-def test_main_skips_entirely_when_pools_already_funded(tmp_path, monkeypatch):
+def test_main_skips_seeding_when_pools_already_funded(tmp_path, monkeypatch):
     state_dir = str(tmp_path / "state")
-    save_tier_pools({1: 70_000.0, 2: 0.0, 3: 10_000.0}, state_dir=state_dir)
+    save_tier_pools({1: 70_000.0, 2: 5_000.0, 3: 10_000.0}, state_dir=state_dir)
     monkeypatch.setenv("GRAYWIND_STATE_DIR", state_dir)
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "gh_output"))
+    monkeypatch.setenv("ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALPACA_API_SECRET", "s")
     monkeypatch.setattr(seed_tier_pools, "SYMBOL_TIER", {"AAPL": 2})
+    monkeypatch.setattr(seed_tier_pools, "TIER_TARGET_WEIGHTS", {1: 0.70, 2: 0.20, 3: 0.10})
 
     with patch("scripts.seed_tier_pools.TradingClient") as mock_cls:
+        mock_cls.return_value.get_account.return_value = _mock_account(85_000.0)
+        mock_cls.return_value.get_all_positions.return_value = [_mock_position("AAPL", 5_000.0)]
         assert main() == 0
-        mock_cls.assert_not_called()
 
+    assert load_tier_pools(state_dir=state_dir) == {1: 70_000.0, 2: 5_000.0, 3: 10_000.0}
+    assert "tier_pool_health=healthy" in _read_output(tmp_path / "gh_output")
+
+
+def test_partially_funded_pool_seeds_only_the_zero_tiers(tmp_path, monkeypatch):
+    state_dir = str(tmp_path / "state")
+    save_tier_pools({1: 0.0, 2: 51_387.63, 3: 0.0}, state_dir=state_dir)
+    monkeypatch.setenv("GRAYWIND_STATE_DIR", state_dir)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "gh_output"))
+    monkeypatch.setenv("ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(seed_tier_pools, "SYMBOL_TIER", {"AAPL": 2, "SERV": 3})
+    monkeypatch.setattr(seed_tier_pools, "TIER1_SYMBOL_WEIGHTS", {"SPY": 1.0})
+    monkeypatch.setattr(seed_tier_pools, "TIER_TARGET_WEIGHTS", {1: 0.70, 2: 0.20, 3: 0.10})
+
+    with patch("scripts.seed_tier_pools.TradingClient") as mock_cls:
+        mock_cls.return_value.get_account.return_value = _mock_account(250_000.0)
+        mock_cls.return_value.get_all_positions.return_value = [
+            _mock_position("AAPL", 51_387.63),
+        ]
+        assert main() == 0
+
+    result = load_tier_pools(state_dir=state_dir)
+    assert result[1] == pytest.approx(175_000.0)   # 70% of 250k, SPY has no position yet
+    assert result[2] == pytest.approx(51_387.63)   # untouched -- was already funded
+    assert result[3] == pytest.approx(25_000.0)    # 10% of 250k, SERV has no position yet
     assert "tier_pool_health=healthy" in _read_output(tmp_path / "gh_output")
 
 
@@ -116,7 +150,7 @@ def test_main_reports_unhealthy_when_credentials_missing(tmp_path, monkeypatch):
     assert main() == 0
     assert "tier_pool_health=unhealthy" in _read_output(tmp_path / "gh_output")
     # never actually wrote a seed, since it couldn't fetch equity
-    assert pools_are_unfunded(load_tier_pools(state_dir=state_dir))
+    assert zero_tiers(load_tier_pools(state_dir=state_dir)) == {1, 2, 3}
 
 
 def test_main_reports_unhealthy_when_alpaca_call_fails(tmp_path, monkeypatch):
@@ -133,7 +167,7 @@ def test_main_reports_unhealthy_when_alpaca_call_fails(tmp_path, monkeypatch):
         assert main() == 0
 
     assert "tier_pool_health=unhealthy" in _read_output(tmp_path / "gh_output")
-    assert pools_are_unfunded(load_tier_pools(state_dir=state_dir))
+    assert zero_tiers(load_tier_pools(state_dir=state_dir)) == {1, 2, 3}
 
 
 def test_main_seeds_pools_from_live_equity_and_positions(tmp_path, monkeypatch):

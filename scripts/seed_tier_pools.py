@@ -14,12 +14,11 @@ tier 1's monthly rebalance computed drift against itself
 ~0 drift when the pool is $0) -- silently frozen at whatever share count it
 happened to hold, never tracking real account growth.
 
-Idempotent by construction: only ever WRITES a fresh seed when every tier
-currently reads exactly $0.0 (the actual unfunded state today). Once seeded,
-at least one tier will almost certainly be non-zero (a real position's
-market value essentially never lands on the exact target dollar amount to
-the cent), so this becomes a pure health check on every later run -- it
-will not silently overwrite real accumulated cash.
+Idempotent per tier: only ever WRITES a fresh seed into a tier that
+currently reads exactly $0.0, leaving every other tier's accumulated
+ledger cash untouched. A tier that's non-zero because it already holds a
+committed position (or has traded since its own seed) is never
+overwritten here.
 
 Deliberately never fails the job (mirrors check_macro_health.py) -- a
 missing credential or a transient Alpaca API error here must not skip the
@@ -38,6 +37,20 @@ from graywind_strategy.state_store import load_tier_pools, save_tier_pools
 from graywind_strategy.tier_config import SYMBOL_TIER, TIER1_SYMBOL_WEIGHTS, TIER_TARGET_WEIGHTS
 
 
+def _committed_by_tier(market_value_by_symbol, symbol_tier, tier1_symbol_weights):
+    """{tier: sum of open-position market value for symbols mapped to that
+    tier}, via tier1_symbol_weights for tier 1 and symbol_tier for tiers 2/3.
+    Shared by compute_seed_split and (in a later change) a drift check, so
+    the two never compute "what's already committed" two different ways.
+    """
+    committed = {}
+    for symbol in tier1_symbol_weights:
+        committed[1] = committed.get(1, 0.0) + market_value_by_symbol.get(symbol, 0.0)
+    for symbol, tier in symbol_tier.items():
+        committed[tier] = committed.get(tier, 0.0) + market_value_by_symbol.get(symbol, 0.0)
+    return committed
+
+
 def compute_seed_split(total_equity, market_value_by_symbol, target_weights=TIER_TARGET_WEIGHTS,
                         symbol_tier=None, tier1_symbol_weights=None):
     """Pure: {tier: cash_to_seed} from live account equity and each open
@@ -49,19 +62,22 @@ def compute_seed_split(total_equity, market_value_by_symbol, target_weights=TIER
     """
     symbol_tier = symbol_tier if symbol_tier is not None else {}
     tier1_symbol_weights = tier1_symbol_weights if tier1_symbol_weights is not None else {}
-    committed = {tier: 0.0 for tier in target_weights}
-    for symbol in tier1_symbol_weights:
-        committed[1] = committed.get(1, 0.0) + market_value_by_symbol.get(symbol, 0.0)
-    for symbol, tier in symbol_tier.items():
-        committed[tier] = committed.get(tier, 0.0) + market_value_by_symbol.get(symbol, 0.0)
+    committed = _committed_by_tier(market_value_by_symbol, symbol_tier, tier1_symbol_weights)
     return {
         tier: max(0.0, total_equity * weight - committed.get(tier, 0.0))
         for tier, weight in target_weights.items()
     }
 
 
-def pools_are_unfunded(tier_pools):
-    return all(cash == 0.0 for cash in tier_pools.values())
+def zero_tiers(tier_pools):
+    """The tiers currently reading exactly $0.0 -- these are the only ones
+    eligible for seeding. Replaces the old all-or-nothing
+    pools_are_unfunded(): a tier with a pre-existing committed position
+    (e.g. tier 2 holding AAPL) can be genuinely funded while a sibling tier
+    (tier 1, tier 3) never received its share, and the old all-tiers check
+    skipped seeding entirely whenever any single tier was non-zero.
+    """
+    return {tier for tier, cash in tier_pools.items() if cash == 0.0}
 
 
 def _write_github_output(status):
@@ -82,8 +98,9 @@ def main():
         return 0
 
     tier_pools = load_tier_pools(state_dir=state_dir)
+    to_seed = zero_tiers(tier_pools)
 
-    if not pools_are_unfunded(tier_pools):
+    if not to_seed:
         print(f"tier pools already funded ({tier_pools}); nothing to do")
         _write_github_output("healthy")
         return 0
@@ -108,11 +125,13 @@ def main():
         total_equity, market_value_by_symbol,
         symbol_tier=SYMBOL_TIER, tier1_symbol_weights=TIER1_SYMBOL_WEIGHTS,
     )
-    save_tier_pools(seed, state_dir=state_dir)
-    print(f"seeded tier pools from equity={total_equity}: {seed}")
+    for tier in to_seed:
+        tier_pools[tier] = seed[tier]
+    save_tier_pools(tier_pools, state_dir=state_dir)
+    print(f"seeded previously-unfunded tiers {sorted(to_seed)} from equity={total_equity}: "
+          f"{ {t: tier_pools[t] for t in to_seed} }")
 
-    still_unfunded = pools_are_unfunded(load_tier_pools(state_dir=state_dir))
-    _write_github_output("unhealthy" if still_unfunded else "healthy")
+    _write_github_output("healthy")
     return 0
 
 
