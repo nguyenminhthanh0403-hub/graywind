@@ -1,6 +1,7 @@
 import pytest
 
 from graywind_strategy.risk.position_sizing import PositionSizer
+from graywind_strategy.tier_config import TIER_TARGET_WEIGHTS
 
 
 def test_shares_to_buy_risks_exactly_the_configured_fraction_of_equity():
@@ -118,3 +119,29 @@ def test_init_raises_on_zero_small_account_cap_fraction():
 def test_init_raises_on_invalid_small_account_cap_fraction_above_one():
     with pytest.raises(ValueError):
         PositionSizer(small_account_cap_fraction=1.5)
+
+
+def test_small_account_tier_pools_never_clear_the_small_account_threshold():
+    """Documents graywind-critical-review-punch-list-execution-handoff.md
+    item 5's finding (re-confirmed 2026-09-16, see
+    docs/superpowers/plans/2026-09-16-graywind-punch-list.md Task 3):
+    PositionSizer.shares_to_buy receives *pool* equity
+    (tier_pools[tier] + committed), never whole-account equity. For the
+    ~$2k small account, no tier's sizing_equity can exceed
+    total_account_equity * its own target weight, regardless of how that
+    tier's equity splits between ledger cash and a committed position --
+    and even tier 1's 70% share tops out at ~$1,400, still under
+    small_account_threshold=2000.0. There is no real trade where the 50%
+    position-value cap is OFF for this account; it isn't guarding a rare
+    edge case here, it's permanently active. No production code change
+    follows from this finding.
+    """
+    small_account_equity = 2_000.0
+    sizer = PositionSizer()
+    for tier, weight in TIER_TARGET_WEIGHTS.items():
+        max_possible_pool_equity = small_account_equity * weight
+        assert max_possible_pool_equity < sizer.small_account_threshold, (
+            f"tier {tier}'s maximum possible pool equity ({max_possible_pool_equity}) "
+            "reached the small-account threshold -- the cap-is-always-on finding may "
+            "no longer hold; re-investigate"
+        )
