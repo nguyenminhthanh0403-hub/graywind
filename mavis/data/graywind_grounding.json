@@ -1,0 +1,64 @@
+{
+  "facts": [
+    {
+      "id": "watchlist",
+      "tags": [
+        "watchlist",
+        "graywind",
+        "aapl",
+        "serv"
+      ],
+      "text": "Graywind's active trading watchlist is AAPL, SERV."
+    },
+    {
+      "id": "decision-100k-AAPL",
+      "tags": [
+        "decision",
+        "graywind",
+        "100k",
+        "aapl"
+      ],
+      "text": "[Graywind, 100k account] Most recent decision for AAPL: hold \u2014 \"no buy signal\" (as of 2026-09-15T13:31:17.237297-04:00)."
+    },
+    {
+      "id": "decision-100k-SERV",
+      "tags": [
+        "decision",
+        "graywind",
+        "100k",
+        "serv"
+      ],
+      "text": "[Graywind, 100k account] Most recent decision for SERV: hold \u2014 \"no buy signal\" (as of 2026-09-15T13:31:17.237297-04:00)."
+    },
+    {
+      "id": "decision-small-AAPL",
+      "tags": [
+        "decision",
+        "graywind",
+        "small",
+        "aapl"
+      ],
+      "text": "[Graywind, small account] Most recent decision for AAPL: hold \u2014 \"no buy signal\" (as of 2026-09-15T13:31:52.795355-04:00)."
+    },
+    {
+      "id": "decision-small-SERV",
+      "tags": [
+        "decision",
+        "graywind",
+        "small",
+        "serv"
+      ],
+      "text": "[Graywind, small account] Most recent decision for SERV: hold \u2014 \"no buy signal\" (as of 2026-09-15T13:31:52.795355-04:00)."
+    },
+    {
+      "id": "pending-small-17",
+      "tags": [
+        "pending",
+        "graywind",
+        "small",
+        "serv"
+      ],
+      "text": "[Graywind, small account] Pending trade proposal: buy 23.1570 shares of SERV (tier 3), proposed 2026-09-15, GitHub issue #17 \u2014 awaiting manual approval."
+    }
+  ]
+}
