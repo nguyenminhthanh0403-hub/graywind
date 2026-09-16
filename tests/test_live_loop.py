@@ -1276,7 +1276,7 @@ def test_symbol_exception_does_not_abort_cycle_and_save_state_still_runs():
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
@@ -1327,7 +1327,7 @@ def _run_main_with_equity(equity, load_equity_history_mock, history, state=None)
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
@@ -1446,7 +1446,7 @@ def test_main_threads_graywind_state_dir_env_var_into_every_state_call(isolate_e
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
              "GRAYWIND_STATE_DIR": "state/small",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
@@ -1491,7 +1491,7 @@ def test_main_defaults_graywind_state_dir_to_state_when_env_var_unset(isolate_eq
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
          }, clear=False), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
@@ -1535,7 +1535,7 @@ def test_get_account_exception_leaves_day_and_starting_equity_unchanged():
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
@@ -1579,7 +1579,7 @@ def test_successful_equity_read_updates_day_and_starting_equity_normally():
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
@@ -1619,7 +1619,7 @@ def test_main_calls_write_cycle_export_after_save_state():
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
@@ -1656,7 +1656,7 @@ def test_main_constructs_llm_client_when_deepseek_key_set():
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
              "DEEPSEEK_API_KEY": "fake-deepseek-key",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
@@ -1695,7 +1695,7 @@ def test_main_skips_llm_client_construction_when_deepseek_key_unset():
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
          }, clear=False), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
@@ -1733,7 +1733,7 @@ def test_process_symbol_cycle_passes_confirmation_bars_to_compute_signals():
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
@@ -1785,7 +1785,7 @@ def test_main_passes_loaded_tier_pools_to_process_symbol():
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
@@ -1832,7 +1832,7 @@ def _main_with_patches(extra_patches=None, tier_pools=None, rebalance_state=None
     with patch("live_loop.is_market_hours", return_value=True), \
          patch.dict(os.environ, {
              "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
-             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
          }), \
          patch("live_loop.TradingClient", return_value=fake_trading_client), \
          patch("live_loop.StockHistoricalDataClient"), \
@@ -2638,3 +2638,12 @@ def test_run_macro_debate_cycle_exception_does_not_raise_and_appends_nothing():
         )
 
     assert rows == []
+
+
+def test_main_fails_when_github_token_is_blank():
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "",
+         }):
+        assert live_loop.main() == 1

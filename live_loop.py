@@ -961,11 +961,11 @@ def main():
     api_secret = os.environ.get("ALPACA_API_SECRET")
     fred_api_key = os.environ.get("FRED_API_KEY")
     finnhub_api_key = os.environ.get("FINNHUB_API_KEY")
-    if not all([api_key, api_secret, fred_api_key, finnhub_api_key]):
+    github_token = os.environ.get("GITHUB_TOKEN")
+    if not all([api_key, api_secret, fred_api_key, finnhub_api_key, github_token]):
         print("ERROR: one or more required API keys are not set in the environment", file=sys.stderr)
         return 1
     deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
-    github_token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     owner_username = repo.split("/")[0] if repo else ""
 
