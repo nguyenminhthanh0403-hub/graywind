@@ -1,3 +1,3 @@
 last_cycle_timestamp,account_equity,today_pnl,symbol,position_open,shares,entry_price,current_price,action,reason
-2026-09-17T12:16:22.100362-04:00,101523.09,-22.10000000000582,AAPL,False,,,335.86,proposed,all checks passed
-2026-09-17T12:16:22.100362-04:00,101523.09,-22.10000000000582,SERV,False,,,4.41,pending,awaiting approval on existing proposal
+2026-09-17T12:31:16.984668-04:00,101534.79,-10.400000000008731,AAPL,False,,,336.12,pending,awaiting approval on existing proposal
+2026-09-17T12:31:16.984668-04:00,101534.79,-10.400000000008731,SERV,False,,,4.39,pending,awaiting approval on existing proposal
