@@ -144,3 +144,36 @@ async def test_call_ask_raises_tool_error_on_timeout():
             await mcp_tools.call_ask("q", client=client)
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_call_ask_raises_tool_error_on_404():
+    def handler(request):
+        return httpx.Response(404, text="not found")
+
+    client = _client_for(handler)
+    try:
+        with pytest.raises(ToolError, match="404"):
+            await mcp_tools.call_ask("q", client=client)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_call_ask_raises_tool_error_on_non_json_200():
+    def handler(request):
+        return httpx.Response(200, text="plain text response")
+
+    client = _client_for(handler)
+    try:
+        with pytest.raises(ToolError, match="non-JSON"):
+            await mcp_tools.call_ask("q", client=client)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_call_ask_reads_mavis_url_from_env(monkeypatch):
+    monkeypatch.setenv("MAVIS_URL", "http://127.0.0.1:1")
+    with pytest.raises(ToolError, match="127.0.0.1:1"):
+        await mcp_tools.call_ask("q")

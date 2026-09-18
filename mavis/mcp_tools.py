@@ -27,7 +27,7 @@ async def call_ask(query: str, *, client: httpx.AsyncClient | None = None) -> di
     api_key = os.environ.get("MAVIS_API_KEY", "")
     owns_client = client is None
     if owns_client:
-        client = httpx.AsyncClient(base_url=base_url, timeout=30.0)
+        client = httpx.AsyncClient(base_url=base_url, timeout=60.0)
 
     try:
         try:
@@ -50,8 +50,12 @@ async def call_ask(query: str, *, client: httpx.AsyncClient | None = None) -> di
             raise ToolError("MAVIS backend rate limit exceeded (429), try again shortly")
         if resp.status_code >= 500:
             raise ToolError(f"MAVIS backend returned {resp.status_code}: {resp.text[:200]}")
-        resp.raise_for_status()
-        return resp.json()
+        if resp.status_code >= 400 or resp.status_code < 200:
+            raise ToolError(f"MAVIS backend returned {resp.status_code}: {resp.text[:200]}")
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise ToolError(f"MAVIS backend at {base_url} returned a non-JSON response") from exc
     finally:
         if owns_client:
             await client.aclose()
