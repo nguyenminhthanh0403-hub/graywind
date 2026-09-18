@@ -38,6 +38,8 @@ async def call_ask(query: str, *, client: httpx.AsyncClient | None = None) -> di
             )
         except httpx.ConnectError as exc:
             raise ToolError(f"backend not reachable at {base_url}") from exc
+        except httpx.RequestError as exc:
+            raise ToolError(f"MAVIS backend request failed ({type(exc).__name__}): {exc}") from exc
 
         if resp.status_code == 401:
             raise ToolError(

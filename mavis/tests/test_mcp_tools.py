@@ -131,3 +131,16 @@ async def test_query_bullion_omits_citations_block_when_empty(monkeypatch):
 
     assert result == "no grounded match"
     assert "Citations:" not in result
+
+
+@pytest.mark.asyncio
+async def test_call_ask_raises_tool_error_on_timeout():
+    def handler(request):
+        raise httpx.ReadTimeout("timed out")
+
+    client = _client_for(handler)
+    try:
+        with pytest.raises(ToolError, match="request failed"):
+            await mcp_tools.call_ask("q", client=client)
+    finally:
+        await client.aclose()
