@@ -1,1 +1,51 @@
-[]
+[
+  {
+    "symbol": "XOM",
+    "tier": 2,
+    "timestamp": "2026-09-17T17:11:33.181761+00:00",
+    "passed": false,
+    "sharpe": 0.008220191489887415
+  },
+  {
+    "symbol": "CVX",
+    "tier": 2,
+    "timestamp": "2026-09-17T17:11:46.743639+00:00",
+    "passed": false,
+    "sharpe": 0.008555501550033859
+  },
+  {
+    "symbol": "NVDA",
+    "tier": 2,
+    "timestamp": "2026-09-17T17:11:58.812233+00:00",
+    "passed": false,
+    "sharpe": 0.002028128288063161
+  },
+  {
+    "symbol": "MSFT",
+    "tier": 2,
+    "timestamp": "2026-09-17T17:12:44.215183+00:00",
+    "passed": false,
+    "sharpe": 0.005193001145932843
+  },
+  {
+    "symbol": "JNJ",
+    "tier": 2,
+    "timestamp": "2026-09-17T17:12:56.765167+00:00",
+    "passed": false,
+    "sharpe": 0.005131531473161642
+  },
+  {
+    "symbol": "UNH",
+    "tier": 2,
+    "timestamp": "2026-09-17T17:13:07.556270+00:00",
+    "passed": false,
+    "sharpe": 0.0019942412286455503
+  },
+  {
+    "symbol": "NVDA",
+    "tier": 2,
+    "timestamp": "2026-09-18T16:17:30.459489+00:00",
+    "passed": false,
+    "sharpe": 0.013662359690229827
+  }
+]

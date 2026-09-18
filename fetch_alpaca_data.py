@@ -9,7 +9,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-from alpaca.data.enums import DataFeed
+from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -28,6 +28,15 @@ def fetch_bars(client, symbol, start, end):
         # data ("subscription does not permit querying recent SIP data") --
         # IEX is the feed free-tier accounts are actually allowed to use.
         feed=DataFeed.IEX,
+        # Alpaca's default is raw/unadjusted prices. A stock split then
+        # shows up as a genuine-looking single-bar price collapse (e.g.
+        # NVDA's 2024 10:1 split reads as a 90% overnight crash) that feeds
+        # straight into RSI/SMA signals and Sharpe/drawdown math as if it
+        # were a real move. SPLIT-adjusts the whole series so historical
+        # prices stay continuous across a split; deliberately not ALL,
+        # since dividend-adjustment isn't needed for a price-action signal
+        # and would also retroactively shift prices on every ex-div date.
+        adjustment=Adjustment.SPLIT,
     )
     response = client.get_stock_bars(request)
     return list(response[symbol])

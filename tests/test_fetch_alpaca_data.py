@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from alpaca.data.enums import DataFeed
+from alpaca.data.enums import Adjustment, DataFeed
 
 from fetch_alpaca_data import fetch_bars, write_csv
 
@@ -51,3 +51,16 @@ def test_fetch_bars_requests_the_iex_feed():
     fetch_bars(fake_client, "AAPL", datetime(2024, 1, 1), datetime(2024, 1, 8))
     request = fake_client.get_stock_bars.call_args[0][0]
     assert request.feed == DataFeed.IEX
+
+
+def test_fetch_bars_requests_split_adjusted_prices():
+    # Regression test: raw/unadjusted prices make a stock split (e.g. NVDA's
+    # 2024 10:1 split) look like a genuine ~90% single-bar crash, corrupting
+    # every signal and backtest metric computed across that date.
+    fake_client = MagicMock()
+    fake_client.get_stock_bars.return_value = {
+        "AAPL": [make_bar(datetime(2024, 1, 8), 1, 2, 0.5, 1.5, 10)]
+    }
+    fetch_bars(fake_client, "AAPL", datetime(2024, 1, 1), datetime(2024, 1, 8))
+    request = fake_client.get_stock_bars.call_args[0][0]
+    assert request.adjustment == Adjustment.SPLIT
