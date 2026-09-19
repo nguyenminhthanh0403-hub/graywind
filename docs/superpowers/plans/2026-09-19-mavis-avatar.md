@@ -560,6 +560,14 @@ Expected: 64 passed (the "59" written here originally forgot to add Task 2's own
 > 2. **`MOUTH_GAIN = 1.5`**, not 2.0 — chosen by eye at the Step 6 gate; 2.0 and 3.0
 >    overshot. Confirmed `slider.getValue()` does reflect the frozen scalar
 >    (`set_mouth(0.25)` → `0.5` at gain 2.0), so the clamp test is not vacuous.
+>
+> **Superseded 2026-09-19 (`dee78e6`):** the model was replaced with KonnieGFX's
+> port of CD Projekt Red's actual Johnny, which has **no morph targets** -- its
+> mouth is a rotation of `mid_J_jaw_JNT`. `MOUTH_GAIN` no longer exists as a
+> module constant; per-model mouth config lives in `scene.AVATARS`. The public
+> interface Tasks 4-7 depend on is unchanged: `set_mouth(0..1)`. The CC-BY
+> Stuxed model is retained as the only asset the tests can use, since the
+> replacement is an extracted CDPR asset and cannot be committed.
 
 - [x] **Step 6: Verify a real window opens — THE GATE FOR THIS TASK**
 
