@@ -2,3 +2,14 @@ fastapi==0.141.1
 uvicorn[standard]==0.52.4
 httpx==0.28.1
 mcp==2.2.0
+panda3d==1.10.16
+panda3d-gltf==1.3.0
+panda3d-simplepbr==0.13.1
+# openwakeword declares tflite-runtime on Linux only, and tflite-runtime
+# ships no wheel past cp311 -- so this file will not install on a Linux
+# host running Python >=3.12. The avatar is a macOS desktop app and loads
+# its model with inference_framework="onnx", so tflite is never used here;
+# a Linux deploy would need that transitive dep excluded.
+openwakeword==0.6.0
+sounddevice==0.5.3
+numpy==2.5.3

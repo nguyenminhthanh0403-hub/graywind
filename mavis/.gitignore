@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 .env
+assets/avatar/jonny_fixed.glb
+assets/avatar/jonny_fixed.bam
