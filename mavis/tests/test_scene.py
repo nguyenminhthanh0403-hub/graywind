@@ -1,3 +1,4 @@
+import math
 import sys
 import types
 
@@ -126,6 +127,44 @@ def test_pbr_shader_initialises_once_per_window(base, monkeypatch):
     assert first.pipeline is second.pipeline
 
 
+def test_idle_degrades_on_a_model_without_those_joints(avatar):
+    """The idle channels name CDPR/Valve bones. jonny is a Ready Player Me
+    skeleton that shares none of them, and it is the only model the suite can
+    load -- so absent joints must be skipped silently, not raise."""
+    assert avatar.motion.driven == []
+    avatar.idle(0.0)
+    avatar.idle(3.7)
+
+
+def test_idle_layers_more_than_one_frequency():
+    """A single sine reads as a metronome no matter how it is tuned. The head
+    yaw carries two components (11.3s and 4.7s), so sampling exactly one short
+    period apart must NOT return to the same value -- that difference is the
+    whole reason the motion does not look looped."""
+    yaw = [c for c in scene._KEANU_IDLE
+           if c[0].endswith("Head1") and c[1] == "r"]
+    assert len(yaw) > 1, "head yaw needs layered components"
+
+    def total(t):
+        return sum(deg * math.sin(2 * math.pi * (t / period + phase))
+                   for _, _, deg, period, phase in yaw)
+
+    shortest = min(c[3] for c in yaw)
+    assert abs(total(1.0) - total(1.0 + shortest)) > 0.2
+
+
+def test_idle_periods_are_non_harmonic():
+    """Channels whose periods share a small common multiple re-align into a
+    visible loop. Guards against someone 'tidying' these to round numbers."""
+    periods = sorted({c[3] for c in scene._KEANU_IDLE})
+    for i, a in enumerate(periods):
+        for b in periods[i + 1:]:
+            ratio = b / a
+            assert abs(ratio - round(ratio)) > 0.05, (
+                f"periods {a} and {b} are near-harmonic (ratio {ratio:.2f})"
+            )
+
+
 def test_explicit_unknown_avatar_is_rejected(monkeypatch):
     monkeypatch.setenv("MAVIS_AVATAR", "nobody")
     with pytest.raises(ValueError):
@@ -178,3 +217,28 @@ def test_keanu_head_is_framed_in_actor_space(keanu):
     head = keanu.actor.find("**/head")
     low, high = head.get_tight_bounds(keanu.actor)
     assert 1.0 < low[2] < 2.0, f"head sits at z {low[2]:.2f}, not on a 1.8m body"
+
+
+@needs_keanu
+def test_keanu_idle_moves_the_head_over_time(keanu):
+    """Idle must move real joints, not just yaw the whole actor about an axis
+    running through the head -- which moved the shoulders and left the face
+    almost still, and is what made the first version read as a mannequin."""
+    keanu.set_mouth(0.0)
+    keanu.idle(0.0)
+    first = _vertices(keanu.actor, "head")
+    keanu.idle(3.6)
+    later = _vertices(keanu.actor, "head")
+
+    assert keanu.motion.driven, "no idle joints were taken under control"
+    assert sum(1 for a, b in zip(first, later) if a != b) > 500
+
+
+@needs_keanu
+def test_keanu_breathing_drives_both_shoulders_together(keanu):
+    """Breathing is only legible if the shoulders move as a pair and on one
+    cycle; mismatched phase reads as a shrug."""
+    breath = [c for c in scene._KEANU_IDLE if "Clavicle" in c[0]]
+    assert len(breath) == 2
+    left, right = sorted(breath)
+    assert left[1:] == right[1:], "clavicles must share axis, travel and phase"

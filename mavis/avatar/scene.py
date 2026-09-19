@@ -31,10 +31,41 @@ from panda3d.core import AmbientLight, DirectionalLight, TextNode, Vec4
 
 ASSET_DIR = Path(__file__).resolve().parent.parent / "assets" / "avatar"
 
+# Idle motion, as (joint, axis, degrees, seconds, phase) channels summed per
+# joint+axis. On this rig h tilts, p nods and r turns -- established by posing
+# each axis and looking, not from the bone names.
+#
+# Periods are deliberately non-harmonic (11.3 / 7.9 / 13.1 / 17.9 ...) so the
+# layers never re-align into a visible loop. A single sine, however well tuned,
+# reads as a metronome; several that never agree read as a person who cannot
+# quite keep still. Amplitudes are small on purpose -- this is someone standing
+# there, not someone performing.
+#
+# No blink channel, though the rig carries 70 eyelid joints: he wears opaque
+# aviators and the eyes are not visible at all. Blinking is usually the best
+# value per unit effort on a face; here it would be invisible work.
+_KEANU_IDLE = (
+    ("ValveBiped.Bip01_Head1", "r", 3.4, 11.3, 0.00),
+    ("ValveBiped.Bip01_Head1", "r", 1.1, 4.70, 0.37),
+    ("ValveBiped.Bip01_Head1", "p", 1.5, 7.90, 0.21),
+    ("ValveBiped.Bip01_Head1", "h", 1.7, 13.10, 0.63),
+    ("ValveBiped.Bip01_Neck1", "r", 1.2, 17.90, 0.11),
+    ("ValveBiped.Bip01_Neck1", "p", 0.8, 9.70, 0.48),
+    # Breathing: shoulders and upper chest share one 4.1s cycle.
+    ("ValveBiped.Bip01_L_Clavicle", "p", 1.1, 4.10, 0.00),
+    ("ValveBiped.Bip01_R_Clavicle", "p", 1.1, 4.10, 0.00),
+    ("ValveBiped.Bip01_Spine4", "p", 0.5, 4.10, 0.00),
+)
+
 AVATARS = {
     "keanu": {
         "bam": "keanu.bam",
         "head_mesh": "head",
+        "idle": _KEANU_IDLE,
+        # The whole-actor yaw rotates about an axis through the head, so it
+        # swings the shoulders while the head stays put -- backwards. Kept only
+        # as a trace of weight shift now that real joints carry the motion.
+        "sway": 2.0,
         # ASCII only: Panda3D's default font has no glyph for the likes of
         # U+00B7 or U+00A9 and draws them as empty boxes.
         "credit": "Model: Johnny Silverhand port by KonnieGFX - "
@@ -45,6 +76,10 @@ AVATARS = {
     "jonny": {
         "bam": "jonny_fixed.bam",
         "head_mesh": "Wolf3D_Head",
+        # A Ready Player Me skeleton: none of the joints above exist on it, so
+        # it degrades to the whole-actor sway and nothing is driven per-joint.
+        "idle": (),
+        "sway": 12.0,
         "credit": 'Model: "Jonny Silverhand" by Stuxed (CC BY)',
         "mouth": {"kind": "slider", "slider": "mouthOpen", "gain": 1.0},
     },
@@ -141,6 +176,57 @@ class _JawMouth:
 
 _DRIVERS = {"slider": _SliderMouth, "joint": _JawMouth}
 
+SWAY_RATE = 0.4
+
+
+class _IdleMotion:
+    """Layered sine motion on real joints, so the body is never quite still.
+
+    Channels are summed per joint+axis against the joint's rest pose, which is
+    sampled once at construction -- so this composes with whatever pose the
+    model loads in rather than snapping it to zero.
+
+    Joints named in the config but absent from the model are skipped, not an
+    error: the same code has to run against a Ready Player Me skeleton that
+    shares none of these bone names.
+    """
+
+    _SETTER = {"h": "setH", "p": "setP", "r": "setR"}
+    _INDEX = {"h": 0, "p": 1, "r": 2}
+
+    def __init__(self, actor, bundle, channels):
+        self._bundle = bundle
+        self._targets = {}
+        controlled = {}
+
+        for name, axis, degrees, period, phase in channels:
+            if name not in controlled:
+                node = actor.controlJoint(None, "modelRoot", name)
+                controlled[name] = (
+                    node if node is not None and not node.isEmpty() else None
+                )
+            node = controlled[name]
+            if node is None:
+                continue
+
+            key = (name, axis)
+            if key not in self._targets:
+                rest = node.getHpr()[self._INDEX[axis]]
+                self._targets[key] = (getattr(node, self._SETTER[axis]), rest, [])
+            self._targets[key][2].append((degrees, period, phase))
+
+        self.driven = sorted({name for name, _ in self._targets})
+
+    def apply(self, elapsed: float) -> None:
+        if not self._targets:
+            return
+        for setter, rest, waves in self._targets.values():
+            value = rest
+            for degrees, period, phase in waves:
+                value += degrees * math.sin(2.0 * math.pi * (elapsed / period + phase))
+            setter(value)
+        self._bundle.forceUpdate()
+
 
 class AvatarScene:
     """Owns the avatar's visual state. Knows nothing about audio."""
@@ -162,6 +248,9 @@ class AvatarScene:
             self.actor, self._bundle, self.config["mouth"]
         )
         self.mouth_sliders = self.mouth.sliders
+        self.motion = _IdleMotion(
+            self.actor, self._bundle, self.config.get("idle", ())
+        )
 
         self._frame_head()
         self._light()
@@ -252,9 +341,10 @@ class AvatarScene:
         self.mouth.set(amount)
 
     def idle(self, elapsed: float) -> None:
-        """A slow sway so he doesn't look frozen between questions."""
+        """Keep him alive between questions: breathing, head drift, weight."""
         self._t = elapsed
-        self.actor.set_h(math.sin(elapsed * 0.4) * 12)
+        self.actor.set_h(math.sin(elapsed * SWAY_RATE) * self.config.get("sway", 12.0))
+        self.motion.apply(elapsed)
 
     def show(self) -> None:
         self.actor.show()
