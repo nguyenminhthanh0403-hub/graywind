@@ -38,6 +38,71 @@ FACE_TEXTURE_MAX = 1024
 OTHER_TEXTURE_MAX = 512
 
 
+def _texture_index(texdir):
+    """Shipped base-colour textures by stem. `*_n` are normal maps, not bases."""
+    return {
+        os.path.splitext(f)[0]: f
+        for f in os.listdir(texdir)
+        if f.lower().endswith(".tga") and not os.path.splitext(f)[0].endswith("_n")
+    }
+
+
+def _mtl_targets(texdir):
+    """material name -> the *original* texture basename its .mtl points at.
+
+    The .mtl's paths are absolute paths on the porter's own Windows machine, so
+    only the basename is usable -- but that basename is what identifies the
+    texture, and the shipped TGAs were renamed by hand from exactly those.
+    """
+    targets = {}
+    for filename in sorted(os.listdir(texdir)):
+        if not filename.lower().endswith(".mtl"):
+            continue
+        current = None
+        with open(os.path.join(texdir, filename), encoding="utf-8",
+                  errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if line.startswith("newmtl "):
+                    current = line.split(None, 1)[1].strip()
+                elif current and line.lower().startswith("map_kd"):
+                    path = line.split(None, 1)[1].strip().replace("\\", "/")
+                    targets[current] = os.path.splitext(os.path.basename(path))[0]
+    return targets
+
+
+def resolve_texture(material, shipped, targets, learned):
+    """Stem of the base-colour texture for `material`, or None.
+
+    Six materials have no `<name>.tga` and were previously left untextured,
+    which renders as flat white -- visibly, as a white patch on the vest. They
+    are recovered in three steps, most trustworthy first:
+
+    1. the .mtl's original basename, mapped through what the materials that
+       *do* resolve teach us about the renaming (pants_misc2 and pants point at
+       the same original, so pants_misc2 is pants.tga);
+    2. a shipped stem appearing inside that original basename
+       (`v_common_stitches_n01` -> `stitches.tga`, which is shipped);
+    3. the material's own prefix (`shoe_misc` -> `shoe`), for materials the
+       .mtl gives no map_Kd for at all.
+    """
+    if material in shipped:
+        return material
+
+    original = targets.get(material)
+    if original:
+        if original in learned:
+            return learned[original]
+        lowered = original.lower()
+        matches = [stem for stem in shipped
+                   if len(stem) > 3 and stem.lower() in lowered]
+        if matches:
+            return max(matches, key=len)
+
+    prefix = material.split("_")[0]
+    return prefix if prefix in shipped else None
+
+
 def _resize(image, cap):
     width, height = image.size
     largest = max(width, height)
@@ -74,12 +139,24 @@ def main():
             cache[path] = bpy.data.images.load(path)
         return cache[path]
 
+    shipped = _texture_index(texdir)
+    targets = _mtl_targets(texdir)
+    learned = {}
+    for name, original in targets.items():
+        if name in shipped:
+            learned.setdefault(original, name)
+
     wired = 0
+    unresolved = []
     for material in bpy.data.materials:
-        base = load(f"{material.name}.tga")
+        stem = resolve_texture(material.name, shipped, targets, learned)
+        base = load(f"{stem}.tga") if stem else None
         if base is None:
+            unresolved.append(material.name)
             print(f"  NO TEXTURE for material {material.name}")
             continue
+        if stem != material.name:
+            print(f"  {material.name} -> {stem}.tga (resolved)")
 
         cap = FACE_TEXTURE_MAX if material.name in FACE_MATERIALS else OTHER_TEXTURE_MAX
         if _resize(base, cap):
@@ -97,7 +174,7 @@ def main():
         tree.links.new(colour.outputs["Color"], shader.inputs["Base Color"])
         tree.links.new(colour.outputs["Alpha"], shader.inputs["Alpha"])
 
-        normal = load(f"{material.name}_n.tga")
+        normal = load(f"{stem}_n.tga")
         if normal is not None:
             normal.colorspace_settings.name = "Non-Color"
             _resize(normal, cap)
@@ -119,6 +196,8 @@ def main():
         wired += 1
 
     print(f"WIRED {wired}/{len(bpy.data.materials)} materials")
+    if unresolved:
+        print(f"UNRESOLVED {len(unresolved)}: {', '.join(sorted(unresolved))}")
 
     if target_height > 0 and armatures:
         low = Vector((1e9, 1e9, 1e9))

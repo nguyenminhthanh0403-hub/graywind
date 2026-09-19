@@ -183,12 +183,25 @@ class AvatarScene:
         fixed-function pipeline cannot sample -- without this the model renders
         with its textures loaded, bound, and entirely unused. Skipped when
         there is no window to compile shaders against.
+
+        Initialised at most once per window. simplepbr installs a FilterManager
+        over the display region and claims it; a second init finds the region
+        already taken and dies with "Could not find appropriate DisplayRegion
+        to filter", so building a second AvatarScene -- swapping models at
+        runtime, say -- would crash rather than re-use the pipeline.
         """
         if self.base.win is None:
             return
+
+        existing = getattr(self.base, "_mavis_pbr_pipeline", None)
+        if existing is not None:
+            self.pipeline = existing
+            return
+
         import simplepbr
 
         self.pipeline = simplepbr.init(msaa_samples=0)
+        self.base._mavis_pbr_pipeline = self.pipeline
 
     def _frame_head(self):
         """Place the actor so the head fills the frame, from measured bounds.

@@ -1,3 +1,6 @@
+import sys
+import types
+
 import pytest
 from panda3d.core import loadPrcFileData
 
@@ -98,6 +101,29 @@ def test_every_avatar_declares_a_credit():
     for name, config in scene.AVATARS.items():
         assert config["credit"].strip(), f"{name} has no credit string"
         assert config["mouth"]["kind"] in scene._DRIVERS
+
+
+def test_pbr_shader_initialises_once_per_window(base, monkeypatch):
+    """simplepbr claims the display region via a FilterManager, so a second
+    init dies with "Could not find appropriate DisplayRegion to filter" -- a
+    second AvatarScene on one window (swapping models at runtime) crashed
+    outright until the pipeline was cached on the ShowBase.
+
+    Driven with a stub because the suite runs window-type none, where the
+    real path is skipped entirely and the bug is invisible.
+    """
+    calls = []
+    stub = types.ModuleType("simplepbr")
+    stub.init = lambda **kwargs: calls.append(kwargs) or "pipeline"
+    monkeypatch.setitem(sys.modules, "simplepbr", stub)
+    monkeypatch.setattr(base, "win", object(), raising=False)
+    monkeypatch.setattr(base, "_mavis_pbr_pipeline", None, raising=False)
+
+    first = scene.AvatarScene(base, "jonny")
+    second = scene.AvatarScene(base, "jonny")
+
+    assert len(calls) == 1, f"simplepbr.init called {len(calls)} times"
+    assert first.pipeline is second.pipeline
 
 
 def test_explicit_unknown_avatar_is_rejected(monkeypatch):

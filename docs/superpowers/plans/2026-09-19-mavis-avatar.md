@@ -2005,3 +2005,49 @@ Then use `superpowers:finishing-a-development-branch` to decide how `feat/mavis-
 **Steps only a human can run:** Task 2 Step 6 (window, mouth legibility, credit), Task 5 Step 6 (listening to the converted voice), Task 6 Step 9 (speaking the wake phrase), Task 7 Step 6 (the full live acceptance). No subagent can sign these off — they come back to the operator regardless of how the rest is executed.
 
 **Known gap, deliberate:** `capture.py` and `stt.py` have no unit tests — both are thin wrappers over hardware and a network call, where a mock would test the mock. They are covered by Task 6 Step 9 and Task 7 Step 6 live runs.
+
+---
+
+## Deferred: Task 8 — natural idle motion
+
+**Requested 2026-09-19 by the owner, explicitly for "later" — not part of Tasks 1-7.**
+The model was approved ("i like the model"); the *movement* was not: "it's not
+moving very convincingly."
+
+**What is there now.** `scene.AvatarScene.idle()` is one line — a single sine
+yaw of the whole actor, `set_h(sin(t * 0.4) * 12)`: ±12° on a ~15.7s period.
+Three things make it read as a mannequin rather than a person:
+
+1. The rotation axis runs vertically through the head, so the head barely
+   travels while the shoulders and arms swing around it — backwards from how a
+   person idles, where the head moves most.
+2. One frequency, perfectly periodic, infinitely repeating. Real idle motion is
+   several unsynchronised frequencies plus noise.
+3. Nothing else on the body moves at all: no breathing, no blinking, no eye
+   movement, no weight shift.
+
+**What the keanu rig actually offers** (confirmed by walking `getJoints()`;
+these are real names, not guesses):
+
+| Motion | Joints available |
+|---|---|
+| Head turn / tilt | `ValveBiped.Bip01_Head1`, `ValveBiped.Bip01_Neck1` |
+| Breathing, weight shift | `ValveBiped.Bip01_Spine`, `_Spine1/2/4`, `_L_Clavicle`, `_R_Clavicle` |
+| Blinking | 70 eyelid joints (`*_eye_lid_*`) |
+| Eye darts / gaze | `LeftEye`, `RightEye`, `l_J_eye_JNT` |
+| Brow expression | 26 brow joints (`*_eye_brows_*`) |
+
+Blinking is likely the single largest win per unit of effort — a face that
+never blinks reads as dead, and it is one joint pair on a randomised timer.
+
+**Constraints for whoever picks this up:**
+
+- **It must stay model-agnostic.** `jonny` has none of these joints — it is a
+  Ready Player Me mesh with a different skeleton entirely — and it is the only
+  model the test suite can load. Drive this the way `set_mouth` is driven: a
+  per-model config block in `scene.AVATARS`, with a no-op or degraded path when
+  the joints are absent. Do not let `idle()` assume the CDPR rig.
+- **`bundle.forceUpdate()` after moving any controlled joint.** Every joint and
+  slider in this project has needed it; without it the change is a silent no-op.
+- Verify it by rendering frames offscreen and looking at them (see Task 2's
+  gate note), then confirm on a real window — "convincing" is a human call.
