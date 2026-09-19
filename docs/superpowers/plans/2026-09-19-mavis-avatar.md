@@ -600,21 +600,30 @@ Confirm, in order:
 
 **If it opens:** set `MOUTH_GAIN` in `scene.py` to the value chosen in (4).
 
-> **GATE RESULT, 2026-09-19 — partially confirmed. Read the split carefully.**
+> **GATE RESULT, 2026-09-19 — passed, after the gate caught a real defect.**
 >
-> Confirmed:
-> - **A real window opens.** Panda3D 1.10.16 loads `CocoaGraphicsPipe` and runs on
->   this Apple Silicon Mac without crashing. *This was the design's largest
->   unverified assumption and it is now cleared.*
-> - **The mouth moves.** `MOUTH_GAIN = 1.5`, chosen by eye against 1.0/2.0/3.0 —
->   which required watching the mouth animate at each gain.
+> The first run showed a formless grey mass. That was NOT lighting or textures:
+> Task 1's repair had silently corrupted `Wolf3D_Outfit_Bottom`, exploding it to
+> ±18 units so the camera sat inside the geometry. Fixed in `1c5ebce` — see that
+> commit and Task 1's own note. The gate did its job; do not weaken it.
 >
-> NOT yet confirmed — do not record these as passed until a human says so:
-> - **Textured vs. flat grey** (gate item 1). Textures are embedded in the GLB, so
->   a grey figure means the material/lighting path is wrong, not a missing file.
-> - **The Stuxed credit renders on screen** (gate item 0, a licence condition).
->   `test_attribution_text_is_present` only proves the node *carries* the string;
->   it says nothing about whether it draws at `pos=(0.0, -0.95)`.
+> Confirmed after the fix:
+> - **A real window opens.** Panda3D 1.10.16 loads `CocoaGraphicsPipe` and runs
+>   on Apple Silicon. *The design's largest unverified assumption is cleared.*
+> - **Textured and correctly framed**, verified by offscreen render (head and
+>   shoulders, jacket, beard, aviators, in colour).
+> - **The on-screen Stuxed credit is visible** — confirmed by a human at the
+>   window, which is the only place a licence condition can be checked.
+> - **The mouth moves.** `MOUTH_GAIN = 1.0`, chosen by eye against 1.5/2.0/3.0
+>   at the corrected framing. The earlier 1.5 was picked while the camera was
+>   inside the broken mesh, so it was never a valid reading.
+>
+> Two pieces of machinery worth reusing for later tasks:
+> - `window-type offscreen` + `base.win.getScreenshot(PNMImage())` renders
+>   headlessly and can be inspected directly — far tighter than asking a human
+>   "does this look right". Step the task manager, don't call `renderFrame()`:
+>   simplepbr feeds `camera_world_position` from a task.
+> - The throwaway gain sweep lives in the session scratchpad, not the repo.
 
 - [x] **Step 7: Commit**
 

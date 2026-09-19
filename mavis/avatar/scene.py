@@ -5,10 +5,13 @@ jaw bone -- this model has no jaw joint. The sliders are reached by
 walking the character's PartBundle; they are NOT scene-graph nodes, so
 NodePath searches for them return nothing.
 
-MOUTH_GAIN exists because a slider value of 1.0 displaces head vertices
-by only ~0.011 units on a ~1.85-unit model (~11mm of jaw travel), which
-reads as a twitch rather than speech. Morph targets extrapolate linearly,
-so values above 1.0 are legitimate.
+MOUTH_GAIN is an amplification knob for that morph. A slider value of 1.0
+displaces head vertices by only ~0.011 units on a ~1.85-unit model (~11mm
+of jaw travel), which was expected to read as a twitch rather than speech.
+It does not: once the head is framed properly the raw movement is enough,
+and 1.0 was chosen by eye over 1.5/2.0/3.0. The knob stays because morph
+targets extrapolate linearly, so a re-framed or swapped model can want
+more; judge it against a real window, not against this number.
 """
 import math
 from pathlib import Path
@@ -19,7 +22,7 @@ from panda3d.core import AmbientLight, DirectionalLight, TextNode, Vec4
 
 ASSET = Path(__file__).resolve().parent.parent / "assets" / "avatar" / "jonny_fixed.bam"
 
-MOUTH_GAIN = 1.5
+MOUTH_GAIN = 1.0
 CREDIT = 'Model: "Jonny Silverhand" by Stuxed (CC BY)'
 
 HEAD_MESH = "Wolf3D_Head"
