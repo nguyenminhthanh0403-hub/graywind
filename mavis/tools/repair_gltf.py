@@ -6,11 +6,30 @@ accessor. panda3d-gltf miscounts vertex rows from those aliased UV sets
 and then fails on the *following* mesh with "GeomTriangles references
 vertices up to 1003, but GeomVertexData has only 557 rows".
 
-Nothing in the file is actually malformed -- every accessor count is a
-consistent 1004 -- so the repair only deletes the redundant attribute
-*references*. The binary chunk is copied through untouched, which is why
-the morph targets (mouthOpen/mouthSmile) survive; the GLB-converted
-download from Sketchfab loses them.
+Nothing in the file is malformed -- every accessor count is a consistent
+1004 -- so the repair only deletes redundant attribute *references*. The
+binary chunk is copied through untouched, which is why the morph targets
+(mouthOpen/mouthSmile) survive; the GLB-converted download from Sketchfab
+loses them.
+
+TEXCOORD_1 is deliberately KEPT, and that is the whole subtlety here.
+The primitive's data is interleaved at `byteStride` 60: POSITION 12 +
+NORMAL 12 + TEXCOORD_0 8 + JOINTS_0 4 + WEIGHTS_0 16 = 52, plus the 8
+bytes of the one physical extra UV set that all seven aliases point at.
+panda3d-gltf derives its row count from the declared attribute sizes
+rather than from byteStride, so the sum must equal the stride:
+
+    all 7 aliases kept  -> 52 + 7*8 = 108 -> 60240/108 =  557 rows (crash)
+    all 7 removed       -> 52           -> 60240/52  = 1158 rows (silent
+                                                       corruption: the
+                                                       trousers explode to
+                                                       +/-18 units and
+                                                       swallow the camera)
+    exactly one kept    -> 52 + 8   = 60 -> 60240/60  = 1004 rows (correct)
+
+Removing all of them is the dangerous case precisely because it does not
+crash -- gltf2bam exits 0 and writes a model whose geometry is garbage.
+`test_declared_attributes_fill_the_byte_stride` is the permanent guard.
 
 Chunk padding is load-bearing: glTF requires every chunk to start on a
 4-byte boundary and `chunkLength` to count the padding. The repaired JSON
@@ -36,7 +55,12 @@ def _pad(data: bytes, filler: bytes) -> bytes:
 
 
 def strip_aliased_uvs(src, dst) -> int:
-    """Rewrite `src` to `dst` without TEXCOORD_1+ attributes.
+    """Rewrite `src` to `dst` without the *redundant* aliased UV sets.
+
+    TEXCOORD_2 and above are dropped; TEXCOORD_1 stays so the declared
+    attribute sizes still add up to the interleaved byteStride. See the
+    module docstring -- removing it too converts a loud crash into silently
+    corrupt geometry.
 
     Returns the number of attribute references removed.
     """
@@ -83,7 +107,7 @@ def strip_aliased_uvs(src, dst) -> int:
         for prim in mesh["primitives"]:
             extra = [
                 k for k in prim["attributes"]
-                if k.startswith("TEXCOORD_") and int(k.split("_")[1]) >= 1
+                if k.startswith("TEXCOORD_") and int(k.split("_")[1]) >= 2
             ]
             for key in extra:
                 del prim["attributes"][key]

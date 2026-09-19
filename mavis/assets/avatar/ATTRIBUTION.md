@@ -22,5 +22,10 @@ are build artifacts — regenerate them with:
     .venv/bin/python -m tools.repair_gltf
     .venv/bin/gltf2bam assets/avatar/jonny_fixed.glb assets/avatar/jonny_fixed.bam
 
-`gltf2bam` prints ~189 `Could not find joint in jvtmap` warnings. These are
-zero-weight joint indices and are harmless; the exit code is what matters.
+`gltf2bam` should print **no** `Could not find joint in jvtmap` warnings. An
+earlier revision of the repair produced ~189 of them and they were recorded
+here as harmless zero-weight joint indices. They were not harmless: they were
+a symptom of `Wolf3D_Outfit_Bottom` being read at the wrong stride, which also
+exploded that mesh to ±18 units and put the camera inside the geometry. If
+those warnings ever come back, the repair is wrong again -- see
+`tools/repair_gltf.py` and `test_declared_attributes_fill_the_byte_stride`.

@@ -6,7 +6,7 @@ walking the character's PartBundle; they are NOT scene-graph nodes, so
 NodePath searches for them return nothing.
 
 MOUTH_GAIN exists because a slider value of 1.0 displaces head vertices
-by only ~0.011 units on a ~1.7-unit model (~11mm of jaw travel), which
+by only ~0.011 units on a ~1.85-unit model (~11mm of jaw travel), which
 reads as a twitch rather than speech. Morph targets extrapolate linearly,
 so values above 1.0 are legitimate.
 """
@@ -21,6 +21,13 @@ ASSET = Path(__file__).resolve().parent.parent / "assets" / "avatar" / "jonny_fi
 
 MOUTH_GAIN = 1.5
 CREDIT = 'Model: "Jonny Silverhand" by Stuxed (CC BY)'
+
+HEAD_MESH = "Wolf3D_Head"
+# Framing height as a multiple of the head's own height: ~2.6 puts head and
+# shoulders in frame with air above. Measured at load rather than hardcoded so
+# a swapped-in model of a different scale still frames itself correctly.
+FRAMING = 2.6
+DEFAULT_FOV = 30.0
 
 
 def load_actor(loader) -> Actor:
@@ -45,9 +52,10 @@ class AvatarScene:
 
     def __init__(self, show_base):
         self.base = show_base
+        self._init_shader()
         self.actor = load_actor(show_base.loader)
         self.actor.reparent_to(show_base.render)
-        self.actor.set_pos(0, 3.2, -1.45)
+        self._frame_head()
 
         character = self.actor.find("**/+Character").node()
         self._character = character
@@ -65,6 +73,48 @@ class AvatarScene:
         )
         self._t = 0.0
         self.visible = True
+
+    def _init_shader(self):
+        """Install the PBR shader the glTF materials are written against.
+
+        The model's colour lives in each material's baseColorTexture. Panda3D's
+        fixed-function pipeline has no idea how to sample that, so it lights the
+        material colours alone and the avatar renders as a flat grey figure --
+        textures fully loaded, fully bound, entirely unused. simplepbr supplies
+        the shader that reads them.
+
+        Skipped without a window (window-type none in the tests), where there is
+        no graphics context to compile shaders against.
+        """
+        if self.base.win is None:
+            return
+        import simplepbr
+
+        self.pipeline = simplepbr.init(msaa_samples=0)
+
+    def _frame_head(self):
+        """Place the actor so the head fills the frame, from measured bounds.
+
+        The camera stays at the origin looking down +Y. Distance is solved from
+        the lens's own vertical FOV, so this holds if the lens changes -- and
+        measuring beats hardcoding because model scale is not knowable up front:
+        this one is ~1.85 units tall, and an earlier hardcoded offset written
+        for an assumed ~1.7 left the camera inside the geometry.
+        """
+        self.actor.set_pos(0, 0, 0)
+        head = self.actor.find(f"**/{HEAD_MESH}")
+        target = self.actor if head.is_empty() else head
+
+        low, high = target.get_tight_bounds()
+        center_z = (low[2] + high[2]) / 2.0
+        framed = max(high[2] - low[2], 1e-3) * FRAMING
+
+        # No lens exists under window-type none, where the framing is arithmetic
+        # rather than something anyone looks at; Panda3D's own default stands in.
+        lens = self.base.camLens
+        fov_v = lens.get_fov()[1] if lens is not None else DEFAULT_FOV
+        distance = (framed / 2.0) / math.tan(math.radians(fov_v / 2.0))
+        self.actor.set_pos(0, distance, -center_z)
 
     def _light(self):
         key = DirectionalLight("key")
