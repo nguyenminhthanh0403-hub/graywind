@@ -34,7 +34,7 @@ MAVIS's existing modules are flat at `mavis/` (`app.py`, `auth.py`, `grounding.p
 | Path | Responsibility |
 |---|---|
 | `mavis/tools/repair_gltf.py` | Strip redundant aliased UV sets so `panda3d-gltf` can convert the model |
-| `mavis/assets/avatar/` | `jonny.glb` (source), `jonny_fixed.glb`, `jonny_fixed.bam`, `textures/`, `ATTRIBUTION.md` |
+| `mavis/assets/avatar/` | `jonny.glb` (source), `jonny_fixed.glb`, `jonny_fixed.bam`, `ATTRIBUTION.md` |
 | `mavis/assets/wakeword/` | `wake_up_johnny.onnx` from the Colab training run |
 | `mavis/avatar/lipsync.py` | Audio → per-frame `mouthOpen` values (pure, no I/O) |
 | `mavis/avatar/dismiss.py` | Does this transcript mean "go away"? (pure) |
@@ -75,13 +75,14 @@ git checkout -b feat/mavis-avatar
 
 - [ ] **Step 2: Copy the source asset into the repo**
 
-The `.bam` is a 22MB build artifact — it is regenerated, not committed. The `.glb` source and textures are committed.
+All 20 textures are **embedded** in the GLB's binary chunk as `bufferView` images — verified, none use external `uri` references. So `jonny.glb` is fully self-contained: do **not** copy the `textures/` folder from `~/Documents/` (those 24 files are an artifact of the zip and nothing reads them), and the asset's location in the repo cannot break texture resolution.
+
+The `.bam` is a 22MB build artifact — regenerated, not committed.
 
 ```bash
 cd ~/Projects/graywind/mavis
 mkdir -p assets/avatar tools
 cp ~/Documents/jonny-silverhand-extracted/source/jonny.glb assets/avatar/jonny.glb
-cp -R ~/Documents/jonny-silverhand-extracted/textures assets/avatar/textures
 ```
 
 - [ ] **Step 3: Write the failing test**
@@ -262,10 +263,19 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 6: Run the tests and watch them pass**
+- [ ] **Step 6: Run the tests and watch them pass — and confirm the import path**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_repair_gltf.py -q`
 Expected: 4 passed
+
+This is also the first use of a **subpackage** import (`from tools import repair_gltf`). Existing tests import flat modules (`import mcp_tools`), which resolve because pytest puts `mavis/` on `sys.path`; a package with `__init__.py` resolves the same way. Six later tasks depend on `from avatar import ...` working identically, so confirm it here rather than discovering it in Task 7. If collection fails with `ModuleNotFoundError`, the fix is one line in the existing (empty) `mavis/conftest.py`:
+
+```python
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+```
 
 - [ ] **Step 7: Build the .bam**
 
@@ -544,7 +554,26 @@ Expected: 59 passed
 
 - [ ] **Step 6: Verify a real window opens — THE GATE FOR THIS TASK**
 
-Headless tests cannot answer this. Run by hand and *look at the screen*:
+Headless tests cannot answer this. Run by hand and *look at the screen*.
+
+This must exercise **`avatar/scene.py` itself**, not the throwaway `render_test.py` — `AvatarScene.__init__` builds `OnscreenText`, attaches lights and places the camera, and none of that has ever run with a real window:
+
+```bash
+cd ~/Projects/graywind/mavis
+.venv/bin/python -c "
+from panda3d.core import loadPrcFileData
+loadPrcFileData('', 'window-title Johnny\nhardware-animated-vertices false')
+from direct.showbase.ShowBase import ShowBase
+from avatar import scene as m
+import math
+base = ShowBase()
+s = m.AvatarScene(base)
+base.taskMgr.add(lambda t: (s.idle(t.time),
+    s.set_mouth(math.sin(t.time * 5) * 0.5 + 0.5), t.cont)[-1], 'sweep')
+base.run()"
+```
+
+To choose `MOUTH_GAIN`, edit its value in `scene.py` between runs, or use the throwaway sweep which steps 1.0 → 1.5 → 2.0 → 3.0 automatically:
 
 ```bash
 cd ~/Documents/jonny-silverhand-extracted
@@ -552,7 +581,8 @@ cd ~/Documents/jonny-silverhand-extracted
 ```
 
 Confirm, in order:
-1. A window opens and shows a lit, textured figure — not a black rectangle, not a crash.
+0. The on-screen Stuxed credit is visible (it is a licence condition, and this is the only place it can be checked).
+1. A window opens and shows a lit, textured figure — not a black rectangle, not a crash. Textures are embedded in the model, so an untextured grey figure means the material/lighting setup is wrong, not that a file is missing.
 2. The figure sways.
 3. The mouth visibly opens and closes.
 4. As the printed gain steps 1.0 → 1.5 → 2.0 → 3.0, note which value first reads as *talking* rather than twitching.
@@ -1927,5 +1957,7 @@ Then use `superpowers:finishing-a-development-branch` to decide how `feat/mavis-
 **Placeholders** — none. Every code step carries real code; every verification step names a command and its expected output.
 
 **Type consistency** — `set_mouth`/`show`/`hide`/`show_notice` match between `scene.py`, `StubScene` and `app.py`. `envelope`/`amount_at` signatures match their uses. `VoiceClient.convert` returns `bool` everywhere. `brain.ask` and `stt.transcribe` are both async and awaited as such.
+
+**Steps only a human can run:** Task 2 Step 6 (window, mouth legibility, credit), Task 5 Step 6 (listening to the converted voice), Task 6 Step 9 (speaking the wake phrase), Task 7 Step 6 (the full live acceptance). No subagent can sign these off — they come back to the operator regardless of how the rest is executed.
 
 **Known gap, deliberate:** `capture.py` and `stt.py` have no unit tests — both are thin wrappers over hardware and a network call, where a mock would test the mock. They are covered by Task 6 Step 9 and Task 7 Step 6 live runs.
