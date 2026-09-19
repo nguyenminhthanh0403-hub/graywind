@@ -626,7 +626,7 @@ Pure functions, no I/O, no Panda3D — the easiest part to get exactly right, an
 - Consumes: nothing
 - Produces: `lipsync.envelope(samples: np.ndarray, sample_rate: int, fps: int = 60) -> np.ndarray` (values 0..1, one per frame); `lipsync.amount_at(env: np.ndarray, elapsed: float, fps: int = 60) -> float`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/test_lipsync.py`:
 
@@ -688,12 +688,12 @@ def test_amount_at_on_empty_envelope_is_closed():
     assert lipsync.amount_at(np.array([]), 0.0) == 0.0
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_lipsync.py -q`
 Expected: FAIL — `ImportError: cannot import name 'lipsync'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `mavis/avatar/lipsync.py`:
 
@@ -745,12 +745,12 @@ def amount_at(env: np.ndarray, elapsed: float, fps: int = 60) -> float:
     return float(env[index])
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_lipsync.py -q`
 Expected: 8 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd ~/Projects/graywind
