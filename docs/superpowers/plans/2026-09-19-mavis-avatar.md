@@ -66,14 +66,14 @@ The repaired model currently exists only in `~/Documents/`. Nothing else can be 
 - Consumes: nothing
 - Produces: `repair_gltf.strip_aliased_uvs(src: Path, dst: Path) -> int` (returns count of removed attributes); the asset at `mavis/assets/avatar/jonny_fixed.bam`
 
-- [ ] **Step 1: Create the branch**
+- [x] **Step 1: Create the branch**
 
 ```bash
 cd ~/Projects/graywind
 git checkout -b feat/mavis-avatar
 ```
 
-- [ ] **Step 2: Copy the source asset into the repo**
+- [x] **Step 2: Copy the source asset into the repo**
 
 All 20 textures are **embedded** in the GLB's binary chunk as `bufferView` images — verified, none use external `uri` references. So `jonny.glb` is fully self-contained: do **not** copy the `textures/` folder from `~/Documents/` (those 24 files are an artifact of the zip and nothing reads them), and the asset's location in the repo cannot break texture resolution.
 
@@ -85,7 +85,7 @@ mkdir -p assets/avatar tools
 cp ~/Documents/jonny-silverhand-extracted/source/jonny.glb assets/avatar/jonny.glb
 ```
 
-- [ ] **Step 3: Write the failing test**
+- [x] **Step 3: Write the failing test**
 
 Create `tests/test_repair_gltf.py`:
 
@@ -170,12 +170,12 @@ def _binary_chunk(path):
     raise AssertionError("no BIN chunk")
 ```
 
-- [ ] **Step 4: Run it and watch it fail**
+- [x] **Step 4: Run it and watch it fail**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_repair_gltf.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'tools'`
 
-- [ ] **Step 5: Write the implementation**
+- [x] **Step 5: Write the implementation**
 
 Create `mavis/tools/__init__.py` (empty) and `mavis/tools/repair_gltf.py`:
 
@@ -263,7 +263,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 6: Run the tests and watch them pass — and confirm the import path**
+- [x] **Step 6: Run the tests and watch them pass — and confirm the import path**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_repair_gltf.py -q`
 Expected: 4 passed
@@ -277,7 +277,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 ```
 
-- [ ] **Step 7: Build the .bam**
+- [x] **Step 7: Build the .bam**
 
 ```bash
 cd ~/Projects/graywind/mavis
@@ -287,7 +287,7 @@ cd ~/Projects/graywind/mavis
 
 Expected: `removed 7 aliased texcoord attributes`, then gltf2bam exits 0. It prints many `Could not find joint in jvtmap` warnings — these are zero-weight joint indices and are harmless; the exit code is what matters.
 
-- [ ] **Step 8: Write the attribution file**
+- [x] **Step 8: Write the attribution file**
 
 Create `mavis/assets/avatar/ATTRIBUTION.md`:
 
@@ -312,7 +312,7 @@ and `jonny_fixed.bam` are build artifacts — regenerate with:
     .venv/bin/gltf2bam assets/avatar/jonny_fixed.glb assets/avatar/jonny_fixed.bam
 ```
 
-- [ ] **Step 9: Update requirements and gitignore**
+- [x] **Step 9: Update requirements and gitignore**
 
 Append to `mavis/requirements.txt`:
 
@@ -332,12 +332,12 @@ assets/avatar/jonny_fixed.glb
 assets/avatar/jonny_fixed.bam
 ```
 
-- [ ] **Step 10: Confirm the full suite is still green**
+- [x] **Step 10: Confirm the full suite is still green**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest -q`
 Expected: 54 passed (50 existing + 4 new)
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 cd ~/Projects/graywind
@@ -362,7 +362,7 @@ git commit -m "feat(mavis): vendor Johnny avatar asset and its glTF repair tool"
   - `scene.AvatarScene(show_base)` with `.set_mouth(amount: float) -> None`, `.show() -> None`, `.hide() -> None`, `.mouth_sliders: list`
   - `scene.load_actor(loader) -> Actor`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 These tests run headless (`window-type none`) so they work in CI; the visible window is checked by hand in Step 6.
 
@@ -434,12 +434,12 @@ def test_attribution_text_is_present(avatar):
     assert "Stuxed" in avatar.credit.getText()
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_scene.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'avatar'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `mavis/avatar/__init__.py` (empty) and `mavis/avatar/scene.py`:
 
@@ -542,17 +542,26 @@ class AvatarScene:
         self.visible = False
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_scene.py -q`
 Expected: 5 passed
 
-- [ ] **Step 5: Run the whole suite**
+- [x] **Step 5: Run the whole suite**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest -q`
-Expected: 59 passed
+Expected: 64 passed (the "59" written here originally forgot to add Task 2's own 5).
 
-- [ ] **Step 6: Verify a real window opens — THE GATE FOR THIS TASK**
+> **As built (2026-09-19, commit `7aeefd4`) — two deviations from the code above:**
+> 1. `OnscreenText` takes **`mayChange=True`**, not `False`. The default flattens
+>    the text into a bare `PandaNode` and `getText()` then raises
+>    `AttributeError: 'PandaNode' object has no attribute 'getWtext'` — the credit
+>    becomes unreadable off the node, which is unacceptable for a licence string.
+> 2. **`MOUTH_GAIN = 1.5`**, not 2.0 — chosen by eye at the Step 6 gate; 2.0 and 3.0
+>    overshot. Confirmed `slider.getValue()` does reflect the frozen scalar
+>    (`set_mouth(0.25)` → `0.5` at gain 2.0), so the clamp test is not vacuous.
+
+- [x] **Step 6: Verify a real window opens — THE GATE FOR THIS TASK**
 
 Headless tests cannot answer this. Run by hand and *look at the screen*.
 
@@ -591,7 +600,11 @@ Confirm, in order:
 
 **If it opens:** set `MOUTH_GAIN` in `scene.py` to the value chosen in (4).
 
-- [ ] **Step 7: Commit**
+> **GATE PASSED, 2026-09-19.** Panda3D 1.10.16 opens a real `CocoaGraphicsPipe`
+> window on this Apple Silicon Mac — lit, textured, swaying, mouth visibly moving.
+> The design's largest unverified assumption is now verified. `MOUTH_GAIN = 1.5`.
+
+- [x] **Step 7: Commit**
 
 ```bash
 cd ~/Projects/graywind
