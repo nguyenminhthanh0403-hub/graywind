@@ -801,7 +801,7 @@ git commit -m "feat(mavis): derive mouth movement from an audio envelope"
 - Consumes: nothing
 - Produces: `dismiss.is_dismissal(transcript: str, threshold: float = 0.82) -> bool`; `dismiss.PHRASES: tuple[str, ...]`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/test_dismiss.py`:
 
@@ -844,12 +844,12 @@ def test_does_not_fire_on_a_phrase_buried_in_a_long_sentence():
     assert dismiss.is_dismissal(said) is False
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_dismiss.py -q`
 Expected: FAIL — `ImportError: cannot import name 'dismiss'`
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `mavis/avatar/dismiss.py`:
 
@@ -893,12 +893,32 @@ def is_dismissal(transcript: str, threshold: float = 0.82) -> bool:
     )
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_dismiss.py -q`
-Expected: 10 passed
+Expected: 26 passed (the "10" here miscounted the parametrised cases, and the
+rewrite below adds more).
 
-- [ ] **Step 5: Commit**
+> **As built (2026-09-19) — the matching strategy above was replaced.**
+> Whole-string `SequenceMatcher` was measured against realistic utterances and
+> ranks them in the wrong order: `"that's a lot"` (a question) scores **0.818**
+> while `"that's all thanks"` (a dismissal) scores **0.765**. No threshold
+> separates those, so tuning to catch real dismissals starts vanishing the
+> avatar mid-question. 10 of 17 realistic dismissals were missed, including
+> `"go away johnny"` at 0.714 against the phrase `"go away"` it contains --
+> length dilutes the ratio.
+>
+> Replaced with: strip filler words, then require what remains to match a
+> phrase **word for word**, each pair compared fuzzily. Per-word comparison
+> absorbs Whisper's errors (`thats`/`that's` = 0.909) and rejects near-misses
+> (`a`/`all` = 0.5); the raw length cap still runs first. Measured after:
+> **19/19 dismissals recognised, 24/24 questions safe.**
+>
+> Project-specific hazard now covered: `stop` is a dismissal phrase *and* half
+> of `stop loss`. "what's my stop loss" must not dismiss -- risk limits are
+> exactly when the avatar is wanted.
+
+- [x] **Step 5: Commit**
 
 ```bash
 cd ~/Projects/graywind
