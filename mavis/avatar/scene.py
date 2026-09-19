@@ -30,6 +30,9 @@ HEAD_MESH = "Wolf3D_Head"
 # shoulders in frame with air above. Measured at load rather than hardcoded so
 # a swapped-in model of a different scale still frames itself correctly.
 FRAMING = 2.6
+# Fraction of total height treated as "the head" when no HEAD_MESH is found.
+# HEAD_MESH is a Ready Player Me name, so any non-RPM model lands here.
+HEAD_FRACTION = 0.19
 DEFAULT_FOV = 30.0
 
 
@@ -103,14 +106,25 @@ class AvatarScene:
         measuring beats hardcoding because model scale is not knowable up front:
         this one is ~1.85 units tall, and an earlier hardcoded offset written
         for an assumed ~1.7 left the camera inside the geometry.
+
+        HEAD_MESH is a Ready Player Me name, so a swapped-in model will usually
+        not have it. Falling back to the whole actor would frame a full-body
+        long shot instead of a face, so the fallback takes the top
+        HEAD_FRACTION of the bounds -- where a head is on a standing figure.
         """
         self.actor.set_pos(0, 0, 0)
         head = self.actor.find(f"**/{HEAD_MESH}")
-        target = self.actor if head.is_empty() else head
 
-        low, high = target.get_tight_bounds()
-        center_z = (low[2] + high[2]) / 2.0
-        framed = max(high[2] - low[2], 1e-3) * FRAMING
+        if head.is_empty():
+            low, high = self.actor.get_tight_bounds()
+            head_height = max(high[2] - low[2], 1e-3) * HEAD_FRACTION
+            center_z = high[2] - head_height / 2.0
+        else:
+            low, high = head.get_tight_bounds()
+            head_height = max(high[2] - low[2], 1e-3)
+            center_z = (low[2] + high[2]) / 2.0
+
+        framed = head_height * FRAMING
 
         # No lens exists under window-type none, where the framing is arithmetic
         # rather than something anyone looks at; Panda3D's own default stands in.

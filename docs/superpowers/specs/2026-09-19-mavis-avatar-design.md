@@ -35,7 +35,9 @@ Deleting those seven redundant attribute *references* — a JSON-chunk edit, bin
 chunk copied through byte-for-byte, ~40 lines of Python, **no Blender** — produces
 a file that converts at exit 0 and retains:
 
-- **68 joints** (Hips → Spine → Neck → Head, full finger rig, LeftEye/RightEye)
+- **77 joints** (Hips → Spine → Neck → Head, full finger rig, LeftEye/RightEye).
+  Recorded as 68 until 2026-09-19; that count came from a build whose
+  `Wolf3D_Outfit_Bottom` was being read at the wrong stride. See `1c5ebce`.
 - **10 `CharacterSlider` morphs** — `mouthOpen`/`mouthSmile` on head, teeth, beard,
   and both eyes
 

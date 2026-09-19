@@ -612,8 +612,10 @@ Confirm, in order:
 >   on Apple Silicon. *The design's largest unverified assumption is cleared.*
 > - **Textured and correctly framed**, verified by offscreen render (head and
 >   shoulders, jacket, beard, aviators, in colour).
-> - **The on-screen Stuxed credit is visible** — confirmed by a human at the
->   window, which is the only place a licence condition can be checked.
+> - **The on-screen Stuxed credit renders.** A human confirmed it at the window
+>   on the pre-fix build; the post-fix offscreen PNG also shows it drawing,
+>   which is the evidence that matches the current code, since simplepbr
+>   installs its own display-region filtering after that human check.
 > - **The mouth moves.** `MOUTH_GAIN = 1.0`, chosen by eye against 1.5/2.0/3.0
 >   at the corrected framing. The earlier 1.5 was picked while the camera was
 >   inside the broken mesh, so it was never a valid reading.

@@ -54,6 +54,27 @@ def test_set_mouth_moves_head_geometry(avatar):
     assert moved > 500
 
 
+def test_no_mesh_escapes_the_model_bounds(avatar):
+    """Guards the built .bam, not the repair tool's GLB output.
+
+    The .bam is a gitignored artifact rebuilt by whatever panda3d-gltf is
+    installed, and every other test here samples only Wolf3D_Head. All of them
+    passed while Wolf3D_Outfit_Bottom was exploded to +/-18 units by a
+    mis-strided read -- the only symptom was a human noticing a grey mass on
+    screen. A whole-model sanity check catches that class headlessly.
+    """
+    low, high = avatar.actor.get_tight_bounds()
+    height = high[2] - low[2]
+    assert 1.0 < height < 3.0, f"model is {height:.2f} units tall, not human-scale"
+
+    for node in avatar.actor.findAllMatches("**/+GeomNode"):
+        lo, hi = node.get_tight_bounds(avatar.actor)
+        assert hi[2] - lo[2] <= height + 1e-3, (
+            f"{node.getName()} spans {hi[2] - lo[2]:.2f} units inside a "
+            f"{height:.2f}-unit model"
+        )
+
+
 def test_set_mouth_clamps_negative_input(avatar):
     avatar.set_mouth(-5.0)
     assert avatar.mouth_sliders[0].getValue() == 0.0
