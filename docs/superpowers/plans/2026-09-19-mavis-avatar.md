@@ -600,9 +600,21 @@ Confirm, in order:
 
 **If it opens:** set `MOUTH_GAIN` in `scene.py` to the value chosen in (4).
 
-> **GATE PASSED, 2026-09-19.** Panda3D 1.10.16 opens a real `CocoaGraphicsPipe`
-> window on this Apple Silicon Mac — lit, textured, swaying, mouth visibly moving.
-> The design's largest unverified assumption is now verified. `MOUTH_GAIN = 1.5`.
+> **GATE RESULT, 2026-09-19 — partially confirmed. Read the split carefully.**
+>
+> Confirmed:
+> - **A real window opens.** Panda3D 1.10.16 loads `CocoaGraphicsPipe` and runs on
+>   this Apple Silicon Mac without crashing. *This was the design's largest
+>   unverified assumption and it is now cleared.*
+> - **The mouth moves.** `MOUTH_GAIN = 1.5`, chosen by eye against 1.0/2.0/3.0 —
+>   which required watching the mouth animate at each gain.
+>
+> NOT yet confirmed — do not record these as passed until a human says so:
+> - **Textured vs. flat grey** (gate item 1). Textures are embedded in the GLB, so
+>   a grey figure means the material/lighting path is wrong, not a missing file.
+> - **The Stuxed credit renders on screen** (gate item 0, a licence condition).
+>   `test_attribution_text_is_present` only proves the node *carries* the string;
+>   it says nothing about whether it draws at `pos=(0.0, -0.95)`.
 
 - [x] **Step 7: Commit**
 
