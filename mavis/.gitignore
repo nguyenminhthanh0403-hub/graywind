@@ -2,5 +2,11 @@
 __pycache__/
 *.pyc
 .env
-assets/avatar/jonny_fixed.glb
-assets/avatar/jonny_fixed.bam
+# Avatar models are excluded by default and allowed back one at a time.
+# This repo is PUBLIC, so committing a model republishes it under the owner's
+# name. Only assets whose licence actually permits redistribution get an
+# unignore line below, and each one must be recorded in ATTRIBUTION.md.
+# Build artifacts (*_fixed.glb, *.bam) are regenerable and never committed.
+assets/avatar/*
+!assets/avatar/ATTRIBUTION.md
+!assets/avatar/jonny.glb

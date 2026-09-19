@@ -1,48 +1,86 @@
 """The Panda3D side of the avatar: window, model, idle motion, mouth.
 
-Mouth movement is driven by CharacterSlider morph targets rather than a
-jaw bone -- this model has no jaw joint. The sliders are reached by
-walking the character's PartBundle; they are NOT scene-graph nodes, so
-NodePath searches for them return nothing.
+Two different models are supported because they move their mouths in
+completely different ways, and because only one of them may be committed.
 
-MOUTH_GAIN is an amplification knob for that morph. A slider value of 1.0
-displaces head vertices by only ~0.011 units on a ~1.85-unit model (~11mm
-of jaw travel), which was expected to read as a twitch rather than speech.
-It does not: once the head is framed properly the raw movement is enough,
-and 1.0 was chosen by eye over 1.5/2.0/3.0. The knob stays because morph
-targets extrapolate linearly, so a re-framed or swapped model can want
-more; judge it against a real window, not against this number.
+* **jonny** -- the Stuxed Sketchfab model, CC BY, in the repo. A Ready Player
+  Me export, so the mouth is a `mouthOpen` *morph target*.
+* **keanu** -- the KonnieGFX port of CD Projekt Red's actual character. Far
+  better likeness, but it is an extracted game asset and this repository is
+  public, so it is gitignored and exists only on machines that build it. It
+  carries no morph targets at all; Cyberpunk animates faces with *joints*,
+  which is why its facial rig survived extraction. The mouth is a rotation of
+  `mid_J_jaw_JNT`.
+
+The test suite can therefore only ever run against `jonny`, which is why both
+mechanisms stay supported rather than the better model simply replacing the
+other. Tests pin their model explicitly; nothing should rely on the default.
+
+Whichever mechanism is used, the mouth only moves if the character's
+`PartBundle` is told to `forceUpdate()`. Neither writing a slider nor rotating
+a controlled joint updates the vertices on its own -- both look like a silent
+no-op without it, and both wasted a debugging session that way.
 """
 import math
+import os
 from pathlib import Path
 
 from direct.actor.Actor import Actor
 from direct.gui.OnscreenText import OnscreenText
 from panda3d.core import AmbientLight, DirectionalLight, TextNode, Vec4
 
-ASSET = Path(__file__).resolve().parent.parent / "assets" / "avatar" / "jonny_fixed.bam"
+ASSET_DIR = Path(__file__).resolve().parent.parent / "assets" / "avatar"
 
-MOUTH_GAIN = 1.0
-CREDIT = 'Model: "Jonny Silverhand" by Stuxed (CC BY)'
+AVATARS = {
+    "keanu": {
+        "bam": "keanu.bam",
+        "head_mesh": "head",
+        # ASCII only: Panda3D's default font has no glyph for the likes of
+        # U+00B7 or U+00A9 and draws them as empty boxes.
+        "credit": "Model: Johnny Silverhand port by KonnieGFX - "
+                  "character (c) CD Projekt Red",
+        "mouth": {"kind": "joint", "joint": "mid_J_jaw_JNT",
+                  "axis": "r", "degrees": 14.0},
+    },
+    "jonny": {
+        "bam": "jonny_fixed.bam",
+        "head_mesh": "Wolf3D_Head",
+        "credit": 'Model: "Jonny Silverhand" by Stuxed (CC BY)',
+        "mouth": {"kind": "slider", "slider": "mouthOpen", "gain": 1.0},
+    },
+}
 
-HEAD_MESH = "Wolf3D_Head"
-# Framing height as a multiple of the head's own height: ~2.6 puts head and
-# shoulders in frame with air above. Measured at load rather than hardcoded so
-# a swapped-in model of a different scale still frames itself correctly.
-FRAMING = 2.6
-# Fraction of total height treated as "the head" when no HEAD_MESH is found.
-# HEAD_MESH is a Ready Player Me name, so any non-RPM model lands here.
+# Best-looking first. `MAVIS_AVATAR` overrides; tests pass a name directly.
+PREFERENCE = ("keanu", "jonny")
+
 HEAD_FRACTION = 0.19
+FRAMING = 2.6
 DEFAULT_FOV = 30.0
 
 
-def load_actor(loader) -> Actor:
-    if not ASSET.exists():
+def choose_avatar() -> str:
+    """Name of the avatar to load: env override, else the best one built."""
+    requested = os.environ.get("MAVIS_AVATAR")
+    if requested:
+        if requested not in AVATARS:
+            raise ValueError(
+                f"MAVIS_AVATAR={requested!r} is not one of {sorted(AVATARS)}"
+            )
+        return requested
+    for name in PREFERENCE:
+        if (ASSET_DIR / AVATARS[name]["bam"]).exists():
+            return name
+    return PREFERENCE[-1]
+
+
+def load_actor(loader, name: str) -> Actor:
+    path = ASSET_DIR / AVATARS[name]["bam"]
+    if not path.exists():
         raise FileNotFoundError(
-            f"avatar model missing at {ASSET} -- build it with "
-            "`.venv/bin/python -m tools.repair_gltf` then `gltf2bam`"
+            f"avatar model {name!r} missing at {path} -- see "
+            "assets/avatar/ATTRIBUTION.md for how to rebuild it"
         )
-    return Actor(str(ASSET))
+    return Actor(str(path))
 
 
 def _collect_sliders(part, name, acc):
@@ -53,28 +91,86 @@ def _collect_sliders(part, name, acc):
     return acc
 
 
+class _SliderMouth:
+    """Morph-target mouth. Sliders live in the PartBundle, NOT the scene graph
+    -- `findAllMatches("**/+CharacterSlider")` returns zero and once led a
+    session to conclude the model had no morphs at all."""
+
+    def __init__(self, actor, bundle, config):
+        self._bundle = bundle
+        self._gain = config.get("gain", 1.0)
+        self.sliders = _collect_sliders(bundle, config["slider"], [])
+        if not self.sliders:
+            raise ValueError(f"no {config['slider']!r} sliders in this model")
+
+    def set(self, amount: float) -> None:
+        value = max(0.0, min(1.0, amount)) * self._gain
+        for slider in self.sliders:
+            slider.applyFreezeScalar(value)
+        self._bundle.forceUpdate()
+
+
+class _JawMouth:
+    """Joint-driven mouth: rotate the jaw away from its rest pose.
+
+    The axis and travel are per-model and were found by rendering the jaw at
+    each of h/p/r and looking -- on this rig `r` opens the mouth and the other
+    two skew the face sideways.
+    """
+
+    def __init__(self, actor, bundle, config):
+        self._bundle = bundle
+        self._joint = actor.controlJoint(None, "modelRoot", config["joint"])
+        if self._joint is None or self._joint.isEmpty():
+            raise ValueError(f"joint {config['joint']!r} not found in this model")
+        self._axis = config["axis"]
+        self._degrees = config["degrees"]
+        self._rest = {"h": self._joint.getH(),
+                      "p": self._joint.getP(),
+                      "r": self._joint.getR()}[self._axis]
+        self._apply = {"h": self._joint.setH,
+                       "p": self._joint.setP,
+                       "r": self._joint.setR}[self._axis]
+        self.sliders = []
+
+    def set(self, amount: float) -> None:
+        value = max(0.0, min(1.0, amount))
+        self._apply(self._rest + value * self._degrees)
+        self._bundle.forceUpdate()
+
+
+_DRIVERS = {"slider": _SliderMouth, "joint": _JawMouth}
+
+
 class AvatarScene:
     """Owns the avatar's visual state. Knows nothing about audio."""
 
-    def __init__(self, show_base):
+    def __init__(self, show_base, avatar: str = None):
         self.base = show_base
+        self.name = avatar or choose_avatar()
+        self.config = AVATARS[self.name]
+
         self._init_shader()
-        self.actor = load_actor(show_base.loader)
+        self.actor = load_actor(show_base.loader, self.name)
         self.actor.reparent_to(show_base.render)
-        self._frame_head()
 
         character = self.actor.find("**/+Character").node()
         self._character = character
         self._bundle = character.getBundle(0)
-        self.mouth_sliders = _collect_sliders(self._bundle, "mouthOpen", [])
 
+        self.mouth = _DRIVERS[self.config["mouth"]["kind"]](
+            self.actor, self._bundle, self.config["mouth"]
+        )
+        self.mouth_sliders = self.mouth.sliders
+
+        self._frame_head()
         self._light()
         # mayChange=True keeps a live TextNode. The default flattens the text
         # into a bare PandaNode, after which the credit can no longer be read
-        # back off the node -- and this credit is a licence condition, so it
-        # has to stay verifiable.
+        # back off the node -- and this credit is an attribution condition, so
+        # it has to stay verifiable.
         self.credit = OnscreenText(
-            text=CREDIT, pos=(0.0, -0.95), scale=0.04,
+            text=self.config["credit"], pos=(0.0, -0.95), scale=0.04,
             fg=(0.8, 0.8, 0.85, 1.0), align=TextNode.ACenter, mayChange=True,
         )
         self._t = 0.0
@@ -83,14 +179,10 @@ class AvatarScene:
     def _init_shader(self):
         """Install the PBR shader the glTF materials are written against.
 
-        The model's colour lives in each material's baseColorTexture. Panda3D's
-        fixed-function pipeline has no idea how to sample that, so it lights the
-        material colours alone and the avatar renders as a flat grey figure --
-        textures fully loaded, fully bound, entirely unused. simplepbr supplies
-        the shader that reads them.
-
-        Skipped without a window (window-type none in the tests), where there is
-        no graphics context to compile shaders against.
+        Colour lives in each material's baseColorTexture, which Panda3D's
+        fixed-function pipeline cannot sample -- without this the model renders
+        with its textures loaded, bound, and entirely unused. Skipped when
+        there is no window to compile shaders against.
         """
         if self.base.win is None:
             return
@@ -101,36 +193,34 @@ class AvatarScene:
     def _frame_head(self):
         """Place the actor so the head fills the frame, from measured bounds.
 
-        The camera stays at the origin looking down +Y. Distance is solved from
-        the lens's own vertical FOV, so this holds if the lens changes -- and
-        measuring beats hardcoding because model scale is not knowable up front:
-        this one is ~1.85 units tall, and an earlier hardcoded offset written
-        for an assumed ~1.7 left the camera inside the geometry.
+        Bounds are read *relative to the actor*. `get_tight_bounds()` with no
+        argument reports the mesh's own untransformed space, which on a model
+        carrying a scale above the meshes -- as the rescaled keanu export does
+        -- is out by the scale factor and frames empty air.
 
-        HEAD_MESH is a Ready Player Me name, so a swapped-in model will usually
-        not have it. Falling back to the whole actor would frame a full-body
-        long shot instead of a face, so the fallback takes the top
-        HEAD_FRACTION of the bounds -- where a head is on a standing figure.
+        The near plane is pulled in to suit the computed distance. Panda3D
+        defaults it to 1.0, and a head framed closer than that is entirely
+        clipped away, which looks exactly like a model that failed to load.
         """
         self.actor.set_pos(0, 0, 0)
-        head = self.actor.find(f"**/{HEAD_MESH}")
+        head = self.actor.find(f"**/{self.config['head_mesh']}")
 
         if head.is_empty():
             low, high = self.actor.get_tight_bounds()
             head_height = max(high[2] - low[2], 1e-3) * HEAD_FRACTION
             center_z = high[2] - head_height / 2.0
         else:
-            low, high = head.get_tight_bounds()
+            low, high = head.get_tight_bounds(self.actor)
             head_height = max(high[2] - low[2], 1e-3)
             center_z = (low[2] + high[2]) / 2.0
 
         framed = head_height * FRAMING
-
-        # No lens exists under window-type none, where the framing is arithmetic
-        # rather than something anyone looks at; Panda3D's own default stands in.
         lens = self.base.camLens
         fov_v = lens.get_fov()[1] if lens is not None else DEFAULT_FOV
         distance = (framed / 2.0) / math.tan(math.radians(fov_v / 2.0))
+
+        if lens is not None:
+            lens.set_near(min(lens.get_near(), max(distance * 0.05, 0.01)))
         self.actor.set_pos(0, distance, -center_z)
 
     def _light(self):
@@ -145,11 +235,8 @@ class AvatarScene:
         self.base.render.set_light(self.base.render.attach_new_node(ambient))
 
     def set_mouth(self, amount: float) -> None:
-        """Drive every mouthOpen slider. `amount` is 0..1 before gain."""
-        value = max(0.0, min(1.0, amount)) * MOUTH_GAIN
-        for slider in self.mouth_sliders:
-            slider.applyFreezeScalar(value)
-        self._bundle.forceUpdate()
+        """Open the mouth. `amount` is 0 (shut) to 1 (fully open)."""
+        self.mouth.set(amount)
 
     def idle(self, elapsed: float) -> None:
         """A slow sway so he doesn't look frozen between questions."""
