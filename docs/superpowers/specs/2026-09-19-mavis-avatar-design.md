@@ -143,7 +143,15 @@ renderer animates, no neural work is running.
    wake model needed.
 4. **Voice: `ChatterboxVC`** against the actor's `actor_sample.wav` (66.8s, 22050Hz),
    applied to a `say` reading. **Not `ChatterboxTTS`** (measured 80s steady-state
-   for ~2s of audio — ruled out). Latency is a **~1.4x-realtime rate**, not a flat
+   for ~2s of audio — ruled out).
+   > **AMENDED 2026-09-20 — see `2026-09-20-mavis-canned-voice-design.md`.** The
+   > latency call holds (re-measured at 35-41x realtime), but ruling TTS out
+   > *entirely* was too broad and the result does not sound like Johnny. Bullion
+   > builds Alfred with VC and **Johnny with TTS** plus `exaggeration=0.8`,
+   > `cfg_weight=0.3`, `atempo=0.92` and `loudnorm`; MAVIS adopted Alfred's
+   > pipeline by mistake. Voice is now hybrid: recurring lines (greeting, idle,
+   > dismissal, thinking filler) are pre-generated offline with TTS in his real
+   > voice, and only substantive answers use live VC. Latency is a **~1.4x-realtime rate**, not a flat
    cost: a 20s answer takes ~28s to convert. Cap answer length rather than pretend
    the cost is fixed.
 5. **Renderer: Panda3D + `panda3d-gltf`**, chosen for the 8GB M2 constraint.
