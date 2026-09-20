@@ -53,10 +53,16 @@ def load_manifest():
 
 
 def save_manifest(entries):
-    MANIFEST.write_text(json.dumps(
+    # Write to a sibling temp file and rename over the target rather than
+    # writing MANIFEST in place: a kill between truncate and write would
+    # otherwise leave partial JSON that load_manifest swallows as [],
+    # orphaning every wav on disk and forcing a full regenerate.
+    tmp = MANIFEST.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(
         {"version": 1, "sample_rate": SAMPLE_RATE, "entries": entries},
         indent=2,
     ))
+    os.replace(tmp, MANIFEST)
 
 
 def duration(path):

@@ -86,7 +86,7 @@ no figure to anchor to, so they carry attitude and imagery instead.
 
 **filler** (8) — shortest by design; these cover a 4-8s gap, not fill airtime
 1. Hang on. Pulling the numbers.
-2. Give me a second — digging through the noise.
+2. Give me a second -- digging through the noise.
 3. Checking. Truth's buried under a lot of press releases.
 4. Working on it, choom.
 5. One sec. Reading what they'd rather you didn't.

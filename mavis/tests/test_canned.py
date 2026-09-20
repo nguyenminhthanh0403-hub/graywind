@@ -1,7 +1,5 @@
 import json
 
-import pytest
-
 from avatar import canned, lines
 
 
@@ -65,10 +63,10 @@ def test_a_moment_with_no_audio_returns_none(tmp_path):
     assert voice.path_for("greeting") is not None
 
 
-def test_stale_entry_whose_text_changed_is_ignored(tmp_path):
-    """The manifest records the hash the wav was built from. If the catalogue
-    text has since been edited, that audio says something else and must not be
-    played."""
+def test_entry_whose_text_is_not_in_the_catalogue_is_ignored(tmp_path):
+    """An entry whose text no longer appears in lines.all_lines() -- because
+    the line was edited or removed -- is rejected by the `wanted` lookup
+    before any hash is even considered, so its audio is never played."""
     stale = _entry("greeting", "a line that is no longer in the catalogue")
     _write(tmp_path, [stale])
 

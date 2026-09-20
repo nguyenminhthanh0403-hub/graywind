@@ -7,16 +7,18 @@ cloned speech in someone's voice is not ours to do. Only this file and the
 generator are tracked.
 
 Source prompt:
-`~/minhthanh0403/claude-projects/claudekit/bullion-live-map/audio/voice_sample/actor_sample.wav`
+`<bullion-live-map>/audio/voice_sample/actor_sample.wav`, where `<bullion-live-map>`
+is the bullion-live-map project checkout.
 
 The line text lives in `avatar/lines.py` and IS committed — it is our writing.
 
 ## Rebuilding
 
-Needs the narration venv (torch) and ffmpeg. From `mavis/`:
+Needs the narration venv (torch) and ffmpeg. Set `$NARRATION_PY` once to the
+Python binary in bullion-live-map's narration venv
+(`<bullion-live-map>/.venv-narration/bin/python`), then from `mavis/`:
 
-    ~/minhthanh0403/claude-projects/claudekit/bullion-live-map/.venv-narration/bin/python \
-        scripts/pregen_lines.py
+    $NARRATION_PY scripts/pregen_lines.py
 
 Roughly 47 minutes for all 28 lines from cold: ChatterboxTTS runs at 35-41x
 realtime on this machine, which is exactly why these lines are pre-generated
