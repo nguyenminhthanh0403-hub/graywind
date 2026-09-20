@@ -30,6 +30,10 @@ import os
 import sys
 import time
 
+# Peak level converted speech is scaled to. Just under full scale to leave
+# headroom for playback resampling without clipping.
+TARGET_PEAK = 0.89
+
 # Claim stdout before any noisy import can write to it.
 _PROTOCOL = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8")
 sys.stdout = sys.stderr
@@ -44,11 +48,30 @@ def _emit(obj):
     _PROTOCOL.flush()
 
 
+def _normalise(wav):
+    """Bring the clip up to a consistent speaking level.
+
+    ChatterboxVC's output tracks the reference clip's level, which for the
+    actor sample lands around 0.135 peak -- roughly 17dB down, quiet enough
+    that it could not be judged against room noise. Normalising per clip also
+    keeps replies at an even volume instead of varying with whatever the
+    scaffold happened to produce.
+
+    Near-silence is left alone: scaling it to the target would only amplify
+    the noise floor into an audible hiss.
+    """
+    peak = float(wav.abs().max())
+    if peak < 1e-4:
+        return wav
+    return wav * (TARGET_PEAK / peak)
+
+
 def _convert(model, request):
     started = time.monotonic()
     wav = model.generate(request["input"])
     if hasattr(wav, "dim") and wav.dim() == 1:
         wav = wav.unsqueeze(0)
+    wav = _normalise(wav)
     torchaudio.save(request["output"], wav, model.sr)
     return round(time.monotonic() - started, 2)
 
