@@ -10,3 +10,8 @@ __pycache__/
 assets/avatar/*
 !assets/avatar/ATTRIBUTION.md
 !assets/avatar/jonny.glb
+# Generated Johnny speech: cloned audio in a hired voice actor's voice, and
+# this repo is public. The generator and the line text are committed; the wavs
+# are rebuilt with `scripts/pregen_lines.py`.
+assets/voice/*
+!assets/voice/ATTRIBUTION.md
