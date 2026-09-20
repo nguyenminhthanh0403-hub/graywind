@@ -95,20 +95,21 @@ def main():
         raise SystemExit(f"reference clip missing: {ACTOR_REF}")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    existing = {entry["hash"]: entry for entry in load_manifest()}
 
     wanted = [(moment, text) for moment, text in lines.all_lines()
               if args.only is None or moment == args.only]
 
-    todo = []
-    keep = []
-    for moment, text in wanted:
-        digest = lines.slug(text)
-        entry = existing.get(digest)
-        if entry and (OUT_DIR / entry["file"]).exists():
-            keep.append(entry)
-            continue
-        todo.append((moment, text, digest))
+    catalogue = {lines.slug(text): text for _moment, text in lines.all_lines()}
+    # Keep every entry that still matches the catalogue and still has its wav,
+    # including moments outside a --only filter. Building `keep` from the
+    # filtered list instead would rewrite the manifest without them.
+    keep = [entry for entry in load_manifest()
+            if catalogue.get(entry.get("hash")) == entry.get("text")
+            and (OUT_DIR / entry.get("file", "")).exists()]
+    already = {entry["hash"] for entry in keep}
+
+    todo = [(moment, text, lines.slug(text)) for moment, text in wanted
+            if lines.slug(text) not in already]
 
     print(f"{len(keep)} already rendered, {len(todo)} to generate")
     for moment, text, digest in todo:
