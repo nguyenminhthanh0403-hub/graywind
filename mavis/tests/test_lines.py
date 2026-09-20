@@ -55,3 +55,18 @@ def test_all_lines_covers_the_whole_catalogue():
     pairs = lines.all_lines()
     assert len(pairs) == sum(len(v) for v in lines.LINES.values())
     assert ("idle", "Are we just idling then?") in pairs
+
+
+def test_catalogue_shape_is_pinned():
+    """Counts the spec fixes, asserted against literals rather than against
+    the catalogue itself.
+
+    The check above it compares all_lines() to LINES, but all_lines() is built
+    from LINES -- that equality is a tautology and holds however many lines
+    the catalogue has. Audio for these lines costs ~2 minutes each to generate
+    offline, so a silent shrink is expensive to notice and expensive to undo.
+    """
+    assert {m: len(t) for m, t in lines.LINES.items()} == {
+        "greeting": 7, "idle": 8, "dismissal": 5, "filler": 8,
+    }
+    assert len(lines.all_lines()) == 28
