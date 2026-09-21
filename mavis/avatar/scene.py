@@ -97,7 +97,21 @@ AVATARS = {
 PREFERENCE = ("keanu", "jonny")
 
 HEAD_FRACTION = 0.19
-FRAMING = 2.6
+# How much of the view the head spans: the framed height is this many head
+# heights. A head-and-shoulders crop was 2.6; this is a torso portrait that
+# ends at the belt. Chosen by rendering candidates and looking -- past ~4 the
+# legs come into frame.
+#
+# Beware judging this from a downscaled screenshot: the chrome arm's thin
+# high-contrast detail aliases to a white smear when the image is resampled,
+# which looks like a blown-out material and is not one. Measured in the
+# rendered pixels, no arm pixel exceeds 0.85 luminance at any framing.
+FRAMING = 3.05
+# The framing is measured about the head, so widening it alone would keep the
+# head dead centre and spend half the new height on empty air above his hair.
+# Bias the actor up by this fraction of the framed height to spend it downward
+# on the torso instead. 0.5 would put the head's centre at the very top edge.
+HEAD_RISE = 0.31
 DEFAULT_FOV = 30.0
 
 
@@ -275,6 +289,7 @@ class AvatarScene:
             self.actor.pose(self.config["idle_anim"], 0)
             self._bundle.forceUpdate()
 
+        self._release_camera()
         self._frame_head()
 
         if self.animated:
@@ -318,6 +333,23 @@ class AvatarScene:
         self.pipeline = simplepbr.init(msaa_samples=0)
         self.base._mavis_pbr_pipeline = self.pipeline
 
+    def _release_camera(self):
+        """Take the camera away from ShowBase's default mouse trackball.
+
+        `_frame_head` frames by moving the *actor* and leaving the camera at
+        the origin. ShowBase installs a Trackball2D that writes its own
+        transform onto `base.camera` every frame, so the first mouse drag in
+        the window replaces the framed view with the trackball's pose and the
+        avatar vanishes off-frame -- looking exactly like a crash. Nothing here
+        wants a user-flyable camera; the framing is the whole point.
+
+        Skipped when there is no window, matching `_init_shader`: a windowless
+        base has no mouse interface to detach.
+        """
+        if self.base.win is None:
+            return
+        self.base.disableMouse()
+
     def _frame_head(self):
         """Place the actor so the head fills the frame, from measured bounds.
 
@@ -353,7 +385,8 @@ class AvatarScene:
 
         if lens is not None:
             lens.set_near(min(lens.get_near(), max(distance * 0.05, 0.01)))
-        self.actor.set_pos(-center_x, distance, -center_z)
+        # +z lifts the actor, which lowers the camera's aim down his body.
+        self.actor.set_pos(-center_x, distance, -center_z + framed * HEAD_RISE)
 
     def _light(self):
         key = DirectionalLight("key")

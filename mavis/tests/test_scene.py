@@ -104,6 +104,33 @@ def test_every_avatar_declares_a_credit():
         assert config["mouth"]["kind"] in scene._DRIVERS
 
 
+def test_camera_is_taken_off_the_mouse_when_there_is_a_window():
+    """ShowBase's default Trackball2D writes its own transform onto
+    base.camera every frame. Framing works by moving the actor and leaving the
+    camera at the origin, so the first mouse drag in the window replaced the
+    framed view with the trackball's pose and the avatar left the frame --
+    indistinguishable from a crash. The suite runs `window-type none`, so the
+    two branches are exercised against a stub rather than a real window."""
+    calls = []
+    windowed = types.SimpleNamespace(
+        base=types.SimpleNamespace(win=object(),
+                                   disableMouse=lambda: calls.append("called")))
+    scene.AvatarScene._release_camera(windowed)
+    assert calls == ["called"], "camera left under the mouse trackball"
+
+    headless = types.SimpleNamespace(
+        base=types.SimpleNamespace(win=None, disableMouse=lambda: calls.append("bad")))
+    scene.AvatarScene._release_camera(headless)
+    assert calls == ["called"], "windowless base has no mouse to detach"
+
+
+def test_head_stays_inside_the_frame():
+    """HEAD_RISE biases the aim down the body to spend the frame on torso
+    rather than empty air above his hair. At 0.5 the head's centre sits on the
+    top edge, so anything at or past that has framed him out of his own shot."""
+    assert 0.0 <= scene.HEAD_RISE < 0.5, scene.HEAD_RISE
+
+
 def test_pbr_shader_initialises_once_per_window(base, monkeypatch):
     """simplepbr claims the display region via a FilterManager, so a second
     init dies with "Could not find appropriate DisplayRegion to filter" -- a
