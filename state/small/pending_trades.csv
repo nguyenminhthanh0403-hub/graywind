@@ -1,3 +1,2 @@
 symbol,issue_number,side,qty,price_at_proposal,stop_price,target_price,tier,proposed_date
-AAPL,27,buy,0.5972,336.175,329.45,346.26,2,2026-09-18
-SERV,28,buy,23.4771,4.34,4.25,4.47,3,2026-09-18
+AAPL,30,buy,0.6034,333.96,327.28,343.98,2,2026-09-21
