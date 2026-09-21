@@ -217,6 +217,15 @@ The working probe was `desktop_test.py` in the (now gone) scratchpad — it is ~
 set the three PRC/WindowProperties flags above, `base.win.setClearColor(Vec4(0,0,0,0))`,
 then build an `AvatarScene` as normal.
 
+**One more constraint, learned the hard way minutes after the probe succeeded:** the
+OS killed the probe window for low memory. A desktop presence is by definition
+*permanently resident* — unlike the showcase windows, it never closes — and it would
+hold ~300MB for the whole session on a machine that has now OOM-killed this project four
+times in one day. That does not sink the feature, but it means "always on the desktop"
+and "warm 2-3GB voice worker" are competing for the same 8GB, and the feature should be
+designed knowing that (idle the renderer when hidden? unload the model between
+questions?).
+
 **Recommendation if this is picked up:** it is a genuine feature, not a tweak — it
 changes how the app is launched and how it behaves against the rest of the desktop. Worth
 a brainstorm and its own small plan rather than bolting onto Task 7. The open questions
