@@ -268,9 +268,17 @@ class AvatarScene:
             () if self.animated else self.config.get("idle", ())
         )
         if self.animated:
-            self.actor.loop(self.config["idle_anim"])
+            # Pose to the clip's first frame BEFORE framing. loop() only starts
+            # playback -- the pose is not applied until a frame is drawn, so
+            # framing here would otherwise measure the bind pose and then
+            # display him animated, leaving him sitting off-centre.
+            self.actor.pose(self.config["idle_anim"], 0)
+            self._bundle.forceUpdate()
 
         self._frame_head()
+
+        if self.animated:
+            self.actor.loop(self.config["idle_anim"])
         self._light()
         # mayChange=True keeps a live TextNode. The default flattens the text
         # into a bare PandaNode, after which the credit can no longer be read
@@ -333,6 +341,10 @@ class AvatarScene:
             low, high = head.get_tight_bounds(self.actor)
             head_height = max(high[2] - low[2], 1e-3)
             center_z = (low[2] + high[2]) / 2.0
+        # Centre horizontally as well as vertically. A bind pose happens to put
+        # the head on the model's centreline, so framing only Z looked correct
+        # until a clip shifted his weight and left him sitting off to one side.
+        center_x = (low[0] + high[0]) / 2.0
 
         framed = head_height * FRAMING
         lens = self.base.camLens
@@ -341,7 +353,7 @@ class AvatarScene:
 
         if lens is not None:
             lens.set_near(min(lens.get_near(), max(distance * 0.05, 0.01)))
-        self.actor.set_pos(0, distance, -center_z)
+        self.actor.set_pos(-center_x, distance, -center_z)
 
     def _light(self):
         key = DirectionalLight("key")
