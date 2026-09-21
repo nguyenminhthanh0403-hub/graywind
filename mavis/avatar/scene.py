@@ -61,6 +61,14 @@ AVATARS = {
     "keanu": {
         "bam": "keanu.bam",
         "head_mesh": "head",
+        # Real retargeted clips, built by tools/retarget_anim.py. When these are
+        # present they drive the body and the procedural channels below are not
+        # used at all -- a clip already carries breathing, weight shift and
+        # head movement, and it cannot share joints with controlJoint, which
+        # detaches a joint from animation entirely.
+        "anims": ("idle", "smoking"),
+        "idle_anim": "idle",
+        # Kept as the fallback for a model built without animation.
         "idle": _KEANU_IDLE,
         # The whole-actor yaw rotates about an axis through the head, so it
         # swings the shoulders while the head stays put -- backwards. Kept only
@@ -248,9 +256,19 @@ class AvatarScene:
             self.actor, self._bundle, self.config["mouth"]
         )
         self.mouth_sliders = self.mouth.sliders
+
+        # The mouth takes controlJoint on the jaw BEFORE any clip starts. The
+        # jaw is a CDPR facial joint and no retargeted clip touches it, so the
+        # two never contend -- but the ordering keeps it that way if one ever
+        # does.
+        wanted = set(self.config.get("anims", ()))
+        self.animated = bool(wanted) and wanted <= set(self.actor.getAnimNames())
         self.motion = _IdleMotion(
-            self.actor, self._bundle, self.config.get("idle", ())
+            self.actor, self._bundle,
+            () if self.animated else self.config.get("idle", ())
         )
+        if self.animated:
+            self.actor.loop(self.config["idle_anim"])
 
         self._frame_head()
         self._light()
@@ -341,10 +359,25 @@ class AvatarScene:
         self.mouth.set(amount)
 
     def idle(self, elapsed: float) -> None:
-        """Keep him alive between questions: breathing, head drift, weight."""
+        """Keep him alive between questions: breathing, head drift, weight.
+
+        A model with real clips needs nothing here -- Panda3D advances the
+        animation off its own clock, and the clip already carries everything
+        this method synthesises. Only a model without animation falls through
+        to the procedural channels.
+        """
         self._t = elapsed
+        if self.animated:
+            return
         self.actor.set_h(math.sin(elapsed * SWAY_RATE) * self.config.get("sway", 12.0))
         self.motion.apply(elapsed)
+
+    def play(self, name: str, loop: bool = True) -> bool:
+        """Switch to another clip, e.g. "smoking". False if it has none."""
+        if not self.animated or name not in self.actor.getAnimNames():
+            return False
+        (self.actor.loop if loop else self.actor.play)(name)
+        return True
 
     def show(self) -> None:
         self.actor.show()

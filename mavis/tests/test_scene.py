@@ -220,18 +220,54 @@ def test_keanu_head_is_framed_in_actor_space(keanu):
 
 
 @needs_keanu
-def test_keanu_idle_moves_the_head_over_time(keanu):
-    """Idle must move real joints, not just yaw the whole actor about an axis
-    running through the head -- which moved the shoulders and left the face
-    almost still, and is what made the first version read as a mannequin."""
-    keanu.set_mouth(0.0)
-    keanu.idle(0.0)
+def test_keanu_uses_clips_rather_than_procedural_idle(keanu):
+    """Retargeted clips drive the body, and the procedural channels stand down.
+
+    They cannot both run: `_IdleMotion` takes joints with controlJoint, which
+    detaches a joint from animation entirely, and those are the same head, neck
+    and clavicle joints a clip animates. The clip wins because it already
+    carries breathing, weight shift and head movement.
+    """
+    assert keanu.animated is True
+    assert keanu.motion.driven == [], "procedural channels must not take joints"
+    assert set(scene.AVATARS["keanu"]["anims"]) <= set(keanu.actor.getAnimNames())
+
+
+@needs_keanu
+def test_keanu_animation_moves_the_body(keanu):
+    """The model ships with no animation of its own -- a game rip is a mesh in
+    its bind pose. These frames exist only because tools/retarget_anim.py put
+    them there, so this is what proves the retarget survived export."""
+    bundle = keanu._bundle
+    keanu.actor.pose("idle", 0)
+    bundle.forceUpdate()
     first = _vertices(keanu.actor, "head")
-    keanu.idle(3.6)
+
+    keanu.actor.pose("idle", 120)
+    bundle.forceUpdate()
     later = _vertices(keanu.actor, "head")
 
-    assert keanu.motion.driven, "no idle joints were taken under control"
     assert sum(1 for a, b in zip(first, later) if a != b) > 500
+
+
+@needs_keanu
+def test_keanu_can_switch_clips_and_reports_unknown_ones(keanu):
+    assert keanu.play("smoking") is True
+    assert keanu.play("idle") is True
+    assert keanu.play("moonwalk") is False
+
+
+@needs_keanu
+def test_keanu_jaw_still_free_while_a_clip_plays(keanu):
+    """No retargeted clip touches mid_J_jaw_JNT -- it is a CDPR facial joint and
+    Mixamo has no opinion about faces. If a clip ever did animate it, lipsync
+    and the animation would fight over the same joint."""
+    keanu.actor.loop("idle")
+    keanu.set_mouth(0.0)
+    shut = _vertices(keanu.actor, "teeth")
+    keanu.set_mouth(1.0)
+    opened = _vertices(keanu.actor, "teeth")
+    assert sum(1 for a, b in zip(shut, opened) if a != b) > 100
 
 
 @needs_keanu

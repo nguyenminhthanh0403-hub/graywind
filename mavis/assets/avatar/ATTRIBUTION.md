@@ -67,16 +67,35 @@ the facial rig survived extraction. The mouth is therefore driven by rotating
 `mid_J_jaw_JNT`; `r` is the axis that opens it, `h` and `p` skew the face
 sideways.
 
+### Animation
+
+The model ships with **no animation** — a game rip gives you the mesh and the
+skeleton in its bind pose, arms out at 45°, which is most of why it read as a
+mannequin. Motion comes from **Mixamo** (Adobe, free with an Adobe ID, licensed
+for use): `Breathing Idle` and `Smoking`, downloaded as FBX and retargeted onto
+this model's ValveBiped skeleton by `tools/retarget_anim.py`.
+
+Mixamo clips are not redistributed here either. Download them yourself from
+mixamo.com (search the clip name, Format: FBX Binary) and point the tool at
+them. "With Skin" is fine — only the armature is read.
+
 ### Rebuilding `keanu.bam`
 
 Needs Blender (`brew install --cask blender`) — Panda3D cannot read FBX.
 Download "Keanu 3D model.rar" from the DeviantArt page above and extract it,
 then, from `mavis/`:
 
+    # with animation (what ships):
+    /Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup \
+        --python tools/retarget_anim.py -- \
+        "<extracted>/keanu.fbx" "<extracted>" /tmp/keanu.glb \
+        "idle=<path>/Breathing Idle.fbx" "smoking=<path>/Smoking.fbx"
+    .venv/bin/gltf2bam /tmp/keanu.glb assets/avatar/keanu.bam
+
+    # without animation (fbx_to_glb.py is the same pipeline minus the clips):
     /Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup \
         --python tools/fbx_to_glb.py -- \
         "<extracted>/keanu.fbx" /tmp/keanu.glb "<extracted>" 1.8
-    .venv/bin/gltf2bam /tmp/keanu.glb assets/avatar/keanu.bam
 
 `tools/fbx_to_glb.py` documents why each step is needed: the FBX references no
 textures (they are matched to materials by filename), every mesh's *data* name
