@@ -37,6 +37,22 @@ FACE_MATERIALS = {
 FACE_TEXTURE_MAX = 1024
 OTHER_TEXTURE_MAX = 512
 
+# Materials whose alpha channel really is transparency: hair-type cutouts,
+# lenses, and decal overlays that must show the surface beneath them.
+#
+# Everything else is opaque, and that distinction is load-bearing. The chrome
+# arm's textures carry alpha too -- arm_misc is 100% non-opaque, arm_wires 98%
+# -- but there it is a material mask, not see-through. Blending every material
+# because some need it erased the entire arm: the torso showed through it and
+# only scattered fragments of the limb rendered. Alpha content alone cannot
+# tell the two cases apart, so this is an explicit list rather than a
+# threshold.
+ALPHA_MATERIALS = {
+    "hair", "hair_scalp", "beard", "eyelashes", "eyebrows",
+    "glass", "glass_outer",
+    "body_tattoo", "tank_image", "pants_lines",
+}
+
 
 def _texture_index(texdir):
     """Shipped base-colour textures by stem. `*_n` are normal maps, not bases."""
@@ -113,6 +129,85 @@ def _resize(image, cap):
     return True
 
 
+def wire_materials(texdir):
+    """Attach each material's base colour and normal map, resolving names.
+
+    Also decides transparency: only ALPHA_MATERIALS get their alpha wired and
+    their blend mode set. See that constant for why this is not inferred from
+    the texture.
+    """
+    shipped = _texture_index(texdir)
+    targets = _mtl_targets(texdir)
+    learned = {}
+    for name, original in targets.items():
+        if name in shipped:
+            learned.setdefault(original, name)
+
+    cache = {}
+
+    def load(filename):
+        path = os.path.join(texdir, filename)
+        if not os.path.exists(path):
+            return None
+        if path not in cache:
+            cache[path] = bpy.data.images.load(path)
+        return cache[path]
+
+    wired = 0
+    unresolved = []
+    for material in bpy.data.materials:
+        stem = resolve_texture(material.name, shipped, targets, learned)
+        base = load(f"{stem}.tga") if stem else None
+        if base is None:
+            unresolved.append(material.name)
+            print(f"  NO TEXTURE for material {material.name}")
+            continue
+        if stem != material.name:
+            print(f"  {material.name} -> {stem}.tga (resolved)")
+
+        cap = (FACE_TEXTURE_MAX if material.name in FACE_MATERIALS
+               else OTHER_TEXTURE_MAX)
+        if _resize(base, cap):
+            print(f"  resized {material.name} -> {base.size[0]}x{base.size[1]}")
+
+        material.use_nodes = True
+        tree = material.node_tree
+        tree.nodes.clear()
+        output = tree.nodes.new("ShaderNodeOutputMaterial")
+        shader = tree.nodes.new("ShaderNodeBsdfPrincipled")
+        tree.links.new(shader.outputs["BSDF"], output.inputs["Surface"])
+
+        colour = tree.nodes.new("ShaderNodeTexImage")
+        colour.image = base
+        tree.links.new(colour.outputs["Color"], shader.inputs["Base Color"])
+
+        if material.name in ALPHA_MATERIALS:
+            tree.links.new(colour.outputs["Alpha"], shader.inputs["Alpha"])
+            for attribute, value in (("blend_method", "BLEND"),
+                                     ("surface_render_method", "BLENDED")):
+                try:
+                    setattr(material, attribute, value)
+                    break
+                except (AttributeError, TypeError):
+                    continue
+
+        normal = load(f"{stem}_n.tga")
+        if normal is not None:
+            normal.colorspace_settings.name = "Non-Color"
+            _resize(normal, cap)
+            normal_tex = tree.nodes.new("ShaderNodeTexImage")
+            normal_tex.image = normal
+            normal_map = tree.nodes.new("ShaderNodeNormalMap")
+            tree.links.new(normal_tex.outputs["Color"], normal_map.inputs["Color"])
+            tree.links.new(normal_map.outputs["Normal"], shader.inputs["Normal"])
+        wired += 1
+
+    print(f"WIRED {wired}/{len(bpy.data.materials)} materials "
+          f"({len(ALPHA_MATERIALS & set(m.name for m in bpy.data.materials))} transparent)")
+    if unresolved:
+        print(f"UNRESOLVED {len(unresolved)}: {', '.join(sorted(unresolved))}")
+
+
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:]
     src, dst, texdir = argv[0], argv[1], argv[2]
@@ -139,65 +234,7 @@ def main():
             cache[path] = bpy.data.images.load(path)
         return cache[path]
 
-    shipped = _texture_index(texdir)
-    targets = _mtl_targets(texdir)
-    learned = {}
-    for name, original in targets.items():
-        if name in shipped:
-            learned.setdefault(original, name)
-
-    wired = 0
-    unresolved = []
-    for material in bpy.data.materials:
-        stem = resolve_texture(material.name, shipped, targets, learned)
-        base = load(f"{stem}.tga") if stem else None
-        if base is None:
-            unresolved.append(material.name)
-            print(f"  NO TEXTURE for material {material.name}")
-            continue
-        if stem != material.name:
-            print(f"  {material.name} -> {stem}.tga (resolved)")
-
-        cap = FACE_TEXTURE_MAX if material.name in FACE_MATERIALS else OTHER_TEXTURE_MAX
-        if _resize(base, cap):
-            print(f"  resized {material.name}.tga -> {base.size[0]}x{base.size[1]}")
-
-        material.use_nodes = True
-        tree = material.node_tree
-        tree.nodes.clear()
-        output = tree.nodes.new("ShaderNodeOutputMaterial")
-        shader = tree.nodes.new("ShaderNodeBsdfPrincipled")
-        tree.links.new(shader.outputs["BSDF"], output.inputs["Surface"])
-
-        colour = tree.nodes.new("ShaderNodeTexImage")
-        colour.image = base
-        tree.links.new(colour.outputs["Color"], shader.inputs["Base Color"])
-        tree.links.new(colour.outputs["Alpha"], shader.inputs["Alpha"])
-
-        normal = load(f"{stem}_n.tga")
-        if normal is not None:
-            normal.colorspace_settings.name = "Non-Color"
-            _resize(normal, cap)
-            normal_tex = tree.nodes.new("ShaderNodeTexImage")
-            normal_tex.image = normal
-            normal_map = tree.nodes.new("ShaderNodeNormalMap")
-            tree.links.new(normal_tex.outputs["Color"], normal_map.inputs["Color"])
-            tree.links.new(normal_map.outputs["Normal"], shader.inputs["Normal"])
-
-        # Hair, eyelashes and glass are alpha-cut sheets. Left opaque they
-        # render as solid blocks around the face.
-        for attribute, value in (("blend_method", "BLEND"),
-                                 ("surface_render_method", "BLENDED")):
-            try:
-                setattr(material, attribute, value)
-                break
-            except (AttributeError, TypeError):
-                continue
-        wired += 1
-
-    print(f"WIRED {wired}/{len(bpy.data.materials)} materials")
-    if unresolved:
-        print(f"UNRESOLVED {len(unresolved)}: {', '.join(sorted(unresolved))}")
+    wire_materials(texdir)
 
     if target_height > 0 and armatures:
         low = Vector((1e9, 1e9, 1e9))

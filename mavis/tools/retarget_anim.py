@@ -145,67 +145,6 @@ def retarget(target, anim_fbx, action_name):
     return action
 
 
-def wire_textures(texdir):
-    """Same material resolution the plain converter does; see fbx_to_glb."""
-    shipped = conv._texture_index(texdir)
-    targets = conv._mtl_targets(texdir)
-    learned = {}
-    for name, original in targets.items():
-        if name in shipped:
-            learned.setdefault(original, name)
-
-    cache = {}
-
-    def load(filename):
-        path = os.path.join(texdir, filename)
-        if not os.path.exists(path):
-            return None
-        if path not in cache:
-            cache[path] = bpy.data.images.load(path)
-        return cache[path]
-
-    wired = 0
-    for material in bpy.data.materials:
-        stem = conv.resolve_texture(material.name, shipped, targets, learned)
-        base = load(f"{stem}.tga") if stem else None
-        if base is None:
-            continue
-        cap = (conv.FACE_TEXTURE_MAX if material.name in conv.FACE_MATERIALS
-               else conv.OTHER_TEXTURE_MAX)
-        conv._resize(base, cap)
-
-        material.use_nodes = True
-        tree = material.node_tree
-        tree.nodes.clear()
-        output = tree.nodes.new("ShaderNodeOutputMaterial")
-        shader = tree.nodes.new("ShaderNodeBsdfPrincipled")
-        tree.links.new(shader.outputs["BSDF"], output.inputs["Surface"])
-        colour = tree.nodes.new("ShaderNodeTexImage")
-        colour.image = base
-        tree.links.new(colour.outputs["Color"], shader.inputs["Base Color"])
-        tree.links.new(colour.outputs["Alpha"], shader.inputs["Alpha"])
-
-        normal = load(f"{stem}_n.tga")
-        if normal is not None:
-            normal.colorspace_settings.name = "Non-Color"
-            conv._resize(normal, cap)
-            normal_tex = tree.nodes.new("ShaderNodeTexImage")
-            normal_tex.image = normal
-            normal_map = tree.nodes.new("ShaderNodeNormalMap")
-            tree.links.new(normal_tex.outputs["Color"], normal_map.inputs["Color"])
-            tree.links.new(normal_map.outputs["Normal"], shader.inputs["Normal"])
-
-        for attribute, value in (("blend_method", "BLEND"),
-                                 ("surface_render_method", "BLENDED")):
-            try:
-                setattr(material, attribute, value)
-                break
-            except (AttributeError, TypeError):
-                continue
-        wired += 1
-    print(f"WIRED {wired}/{len(bpy.data.materials)} materials")
-
-
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:]
     target_fbx, texdir, out_glb = argv[0], argv[1], argv[2]
@@ -244,7 +183,7 @@ def main():
     meshes = [o for o in bpy.data.objects if o.type == "MESH"]
     for obj in meshes:
         obj.data.name = obj.name
-    wire_textures(texdir)
+    conv.wire_materials(texdir)
 
     low = Vector((1e9,) * 3)
     high = Vector((-1e9,) * 3)
