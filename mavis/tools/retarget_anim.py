@@ -86,8 +86,14 @@ def retarget(target, anim_fbx, action_name):
     imported = [o for o in bpy.data.objects if o not in before]
     source = next(o for o in imported if o.type == "ARMATURE")
 
+    # Bake the clip's own length, not the scene's. The factory scene is always
+    # frames 1-250, which silently cut Smoking (538) to under half, clipped
+    # Breathing Idle (299) so its loop popped at the seam, and padded the
+    # 68-frame Dismissing Gesture with six seconds of frozen hold.
     scene = bpy.context.scene
-    start, end = scene.frame_start, scene.frame_end
+    src_action = source.animation_data.action
+    start, end = (int(round(f)) for f in src_action.frame_range)
+    scene.frame_start, scene.frame_end = start, end
 
     pairs = [(source.pose.bones[s], target.pose.bones[t])
              for s, t in BONE_MAP.items()
