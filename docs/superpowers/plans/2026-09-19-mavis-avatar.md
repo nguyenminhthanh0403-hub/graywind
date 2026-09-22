@@ -1361,7 +1361,7 @@ mv ~/Downloads/wake_up_johnny.onnx ~/Projects/graywind/mavis/assets/wakeword/
 
 **Do not `pip install` the training dependencies into `mavis/.venv`** — they pull torch, and the runtime venv must stay torch-free.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Create `tests/test_wake.py`:
 
@@ -1491,12 +1491,12 @@ async def test_unreachable_backend_raises_brain_error():
         await client.aclose()
 ```
 
-- [ ] **Step 3: Run them and watch them fail**
+- [x] **Step 3: Run them and watch them fail**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_wake.py tests/test_brain.py -q`
 Expected: FAIL — `ImportError: cannot import name 'wake'`
 
-- [ ] **Step 4: Write `wake.py`**
+- [x] **Step 4: Write `wake.py`**
 
 ```python
 """Wake-word detection for "Wake up, Johnny".
@@ -1547,7 +1547,7 @@ class WakeListener:
         self.model.reset()
 ```
 
-- [ ] **Step 5: Write `capture.py`**
+- [x] **Step 5: Write `capture.py`**
 
 ```python
 """Record one spoken utterance from the default microphone."""
@@ -1591,7 +1591,7 @@ def record_utterance(seconds_max: float = 12.0,
     return np.concatenate(collected)
 ```
 
-- [ ] **Step 6: Write `stt.py`**
+- [x] **Step 6: Write `stt.py`**
 
 ```python
 """Transcribe an utterance with Groq's Whisper endpoint."""
@@ -1652,7 +1652,7 @@ async def transcribe(samples: np.ndarray, sample_rate: int = 16000,
     return resp.json().get("text", "").strip()
 ```
 
-- [ ] **Step 7: Write `brain.py`**
+- [x] **Step 7: Write `brain.py`**
 
 ```python
 """Ask the already-running MAVIS backend.
@@ -1717,7 +1717,7 @@ async def ask(query: str, *, client: httpx.AsyncClient | None = None) -> str:
     return cap(body.get("answer", ""))
 ```
 
-- [ ] **Step 8: Run the tests and watch them pass**
+- [x] **Step 8: Run the tests and watch them pass**
 
 Run: `cd ~/Projects/graywind/mavis && .venv/bin/python -m pytest tests/test_wake.py tests/test_brain.py -q`
 Expected: 8 passed
@@ -1741,7 +1741,7 @@ PY
 
 Expected: fires when you say it; stays quiet through ordinary conversation. If it misfires constantly or never triggers, raise/lower `threshold` before moving on — a bad wake model makes the finished app unusable.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 cd ~/Projects/graywind
