@@ -26,7 +26,7 @@ mouth moving, and disappears when told to stop.
 ## How to resume (do this first)
 
 1. `cd ~/Projects/graywind && git log --oneline bde13f3..HEAD` — expect **39 commits** on
-   `feat/mavis-avatar`, newest `7ccafef`. The tree is clean.
+   `feat/mavis-avatar`, newest `35557e1`. The tree is clean.
    (The handoff commit was amended after this doc was written, so the `97008ea` named
    below is now `d163fe8`; two later commits are the latency fix, see "Latency".)
 2. `cd mavis && .venv/bin/python -m pytest -q` — expect **180 passed**.
@@ -194,7 +194,7 @@ combined; the filler line masks ~3s.
 **The warm worker was not the cause and was not touched.** A dead worker degrades to the
 plain scaffold, which is *faster*, and raises the on-screen notice.
 
-Shipped as `7ccafef` + `ab26d8a`:
+Shipped as `7ccafef` + `35557e1`:
 - `brain.MAX_ANSWER_CHARS` 420 → **200**, overridable via `MAVIS_MAX_ANSWER_CHARS` (parse
   is guarded — an empty value from a LaunchAgent plist falls back instead of killing import).
 - `/ask` gained an optional **`max_chars`**, which prepends a brevity system message. The
