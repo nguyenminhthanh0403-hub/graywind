@@ -70,8 +70,10 @@ self-referential commit count that caused them. Docs only.
 **Files later work will modify (untouched so far):**
 - `mavis/assets/wakeword/` — **does not exist yet.** `wake_up_johnny.onnx` goes here. The
   filename is load-bearing: `avatar/wake.py` looks for exactly that name.
-- `mavis/data/graywind_grounding.json` — the near-empty corpus (see caveats). Regenerated
-  by a snapshot script, not hand-edited.
+- `mavis/data/graywind_grounding.json` — the thin corpus (see caveats). Never hand-edit:
+  regenerate with `cd mavis && .venv/bin/python scripts/extract_graywind_grounding.py`.
+  Bullion's equivalent is `node scripts/extract_bullion_grounding.js <bullion_mkultra.html>
+  data/bullion_grounding.json`.
 - No LaunchAgent plist or `.app` wrapper exists anywhere yet.
 
 **Scratch workspace / traps:**
@@ -135,8 +137,18 @@ and pre-existing).
   capital does tier 1 get?"* returned **Basel III bank capital ratios**, and *"what is the
   macro gate?"* described a **network traffic filter**. Both read as authoritative.
   The prior handoff logged this as a single missed question about "tier pools"; it is far
-  wider. The six facts are also stamped **2026-09-15** and were still live on 09-23, so
-  **check whether the snapshot regenerates at all.**
+  wider.
+  **Two separate problems, and the second is the real one:**
+  (a) *Staleness* — the six facts are stamped **2026-09-15** and were still live on 09-23.
+  This is expected, not a bug: grounding is a **deliberate build-time snapshot, never a
+  live read** (see `plans/2026-09-15-mavis-graywind-grounding-and-auth.md`), and nothing
+  schedules the extractor. Re-running it is a one-line fix.
+  (b) *Scope* — **re-running the extractor would not help.**
+  `scripts/extract_graywind_grounding.py` reads `state/decision_log.csv`,
+  `state/pending_trades.csv` and `live_loop.py`'s `WATCHLIST` — i.e. **live trading state
+  only**. Graywind's *mechanics* (macro gate, tier pools, volatility gate, sizing rules)
+  were never in its scope at all, so no amount of regeneration puts them in the corpus.
+  Closing this needs a **new source of facts**, not a refresh.
 - **UNVERIFIED — the owner has not judged the latency fix.** He said explicitly he would
   not be able to look soon. Everything in "What has changed" is test-verified and
   model-verified but not human-verified.
@@ -186,8 +198,10 @@ and pre-existing).
    animates" rule — **needs the owner's explicit yes, not a quiet edit.**
 5. **Fix the grounding corpus.** Prerequisite for the owner's stated next direction
    (below), and independently the difference between Johnny being useful and Johnny being
-   confidently wrong. Start by finding whether the snapshot regenerates, then widen it to
-   cover Graywind's own mechanics.
+   confidently wrong. Two steps, in order: re-run both extractors to clear the staleness
+   (cheap), then **add a source for Graywind's mechanics**, which the current extractor
+   does not and was never meant to cover. Consider also making an ungrounded answer
+   *visibly* ungrounded — right now zero citations looks identical to good citations.
 6. **Tick the plan's Task 5, 6 and 7 checkboxes** to match reality, once 1-3 are done.
 7. Then `superpowers:finishing-a-development-branch`. Two things to settle first: the stray
    other-thread docs swept into `d306f45`, and the owner's username still hard-coded in
