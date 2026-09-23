@@ -2071,3 +2071,23 @@ never blinks reads as dead, and it is one joint pair on a randomised timer.
   slider in this project has needed it; without it the change is a silent no-op.
 - Verify it by rendering frames offscreen and looking at them (see Task 2's
   gate note), then confirm on a real window — "convincing" is a human call.
+
+---
+
+## Deferred: live-run findings (2026-09-22, first live run of Task 7)
+
+Parked by the owner "for later problems to be implemented". Not yet diagnosed:
+
+1. **Voice may have fallen back to macOS Tom.** The log showed a `WavFileWarning`
+   on read, which only the `say` scaffold produces -- so the answer may have
+   played unconverted. Check `voice.degraded` / `last_error` on the next run and
+   whether the on-screen "Voice degraded" notice appeared.
+2. **Lipsync against real speech not yet judged** by the owner.
+3. **Dismissal ("that's all") live path not yet confirmed.**
+4. **Backend grounding missed "tier pools"** -- `/ask` returned an ungrounded
+   "which tier pools do you mean?" with no citations. A retrieval issue, not Task 7.
+5. **Hybrid persona still owed** in the answer path (short Johnny-styled lead-in,
+   figures plain).
+6. **Smoking pose reads wrong** -- forearms bent across the stomach toward each
+   other (no cigarette prop), and the elbows flare outward on the drag frames.
+   Owner flagged it; to be handled in the poses session.
