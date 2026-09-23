@@ -29,6 +29,8 @@ from direct.actor.Actor import Actor
 from direct.gui.OnscreenText import OnscreenText
 from panda3d.core import AmbientLight, DirectionalLight, TextNode, Vec4
 
+from avatar import props
+
 ASSET_DIR = Path(__file__).resolve().parent.parent / "assets" / "avatar"
 
 # Idle motion, as (joint, axis, degrees, seconds, phase) channels summed per
@@ -66,8 +68,18 @@ AVATARS = {
         # used at all -- a clip already carries breathing, weight shift and
         # head movement, and it cannot share joints with controlJoint, which
         # detaches a joint from animation entirely.
-        "anims": ("idle", "smoking"),
+        "anims": ("idle", "smoking", "dismiss"),
         "idle_anim": "idle",
+        # Which clip each conversational moment plays; read by avatar.states.
+        # He lights up while he digs for an answer or waits on you, and waves
+        # you off on the way out. A moment left out plays nothing new.
+        "poses": {
+            "listening": "idle",
+            "prompting": "smoking",
+            "thinking": "smoking",
+            "speaking": "idle",
+            "dismissing": "dismiss",
+        },
         # Kept as the fallback for a model built without animation.
         "idle": _KEANU_IDLE,
         # The whole-actor yaw rotates about an axis through the head, so it
@@ -80,6 +92,17 @@ AVATARS = {
                   "character (c) CD Projekt Red",
         "mouth": {"kind": "joint", "joint": "mid_J_jaw_JNT",
                   "axis": "r", "degrees": 14.0},
+        # He smokes with the chrome hand, so the cigarette hangs off the left
+        # index finger, and exists only while a clip that holds one plays.
+        # Offsets are metres in the joint's own frame, found by rendering.
+        # The RIGHT (flesh) hand: it is the one the smoking clip raises, its
+        # index tip coming 175mm from the jaw joint at frame 114 against the
+        # chrome hand's 194mm at 196. Fitted, not guessed -- the filter end
+        # sits 25mm behind the pinch of the index and middle fingers, running
+        # along the index so the lit end clears the fingertips.
+        "prop": {"joint": "ValveBiped.Bip01_R_Finger11",
+                 "pos": (-0.0009, -0.0143, -0.0251), "hpr": (153.1, 90.0, 0.0),
+                 "clips": ("smoking",)},
     },
     "jonny": {
         "bam": "jonny_fixed.bam",
@@ -275,8 +298,12 @@ class AvatarScene:
         # jaw is a CDPR facial joint and no retargeted clip touches it, so the
         # two never contend -- but the ordering keeps it that way if one ever
         # does.
-        wanted = set(self.config.get("anims", ()))
-        self.animated = bool(wanted) and wanted <= set(self.actor.getAnimNames())
+        # Keyed on the idle clip alone, not on every listed clip: a model built
+        # without an optional clip (say, dismiss) should lose that one pose,
+        # not all animation. play() checks each clip as it is asked for.
+        idle_anim = self.config.get("idle_anim")
+        self.animated = bool(idle_anim) and idle_anim in self.actor.getAnimNames()
+        self._looping = None
         self.motion = _IdleMotion(
             self.actor, self._bundle,
             () if self.animated else self.config.get("idle", ())
@@ -289,11 +316,14 @@ class AvatarScene:
             self.actor.pose(self.config["idle_anim"], 0)
             self._bundle.forceUpdate()
 
+        self.prop = self._attach_prop()
+
         self._release_camera()
         self._frame_head()
 
         if self.animated:
             self.actor.loop(self.config["idle_anim"])
+            self._looping = self.config["idle_anim"]
         self._light()
         # mayChange=True keeps a live TextNode. The default flattens the text
         # into a bare PandaNode, after which the credit can no longer be read
@@ -421,15 +451,72 @@ class AvatarScene:
         """Switch to another clip, e.g. "smoking". False if it has none."""
         if not self.animated or name not in self.actor.getAnimNames():
             return False
+        # loop() restarts from frame 0, so re-requesting the clip he is already
+        # looping (speaking -> listening are both idle) would jerk him mid-breath.
+        if loop and self._looping == name:
+            return True
         (self.actor.loop if loop else self.actor.play)(name)
+        self._looping = name if loop else None
+        self._show_prop(name)
         return True
+
+    def _attach_prop(self):
+        """Parent the cigarette to a hand joint, hidden until a clip wants it.
+
+        exposeJoint returns a node that follows the animated joint; a node
+        found in the scene graph does not, and the prop would hang in the air
+        while the hand moved away from it.
+        """
+        config = self.config.get("prop")
+        if not config or not self.animated:
+            return None
+        # exposeJoint returns a fresh node whether or not the joint exists --
+        # on a miss it only warns, and the prop would hang motionless at the
+        # actor's origin, in frame. Ask the bundle directly instead.
+        if self._bundle.find_child(config["joint"]) is None:
+            return None
+        hand = self.actor.expose_joint(None, "modelRoot", config["joint"])
+        if hand is None or hand.is_empty():
+            return None
+        # The joints carry the rig's own unit scale (0.025 here), so a prop
+        # parented to one arrives 40x too small and its offsets mean 40x less
+        # than they read. Undo that, and keep `pos` honest metres.
+        joint_scale = hand.get_scale(self.base.render)[0] or 1.0
+        factor = 1.0 / joint_scale
+        cigarette = props.make_cigarette()
+        cigarette.reparent_to(hand)
+        cigarette.set_scale(factor)
+        cigarette.set_pos(*(offset * factor for offset in config["pos"]))
+        cigarette.set_hpr(*config["hpr"])
+        cigarette.hide()
+        return cigarette
+
+    def _show_prop(self, clip: str) -> None:
+        if self.prop is None:
+            return
+        wanted = clip in self.config.get("prop", {}).get("clips", ())
+        (self.prop.show if wanted else self.prop.hide)()
+
+    def show_notice(self, text: str) -> None:
+        """Degraded states must be visible -- never fail silently. "" clears."""
+        if getattr(self, "_notice", None) is None:
+            self._notice = OnscreenText(
+                text="", pos=(0.0, 0.88), scale=0.05,
+                fg=(1.0, 0.6, 0.3, 1.0), align=TextNode.ACenter, mayChange=True)
+        self._notice.setText(text)
 
     def show(self) -> None:
         self.actor.show()
         self.credit.show()
+        if getattr(self, "_notice", None) is not None:
+            self._notice.show()
         self.visible = True
 
     def hide(self) -> None:
         self.actor.hide()
         self.credit.hide()
+        # The notice lives in aspect2d, so hiding the actor leaves it floating
+        # over the bare desktop now that the window is transparent.
+        if getattr(self, "_notice", None) is not None:
+            self._notice.hide()
         self.visible = False
