@@ -40,7 +40,9 @@ moving, and disappears when told to stop.
 
 ## Current state (active files)
 
-**Branch:** `feat/mavis-avatar`, **41 commits** ahead of base `bde13f3`. **Tree clean.**
+**Branch:** `feat/mavis-avatar`, ~42 commits ahead of base `bde13f3`. **Tree clean.**
+(Approximate on purpose — committing this file changes the count, so an exact number here
+could only ever be stale. The SHAs named below are real and stable.)
 
 **Files changed this session — committed in `7ccafef`:**
 - `mavis/avatar/brain.py` — `MAX_ANSWER_CHARS` 420 → **200**, overridable via
