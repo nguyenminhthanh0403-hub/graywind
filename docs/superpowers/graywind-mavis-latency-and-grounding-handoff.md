@@ -27,7 +27,7 @@ moving, and disappears when told to stop.
 ## How to resume (do this first)
 
 1. `cd ~/Projects/graywind && git rev-parse --abbrev-ref HEAD` — expect
-   **`feat/mavis-avatar`**, ~41 commits ahead of base `bde13f3`, clean tree.
+   **`feat/mavis-avatar`**, ~42 commits ahead of base `bde13f3`, clean tree.
    **Don't expect an exact commit count**; every handoff edit adds one.
 2. `cd mavis && .venv/bin/python -m pytest -q` — expect **180 passed**.
 3. **Rebuild `assets/avatar/keanu.bam`** (recipe at the bottom) — it is gitignored, and any
