@@ -69,3 +69,19 @@ async def test_unreachable_backend_raises_brain_error():
             await brain.ask("hello", client=client)
     finally:
         await client.aclose()
+
+
+def test_budget_override_falls_back_instead_of_refusing_to_import():
+    """An empty or malformed MAVIS_MAX_ANSWER_CHARS must not kill startup.
+
+    A LaunchAgent plist is where an empty env value comes from, and a bare
+    int() would raise at import time and stop the avatar from starting at all.
+    """
+    default = brain.DEFAULT_MAX_ANSWER_CHARS
+
+    assert brain._budget_from_env(None) == default      # unset
+    assert brain._budget_from_env("") == default        # set but empty
+    assert brain._budget_from_env("lots") == default    # malformed
+    assert brain._budget_from_env("0") == default       # nonsensical
+    assert brain._budget_from_env("-5") == default
+    assert brain._budget_from_env("300") == 300         # a real override

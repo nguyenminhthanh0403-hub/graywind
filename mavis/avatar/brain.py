@@ -27,7 +27,25 @@ import httpx
 #
 # Override without editing code, to tune it against a real run:
 #     export MAVIS_MAX_ANSWER_CHARS=300
-MAX_ANSWER_CHARS = int(os.environ.get("MAVIS_MAX_ANSWER_CHARS", "200"))
+DEFAULT_MAX_ANSWER_CHARS = 200
+
+
+def _budget_from_env(raw) -> int:
+    """Parse the override, falling back rather than refusing to import.
+
+    A bare int() here would raise on an empty or malformed value *at import
+    time*, so the whole avatar would fail to start over a mistyped tuning knob.
+    A LaunchAgent plist is exactly where an empty env value comes from, and
+    every other failure path in this project degrades loudly instead of dying.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_ANSWER_CHARS
+    return value if value > 0 else DEFAULT_MAX_ANSWER_CHARS
+
+
+MAX_ANSWER_CHARS = _budget_from_env(os.environ.get("MAVIS_MAX_ANSWER_CHARS"))
 
 
 class BrainError(RuntimeError):

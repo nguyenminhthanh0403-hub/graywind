@@ -25,9 +25,11 @@ mouth moving, and disappears when told to stop.
 
 ## How to resume (do this first)
 
-1. `cd ~/Projects/graywind && git log --oneline bde13f3..HEAD` — expect **37 commits** on
-   `feat/mavis-avatar`, newest `97008ea`. The tree is clean.
-2. `cd mavis && .venv/bin/python -m pytest -q` — expect **172 passed**.
+1. `cd ~/Projects/graywind && git log --oneline bde13f3..HEAD` — expect **39 commits** on
+   `feat/mavis-avatar`, newest `7ccafef`. The tree is clean.
+   (The handoff commit was amended after this doc was written, so the `97008ea` named
+   below is now `d163fe8`; two later commits are the latency fix, see "Latency".)
+2. `cd mavis && .venv/bin/python -m pytest -q` — expect **180 passed**.
 3. **Rebuild `assets/avatar/keanu.bam`** (recipe at the bottom) — it is gitignored, and any
    build made before 2026-09-22 carries both retarget bugs.
 4. **Immediate next action:** finish the live acceptance run with the owner at the
@@ -177,14 +179,71 @@ test output, and they are the standing direction for what to fix next.
      of the previous handoff and still untested: a `.app` wrapper or a LaunchAgent plist so
      he starts at login and simply exists. The transparent, undecorated window shipped this
      session is the other half of that same feature.
-   - ⚠️ **Phrase check.** He said **"wake up johnny boy"**, while the spec's trained phrase
-     is **"Wake up, Johnny"**. Settle which one before the Colab run — the model is trained
-     per phrase and retraining is another hour.
+   - ✅ **Phrase SETTLED 2026-09-22.** Asked directly, the owner confirmed **"Wake up,
+     Johnny"** is fine; "wake up johnny boy" was just how he said it in the moment. Train
+     `wake up johnny` exactly as plan Task 6 step 1 already writes it.
+
+## Latency — diagnosed and halved (2026-09-23)
+
+The owner said the second answer was "kinda long". **Measured, not estimated:** 386 chars
+of real answer text is **21.9s** of `say -v Tom` audio (~17.6 chars/sec), and ChatterboxVC
+converts at ~1.5x realtime. So the old 420-char cap was ~24s of speech and **~36s of
+conversion** — roughly 90% of the wait. Trailing-silence detection, STT and `/ask` are ~4s
+combined; the filler line masks ~3s.
+
+**The warm worker was not the cause and was not touched.** A dead worker degrades to the
+plain scaffold, which is *faster*, and raises the on-screen notice.
+
+Shipped as `7ccafef` + `ab26d8a`:
+- `brain.MAX_ANSWER_CHARS` 420 → **200**, overridable via `MAVIS_MAX_ANSWER_CHARS` (parse
+  is guarded — an empty value from a LaunchAgent plist falls back instead of killing import).
+- `/ask` gained an optional **`max_chars`**, which prepends a brevity system message. The
+  cap alone only truncates, which stops him mid-thought; asking the model to write short
+  returns a *complete* short answer. Defaults to `None`, so **the MCP wrapper and CLI are
+  unchanged** — two tests pin that.
+- Verified against the real Groq model: grounded answers came back at 95-162 chars,
+  complete sentences. Citations ride in a separate JSON field, outside the char budget.
+
+**Still unverified (needs the owner):** whether this feels better, and the handoff's
+standing question of whether what he judged was VC output or the plain Tom fallback.
+
+**Next lever, if 200 is still too slow: chunked VC.** The voice spec's line 209
+("streaming or chunked TTS changes nothing") is about **ChatterboxTTS at 35-41x realtime**,
+where it is true. **VC runs ~1.5x** — a different regime, where converting sentence by
+sentence and playing as you go cuts time-to-first-word to single digits. Two caveats:
+at 1.5x conversion against 1.0x playback you accrue a ~0.5x deficit per chunk, so
+pre-buffer a sentence or he stalls mid-answer; and `voice_worker._normalise` scales **per
+clip** to `TARGET_PEAK = 0.89`, so chunks would jump in loudness without fixed gain or
+whole-answer normalisation. It also breaks the spec's "audio is finished before the
+renderer animates" rule — **needs the owner's explicit yes**, not a quiet edit.
+
+## ⚠️ Grounding is far worse than this doc previously recorded
+
+Found while A/B-testing the brevity change. The earlier note said `/ask` "missed tier
+pools". The real scope: **`data/graywind_grounding.json` holds only 6 facts** — one
+watchlist line, four per-account decision lines, one pending trade. It contains **nothing
+about how Graywind works**: no macro gate, no tier-pool definitions, no volatility gate,
+no sizing rules. Bullion's corpus covers the financial system, not Graywind internals.
+
+Measured hit counts: `retrieve("macro gate")` → **0**, `retrieve("tier 1")` → **0**,
+`retrieve("tier pools")` → **0** (against `"gold"` → 5, `"federal reserve"` → 5).
+
+With zero citations the model answers anyway, confidently and wrongly — "how much capital
+does tier 1 get?" returned **Basel III bank capital ratios**, and "what is the macro gate"
+returned a description of a *network traffic* filter. Both read as authoritative.
+
+Also: the six facts are timestamped **2026-09-15** and were still the live corpus on
+09-23 — check whether the snapshot is regenerated at all.
+
+This matters beyond MAVIS: the owner's stated next direction is Johnny "reading" Bullion
+and Graywind, and he cannot read Graywind's mechanics while they are absent from the
+corpus. Treat corpus coverage as the prerequisite for that work.
 
 ## What's next (ordered)
 
 1. **Finish the live acceptance run** with the owner: wake, real question, voice, lipsync,
-   dismissal, second-answer latency, plus the transparent window and cigarette.
+   dismissal, plus the transparent window and cigarette. Latency is now ~200 chars rather
+   than 420 — judge whether that is enough before building chunked VC.
 2. **Task 6 step 1 — the openWakeWord Colab run — is now the owner's top priority**, with
    step 9 (a real voice) straight after. Settle the phrase first ("Wake up, Johnny" vs his
    "wake up johnny boy"). Pair it with the launch-at-login work below: on their own,
@@ -201,7 +260,7 @@ test output, and they are the standing direction for what to fix next.
 
 ## Verification idioms used in this project (for the resuming session)
 
-- `cd mavis && .venv/bin/python -m pytest -q` — **172 passing**. `keanu` tests skip when
+- `cd mavis && .venv/bin/python -m pytest -q` — **180 passing**. `keanu` tests skip when
   the gitignored model is absent.
 - **Render offscreen and look at the pixels yourself** — the highest-value technique here,
   and how both the arm bug and the cigarette placement were settled. `window-type
