@@ -25,10 +25,12 @@ mouth moving, and disappears when told to stop.
 
 ## How to resume (do this first)
 
-1. `cd ~/Projects/graywind && git log --oneline bde13f3..HEAD` — expect **39 commits** on
-   `feat/mavis-avatar`, newest `35557e1`. The tree is clean.
-   (The handoff commit was amended after this doc was written, so the `97008ea` named
-   below is now `d163fe8`; two later commits are the latency fix, see "Latency".)
+1. `cd ~/Projects/graywind && git log --oneline bde13f3..HEAD` — you should be on
+   `feat/mavis-avatar` with **~40 commits** and a clean tree. **Don't expect an exact
+   count or a named head commit**: every handoff edit adds one, so this line could only
+   ever be stale. Trust the branch name and the test count below; the last few commits
+   are docs. (Commits named in the body — `0743ba0`, `81d7141`, `4676d1b`, `7ccafef`,
+   `35557e1` — are real and stable; `97008ea` was amended to `d163fe8`.)
 2. `cd mavis && .venv/bin/python -m pytest -q` — expect **180 passed**.
 3. **Rebuild `assets/avatar/keanu.bam`** (recipe at the bottom) — it is gitignored, and any
    build made before 2026-09-22 carries both retarget bugs.
