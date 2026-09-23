@@ -2647,3 +2647,131 @@ def test_main_fails_when_github_token_is_blank():
              "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "",
          }):
         assert live_loop.main() == 1
+# --- entries_enabled: exit-only mode for a symbol that is still held but has
+# been dropped from WATCHLIST. process_symbol is the only code that evaluates
+# stop/target, so before this existed, main() iterating WATCHLIST alone meant
+# such a holding had its stop written to state every cycle and never checked.
+# Live case: SPY (65 sh, stop 754.75, ~$50k), bought 2026-08-19 when WATCHLIST
+# was ["AAPL","SPY"], unmonitored since commit 695abd0 changed it on 08-26.
+
+def test_entries_disabled_still_sells_a_position_that_breached_its_stop():
+    open_positions = {"SPY": _position(shares=65, stop=754.75, target=793.25)}
+    trading_client = MagicMock()
+    with patch("live_loop.decide_trade") as mock_decide:
+        process_symbol(
+            symbol="SPY", signal="hold", current_price=750.0, today=date(2024, 1, 8),
+            open_positions=open_positions, equity=100000.0,
+            pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(),
+            finnhub_api_key="k", trading_client=trading_client,
+            drawdown_breaker=MagicMock(), entries_enabled=False,
+        )
+    trading_client.submit_order.assert_called_once()
+    # The position stays tracked, marked pending settlement, rather than being
+    # deleted outright. That is deliberate and POST-DATES the branch this test
+    # was ported from: _submit_stop_target_exit records a
+    # pending_sell_order_id and leaves the row in place, because the sell is
+    # not guaranteed to fill and open_positions cannot represent "old position
+    # pending exit" and "new position" for one symbol at once. The original
+    # 2026-08-31 version of this test asserted `"SPY" not in open_positions`,
+    # which was correct then and is wrong now -- what matters for
+    # entries_enabled is that the SELL still happens, not how the row is kept.
+    assert open_positions["SPY"]["pending_sell_order_id"] is not None
+    # Exit-only means the entry path is never even consulted.
+    mock_decide.assert_not_called()
+
+
+def test_entries_disabled_never_opens_a_new_position():
+    open_positions = {}
+    trading_client = MagicMock()
+    with patch("live_loop.decide_trade") as mock_decide:
+        process_symbol(
+            symbol="SPY", signal="buy", current_price=770.0, today=date(2024, 1, 8),
+            open_positions=open_positions, equity=100000.0,
+            pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(),
+            finnhub_api_key="k", trading_client=trading_client,
+            drawdown_breaker=MagicMock(), entries_enabled=False,
+        )
+    mock_decide.assert_not_called()
+    trading_client.submit_order.assert_not_called()
+    assert open_positions == {}
+
+
+def test_entries_enabled_defaults_to_true_so_existing_callers_are_unchanged():
+    _, trading_client, _, _, _ = _call(symbol="AAPL", signal="buy")
+    # _call omits entries_enabled entirely; the entry path must still run.
+    assert trading_client is not None
+
+
+def test_main_processes_held_off_watchlist_symbol_in_exit_only_mode():
+    # main()-WIRING test, and the reason it exists: this repo has already
+    # shipped a feature that was dead code in production because main()'s own
+    # call site was never updated, while every task-scoped test passed by
+    # calling process_symbol() directly (the tier_pools CRITICAL, see
+    # test_main_passes_loaded_tier_pools_to_process_symbol above). The
+    # entries_enabled tests below have exactly that shape, so without this
+    # test the SPY stop could stay unmonitored with a green suite.
+    #
+    # Pins both halves: a held symbol absent from WATCHLIST is iterated at
+    # all, and it is called with entries_enabled=False while WATCHLIST
+    # symbols keep entries_enabled=True.
+    fake_account = MagicMock()
+    fake_account.equity = "100000.0"
+    fake_trading_client = MagicMock()
+    fake_trading_client.get_account.return_value = fake_account
+    off_watchlist = "SPY"
+    assert off_watchlist not in live_loop.WATCHLIST, (
+        "fixture assumes SPY is off-watchlist; update this test if WATCHLIST changes"
+    )
+    fake_state = {
+        "day_trade_dates": [], "day": None, "starting_equity": None,
+        "open_positions": {off_watchlist: _position(shares=65, stop=754.75, target=793.25)},
+    }
+
+    def fake_fetch_bars(client, symbol, start, end):
+        return [_FakeBar(750.0, datetime(2024, 1, 8, 10, 0, tzinfo=ET))]
+
+    with patch("live_loop.is_market_hours", return_value=True), \
+         patch.dict(os.environ, {
+             "ALPACA_API_KEY": "k", "ALPACA_API_SECRET": "k",
+             "FRED_API_KEY": "k", "FINNHUB_API_KEY": "k", "GITHUB_TOKEN": "k",
+         }), \
+         patch("live_loop.TradingClient", return_value=fake_trading_client), \
+         patch("live_loop.StockHistoricalDataClient"), \
+         patch("live_loop.NewsClient"), \
+         patch("live_loop.load_state", return_value=fake_state), \
+         patch("live_loop.save_state"), \
+         patch("live_loop.reconcile_positions", side_effect=lambda tc, op: op), \
+         patch("live_loop.load_tier_pools", return_value={1: 0.0, 2: 0.0, 3: 0.0}), \
+         patch("live_loop.save_tier_pools"), \
+         patch("live_loop.load_rebalance_state", return_value={"last_rebalance_month": None}), \
+         patch("live_loop.save_rebalance_state"), \
+         patch("live_loop.should_rebalance_this_month", return_value=False), \
+         patch("live_loop.fetch_bars", side_effect=fake_fetch_bars), \
+         patch("live_loop.compute_signals", side_effect=lambda df, **kwargs: df.assign(
+             signal="hold", rsi=50.0, sma_fast=100.0, sma_slow=98.0,
+         )), \
+         patch("live_loop.process_symbol") as mock_process_symbol, \
+         patch("live_loop.write_cycle_export"):
+        live_loop.main()
+
+    by_symbol = {c.kwargs["symbol"]: c for c in mock_process_symbol.call_args_list}
+    assert off_watchlist in by_symbol, (
+        "held-but-de-watchlisted symbol was never processed -- its stop is unmonitored"
+    )
+    assert by_symbol[off_watchlist].kwargs["entries_enabled"] is False
+    for symbol in live_loop.WATCHLIST:
+        assert by_symbol[symbol].kwargs["entries_enabled"] is True
+
+
+def test_reconcile_warns_about_broker_position_even_when_off_watchlist(capsys):
+    # The warning used to be gated on `symbol in WATCHLIST`, so a holding
+    # dropped from the watchlist went silent in BOTH directions: no exit
+    # checks and no warning either. Off-watchlist makes it more urgent.
+    trading_client = MagicMock()
+    trading_client.get_all_positions.return_value = [_fake_broker_position("TSLA")]
+    assert "TSLA" not in live_loop.WATCHLIST
+    live_loop.reconcile_positions(trading_client, {})
+    err = capsys.readouterr().err
+    assert "TSLA" in err and "WARNING" in err

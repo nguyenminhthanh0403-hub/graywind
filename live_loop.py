@@ -217,7 +217,13 @@ def reconcile_positions(trading_client, open_positions):
                   f"dropping from local state", file=sys.stderr)
             del open_positions[symbol]
     for symbol in real_positions:
-        if symbol not in open_positions and symbol in WATCHLIST:
+        # No `and symbol in WATCHLIST` here. That filter meant a symbol
+        # dropped from WATCHLIST while still held went silent in BOTH
+        # directions -- no exit checks (see the exit loop in main()) and no
+        # warning either. A position the bot cannot see is exactly what this
+        # warning exists to surface, and being off-watchlist makes that more
+        # urgent, not less.
+        if symbol not in open_positions:
             print(f"{symbol}: WARNING - broker reports a position not tracked locally; "
                   f"not managed by this bot until resolved manually", file=sys.stderr)
     return open_positions
@@ -332,7 +338,8 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                     rsi=None, sma_fast=None, sma_slow=None, decision_rows=None,
                     llm_client=None, debate_cache=None, debate_rows=None,
                     pending_trades=None, github_token=None, repo=None,
-                    account_label=None, session=requests, state_dir=DEFAULT_STATE_DIR):
+                    account_label=None, session=requests, state_dir=DEFAULT_STATE_DIR,
+                    entries_enabled=True):
     """Resolves one symbol's decision for this cycle: sell-on-stop/target
     exit if a held position crossed its stop or target, otherwise
     decide_trade() for a fresh entry -- but only if the symbol isn't
@@ -347,6 +354,12 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
     dashboard-export collectors -- when omitted (None), no export data is
     recorded and behavior is identical to before this parameter existed,
     so every pre-existing caller/test needs no changes.
+
+    `entries_enabled=False` runs the exit half only: stop/target are still
+    evaluated and a breach still sells, but no new position is ever opened.
+    That is the mode main() uses for a symbol that is still held but no
+    longer in WATCHLIST, so a de-watchlisted holding keeps its stop
+    enforced without the bot re-entering a symbol it has stopped tracking.
 
     `pending_same_day_trades` is computed from `open_positions` AFTER this
     symbol's own position (if any) has already been resolved/deleted above
@@ -545,7 +558,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         # the exit's settlement to confirm is the safe direction to be wrong
         # in, since the sell isn't guaranteed to fill.
 
-    if position is None:
+    if position is None and entries_enabled:
         if tier is not None and tier_pools is not None:
             committed = sum(
                 p["entry_price"] * p["shares"] for s, p in open_positions.items()
@@ -659,7 +672,12 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
             except Exception as exc:
                 print(f"{symbol}: news debate shadow-mode error, skipping this cycle's row: {exc}",
                       file=sys.stderr)
-    else:
+    elif position is not None:
+        # `elif position is not None`, not a bare `else`: with
+        # entries_enabled=False and no position (either none was held, or the
+        # exit above just sold it and set position=None), NEITHER branch
+        # should run. A bare `else` caught that case and dereferenced
+        # position["shares"] on None.
         symbol_statuses[symbol] = {
             "position_open": True, "shares": position["shares"], "entry_price": position["entry_price"],
             "current_price": current_price, "action": "hold",
@@ -1106,7 +1124,26 @@ def main():
                 print(f"tier1 rebalance: error, will retry next cycle: {exc}", file=sys.stderr)
 
         now = datetime.now(ET)
-        for symbol in WATCHLIST:
+        # WATCHLIST plus anything still held that has since been dropped from
+        # it. process_symbol is the ONLY code that evaluates stop/target, so
+        # iterating WATCHLIST alone meant a de-watchlisted holding kept its
+        # stop written to state/positions.csv every cycle while nothing ever
+        # compared a price against it. That was live: SPY (65 sh, stop
+        # 754.75, ~$50k) was bought 2026-08-19 when WATCHLIST was
+        # ["AAPL","SPY"], and had no stop evaluated on any cycle after commit
+        # 695abd0 changed it to ["AAPL","SERV"] -- SPY's low of 749.60 on
+        # 2026-09-16 went through that stop unnoticed.
+        #
+        # Held-but-off-watchlist symbols run exit-only (entries_enabled=
+        # False). Without that they would take the entry path too, and for a
+        # symbol absent from SYMBOL_TIER the tier-pool branch is skipped and
+        # sizing_equity falls back to FULL account equity -- the bot would
+        # re-buy a symbol it no longer tracks, sized against the whole account.
+        held_off_watchlist = [s for s in open_positions if s not in WATCHLIST]
+        for symbol in held_off_watchlist:
+            print(f"{symbol}: held but not in WATCHLIST - exit-only this cycle "
+                  f"(stop/target still enforced, no new entry)")
+        for symbol in list(WATCHLIST) + held_off_watchlist:
             # A single symbol's failure (a transient network error fetching
             # bars, a gate's API call timing out, an order rejected by
             # Alpaca, etc.) must not prevent the remaining symbols in
@@ -1143,6 +1180,7 @@ def main():
                     llm_client=llm_client, debate_cache=debate_cache, debate_rows=debate_rows,
                     pending_trades=pending_trades, github_token=github_token, repo=repo,
                     account_label=account_label, state_dir=state_dir,
+                    entries_enabled=(symbol in WATCHLIST),
                 )
             except Exception as exc:
                 print(f"{symbol}: error processing this cycle, skipping: {exc}", file=sys.stderr)
