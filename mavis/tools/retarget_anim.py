@@ -4,7 +4,8 @@ Run with Blender, not the project venv:
 
     /Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup \
         --python mavis/tools/retarget_anim.py -- \
-        <keanu.fbx> <texture-dir> <out.glb> idle=<Breathing Idle.fbx> smoking=<Smoking.fbx>
+        <keanu.fbx> <texture-dir> <out.glb> idle=<Breathing Idle.fbx> smoking=<Smoking.fbx> \
+        dismiss=<Dismissing Gesture.fbx>
 
 The model ships with **no animation at all** -- a game rip gives you the mesh
 and the skeleton in its authoring bind pose, arms out at 45 degrees. That pose
@@ -26,6 +27,16 @@ torso.
 Bones are posed parents-first so a child's world matrix is computed against a
 parent already in its final pose.
 
+**Rotation only -- the clips are treated as in-place.** This file used to carry
+hip travel as well, scaled by the two rigs' height ratio, but it compared pose
+bones with `is`, and bpy hands out a fresh wrapper on every access, so the
+translation was never keyframed on any clip that ever shipped. Making it fire
+sent the pelvis 18 metres across the room: the rigs sit at different unit
+scales (the Mixamo armature carries a 0.01 object scale, this one does not) and
+a height ratio does not reconcile that. Every clip used here is in-place, so
+the travel bought nothing; re-deriving it properly is only worth it if a clip
+that actually walks is ever retargeted.
+
 Only the 22 body bones below are driven. The 283 CDPR facial joints are left
 alone deliberately: `mid_J_jaw_JNT` stays free for lipsync to control, and
 Mixamo has nothing to say about a face anyway.
@@ -34,7 +45,7 @@ import os
 import sys
 
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fbx_to_glb as conv  # noqa: E402
@@ -69,6 +80,9 @@ BONE_MAP = {
     M + "RightToeBase": V + "R_Toe0",
 }
 ROOT_SRC = M + "Hips"
+Y_AXIS = Vector((0.0, 1.0, 0.0))    # a Blender bone points down its own Y
+REST_ALIGNED = {M + side + part for side in ("Left", "Right")
+                for part in ("Shoulder", "Arm", "ForeArm", "Hand")}
 
 
 def _depth(bone):
@@ -100,21 +114,31 @@ def retarget(target, anim_fbx, action_name):
              if s in source.pose.bones and t in target.pose.bones]
     print(f"  mapped {len(pairs)}/{len(BONE_MAP)} bones")
 
-    correction = {t.name: (s.bone.matrix_local.to_3x3().inverted(),
-                           t.bone.matrix_local.to_3x3())
-                  for s, t in pairs}
-
-    # Hip travel is scaled by the height ratio, or a short character inherits a
-    # tall rig's stride.
-    src_h = max(b.head.z for b in source.pose.bones) or 1.0
-    tgt_h = max(b.head.z for b in target.pose.bones) or 1.0
-    hip_scale = tgt_h / src_h
+    # The two rigs do not share a rest pose: Mixamo rests in a T-pose, this
+    # model in an A-pose with the forearms bent forward -- upper arms 52 deg
+    # apart, forearms 67. A delta taken from one rest and applied to the other
+    # carries that gap into every frame, which flared the elbows and folded the
+    # forearms across the stomach. So first swing each target rest bone to
+    # point where its source bone points, and transfer deltas from there.
+    # Only the arm chain: spine, neck and head stand upright in both rests,
+    # but their bone axes point differently, and aligning those threw the
+    # head all the way back.
+    #
+    # All of it in WORLD space. The two FBX imports leave the armature objects
+    # rotated 90 deg apart, so bone matrices (armature space) from one rig mean
+    # something else in the other; mixing them rotated every delta's axis.
+    src_world = source.matrix_world.to_quaternion().to_matrix()
+    tgt_world = target.matrix_world.to_quaternion().to_matrix()
+    tgt_world_inv = tgt_world.inverted()
+    correction = {}
+    for s, t in pairs:
+        src_rest = src_world @ s.bone.matrix_local.to_3x3()
+        tgt_rest = tgt_world @ t.bone.matrix_local.to_3x3()
+        swing = (tgt_rest @ Y_AXIS).rotation_difference(src_rest @ Y_AXIS).to_matrix() \
+            if s.name in REST_ALIGNED else Matrix.Identity(3)
+        correction[t.name] = (src_rest.inverted(), swing @ tgt_rest)
 
     pairs.sort(key=lambda p: _depth(p[1].bone))
-    root_tgt = target.pose.bones[BONE_MAP[ROOT_SRC]]
-    root_src = source.pose.bones[ROOT_SRC]
-    tgt_rest_head = root_tgt.bone.matrix_local.translation.copy()
-    src_rest_head = root_src.bone.matrix_local.translation.copy()
 
     target.animation_data_create()
     action = bpy.data.actions.new(action_name)
@@ -126,18 +150,13 @@ def retarget(target, anim_fbx, action_name):
         scene.frame_set(frame)
         for s, t in pairs:
             src_inv, tgt_rest = correction[t.name]
-            matrix = ((s.matrix.to_3x3() @ src_inv) @ tgt_rest).to_4x4()
-            if t is root_tgt:
-                matrix.translation = tgt_rest_head + (
-                    s.matrix.translation - src_rest_head) * hip_scale
-            else:
-                matrix.translation = t.matrix.translation
+            world = (src_world @ s.matrix.to_3x3() @ src_inv) @ tgt_rest
+            matrix = (tgt_world_inv @ world).to_4x4()
+            matrix.translation = t.matrix.translation
             t.matrix = matrix
             bpy.context.view_layer.update()
         for _s, t in pairs:
             t.keyframe_insert("rotation_quaternion", frame=frame)
-            if t is root_tgt:
-                t.keyframe_insert("location", frame=frame)
 
     print(f"  baked {end - start + 1} frames as {action_name!r}")
 
