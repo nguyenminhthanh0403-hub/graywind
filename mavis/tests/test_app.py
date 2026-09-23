@@ -43,7 +43,7 @@ def test_ask_without_api_key_is_rejected(client):
 
 
 def test_ask_merges_bullion_and_graywind_citations(client, monkeypatch):
-    async def fake_groq_answer(query, context=None):
+    async def fake_groq_answer(query, context=None, max_chars=None):
         fake_groq_answer.seen_context = context
         return "fake answer"
 
@@ -63,7 +63,7 @@ def test_ask_merges_bullion_and_graywind_citations(client, monkeypatch):
 
 
 def test_ask_is_rate_limited(client, monkeypatch):
-    async def fake_groq_answer(query, context=None):
+    async def fake_groq_answer(query, context=None, max_chars=None):
         return "fake answer"
 
     monkeypatch.setattr(app_module, "groq_answer", fake_groq_answer)
@@ -75,3 +75,38 @@ def test_ask_is_rate_limited(client, monkeypatch):
 
     assert ok.status_code == 200
     assert blocked.status_code == 429
+
+
+def test_ask_defaults_to_no_length_limit(client, monkeypatch):
+    """The MCP wrapper and CLI callers must keep getting full answers."""
+    seen = {}
+
+    async def fake_answer(query, context=None, max_chars=None):
+        seen["max_chars"] = max_chars
+        return "a full length answer"
+
+    monkeypatch.setattr(app_module, "groq_answer", fake_answer)
+
+    resp = client.post("/ask", json={"query": "what is the watchlist"},
+                       headers={"X-API-Key": "secret123"})
+
+    assert resp.status_code == 200
+    assert seen["max_chars"] is None
+
+
+def test_ask_passes_max_chars_through_when_given(client, monkeypatch):
+    """The spoken avatar asks for a short answer, because length is latency."""
+    seen = {}
+
+    async def fake_answer(query, context=None, max_chars=None):
+        seen["max_chars"] = max_chars
+        return "short answer"
+
+    monkeypatch.setattr(app_module, "groq_answer", fake_answer)
+
+    resp = client.post("/ask", json={"query": "what is the watchlist",
+                                     "max_chars": 200},
+                       headers={"X-API-Key": "secret123"})
+
+    assert resp.status_code == 200
+    assert seen["max_chars"] == 200

@@ -4,8 +4,8 @@ Direct HTTP rather than MCP: this is a GUI app on the same machine as the
 server, so it calls /ask exactly the way mcp_tools.call_ask does, without
 an MCP layer in between.
 
-Answers are capped because voice conversion runs at roughly 1.4x realtime
--- a 20-second answer costs ~28 seconds of conversion, so length is
+Answers are capped because voice conversion runs at roughly 1.5x realtime
+-- a 20-second answer costs ~30 seconds of conversion, so length is
 latency, not just verbosity.
 """
 import os
@@ -13,7 +13,21 @@ import re
 
 import httpx
 
-MAX_ANSWER_CHARS = 420
+# Measured 2026-09-22 on this machine: 386 characters of real answer text is
+# 21.9s of `say -v Tom` audio, i.e. ~17.6 chars/sec. ChatterboxVC then converts
+# at ~1.5x realtime, so the cap translates almost linearly into how long he
+# stands there silently before speaking:
+#
+#     420 chars -> ~24s of speech -> ~36s of conversion   (the owner: "kinda long")
+#     200 chars -> ~11s of speech -> ~17s of conversion
+#
+# Everything else in a turn -- trailing-silence detection, STT, /ask -- is ~4s
+# combined, so this constant is the single biggest lever on perceived latency
+# until chunked conversion exists. Lowered 420 -> 200 on 2026-09-22.
+#
+# Override without editing code, to tune it against a real run:
+#     export MAVIS_MAX_ANSWER_CHARS=300
+MAX_ANSWER_CHARS = int(os.environ.get("MAVIS_MAX_ANSWER_CHARS", "200"))
 
 
 class BrainError(RuntimeError):
@@ -42,7 +56,10 @@ async def ask(query: str, *, client: httpx.AsyncClient | None = None) -> str:
         client = httpx.AsyncClient(base_url=_base_url(), timeout=60.0)
     try:
         resp = await client.post(
-            "/ask", json={"query": query},
+            # max_chars asks the backend to *write* short; cap() below is the
+            # backstop for when it ignores that. Truncation alone stops him
+            # mid-thought, which sounds worse than a short answer.
+            "/ask", json={"query": query, "max_chars": MAX_ANSWER_CHARS},
             headers={"X-API-Key": os.environ.get("MAVIS_API_KEY", "")},
         )
     except httpx.RequestError as exc:

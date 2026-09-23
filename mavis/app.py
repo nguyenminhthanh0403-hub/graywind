@@ -12,6 +12,10 @@ app = FastAPI()
 
 class AskRequest(BaseModel):
     query: str
+    # Optional, and None for every existing caller: the MCP wrapper and the CLI
+    # want full answers. Only the spoken avatar sets it, because there a long
+    # answer is a long silence while it is voice-converted.
+    max_chars: int | None = None
 
 
 @app.get("/status")
@@ -31,7 +35,7 @@ async def ask(req: AskRequest, api_key: str = Depends(auth.require_api_key)):
         graywind_grounding.format_context(graywind_hits),
     ])) or None
 
-    answer = await groq_answer(req.query, context)
+    answer = await groq_answer(req.query, context, max_chars=req.max_chars)
 
     return {
         "answer": answer,

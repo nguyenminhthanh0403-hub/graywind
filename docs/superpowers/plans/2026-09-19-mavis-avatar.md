@@ -1349,6 +1349,12 @@ git commit -m "feat(mavis): warm ChatterboxVC worker for Johnny's voice"
 
 This produces an artifact; no repo code depends on *how* it was made.
 
+> **Phrase SETTLED 2026-09-22 by the owner: "Wake up, Johnny".** During the live run he
+> said "wake up johnny boy", which opened a question in the Task 7 handoff; asked
+> directly, he confirmed **"Wake up, Johnny" is fine**. Train `wake up johnny` as written
+> in step 2 below. Do not substitute "johnny boy" — the model is trained per phrase and
+> retraining is another unattended hour.
+
 1. Open openWakeWord's `automatic_model_training.ipynb` in Google Colab (linked from https://github.com/dscripka/openWakeWord#training-new-models).
 2. Set the target phrase to `wake up johnny`.
 3. Run all cells — it synthesises training clips with Piper TTS and mixes in background noise. Expect roughly an hour, mostly unattended.
