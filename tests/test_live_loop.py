@@ -2928,3 +2928,35 @@ def test_process_pending_trades_expires_a_stale_auto_approved_row_without_touchi
     fake_session.post.assert_not_called()   # no comment posted
     fake_session.patch.assert_not_called()  # no issue closed
 
+
+def test_process_symbol_credits_tier1_pool_when_a_buy_and_hold_sleeve_position_stops_out():
+    """Regression guard for a ~$49k silent loss. SPY is the tier-1 sleeve and is NOT in
+    SYMBOL_TIER, so tier resolved to None and _settle_sell_fill's `if tier is not None` guard
+    discarded the entire proceeds of its stop exit -- understating tier_pools[1] forever and
+    shrinking the 70% sleeve at the next monthly rebalance."""
+    tier_pools = {1: 1000.0, 2: 0.0, 3: 0.0}
+    open_positions = {
+        "SPY": _position(shares=65.0, stop=754.75, target=793.25, opened_date="2026-08-19"),
+    }
+    # Starts from a sell already resting: the exit submits on one cycle and settles on a later
+    # one via pending_sell_order_id, and the tier-pool credit happens at SETTLEMENT.
+    open_positions["SPY"]["pending_sell_order_id"] = "order-1"
+    filled_order = MagicMock()
+    filled_order.filled_qty = "65.0"
+    filled_order.filled_avg_price = "754.00"
+    filled_order.filled_at = datetime(2026, 9, 16, 10, 0, tzinfo=ET)
+    filled_order.status = OrderStatus.FILLED
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = filled_order
+
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True), \
+         patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"SPY": 1.0}, clear=True):
+        process_symbol(
+            symbol="SPY", signal="hold", current_price=750.0, today=date(2026, 9, 16),
+            open_positions=open_positions, equity=100000.0, pdt_throttle=PDTThrottle(),
+            position_sizer=PositionSizer(), drawdown_breaker_ok=True, fred_api_key="k",
+            news_client=object(), finnhub_api_key="k", trading_client=trading_client,
+            drawdown_breaker=MagicMock(), tier_pools=tier_pools, entries_enabled=False,
+        )
+
+    assert tier_pools[1] == 1000.0 + 65.0 * 754.0  # proceeds credited, not discarded

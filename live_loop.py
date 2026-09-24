@@ -396,7 +396,20 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
         symbol_statuses = {}
     if pending_trades is None:
         pending_trades = {}
+    # Falls back to tier 1 for a buy-and-hold sleeve symbol, which is NOT in SYMBOL_TIER (the
+    # two are asserted disjoint in tier_config.py). Without this fallback a tier-1 symbol
+    # resolves to tier=None, and _settle_sell_fill's `if tier is not None` guard then silently
+    # DISCARDS the proceeds of its stop/target exit: SPY is 65 shares (~$49k), so a stop-out
+    # would sell ~half the account and credit nothing to any pool, leaving tier_pools[1]
+    # understated by ~$49k with nothing that ever re-syncs it -- and the next monthly rebalance
+    # would then re-buy sized against that understated pool, permanently shrinking the 70%
+    # sleeve. Reachable today, not hypothetical: SPY's stop is 754.75 and its low on 2026-09-16
+    # was 749.60. Whether a buy-and-hold core SHOULD carry an intraday stop at all is a separate
+    # open design question (its stop is a legacy artifact from when SPY was a WATCHLIST symbol);
+    # this only guarantees that if the exit does fire, the money lands somewhere real.
     tier = SYMBOL_TIER.get(symbol)
+    if tier is None and symbol in TIER1_SYMBOL_WEIGHTS:
+        tier = 1
 
     position = open_positions.get(symbol)
 
