@@ -8,3 +8,4 @@ timestamp,symbol,side,qty,price,reason
 2026-09-01T13:12:23.372421-04:00,AAPL,sell,160.0,325.04,stop/target exit
 2026-09-01T13:12:23.372421-04:00,AAPL,buy,82.3924,325.04,all checks passed
 2026-09-08T09:45:57.685753-04:00,AAPL,sell,82.3924,317.53,stop/target exit
+2026-09-24T15:01:29.945231-04:00,AAPL,buy,30.448,337.32,approved via GitHub issue
