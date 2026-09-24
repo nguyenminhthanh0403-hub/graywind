@@ -314,7 +314,11 @@ def load_pending_trades(state_dir=DEFAULT_STATE_DIR):
             with open(path, newline="") as f:
                 for row in csv.DictReader(f):
                     pending_trades[row["symbol"]] = {
-                        "issue_number": int(row["issue_number"]),
+                        # Empty rather than int for an auto-approved tier-2/3 row, which
+                        # never had a GitHub issue. This MUST NOT raise: the except below
+                        # catches ValueError and discards the whole file, so one unparseable
+                        # field would silently drop every other pending proposal too.
+                        "issue_number": int(row["issue_number"]) if row["issue_number"] else None,
                         "side": row["side"],
                         "qty": float(row["qty"]),
                         "price_at_proposal": float(row["price_at_proposal"]),
@@ -345,7 +349,7 @@ def save_pending_trades(pending_trades, state_dir=DEFAULT_STATE_DIR):
         [
             {
                 "symbol": symbol,
-                "issue_number": trade["issue_number"],
+                "issue_number": trade["issue_number"] if trade["issue_number"] is not None else "",
                 "side": trade["side"],
                 "qty": trade["qty"],
                 "price_at_proposal": trade["price_at_proposal"],

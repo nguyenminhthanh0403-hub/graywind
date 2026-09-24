@@ -57,7 +57,7 @@ from graywind_strategy.state_store import (
     load_rebalance_state, save_rebalance_state, load_equity_history, save_equity_history,
     load_pending_trades, save_pending_trades, load_tier1_holdings, save_tier1_holdings,
 )
-from graywind_strategy.tier_config import SYMBOL_TIER, TIER1_SYMBOL_WEIGHTS
+from graywind_strategy.tier_config import AUTO_APPROVE_TIERS, SYMBOL_TIER, TIER1_SYMBOL_WEIGHTS
 from graywind_strategy.tier1_rebalance import compute_rebalance_orders, should_rebalance_this_month
 from graywind_strategy import volatility
 from graywind_strategy.strategy_engine import compute_signals
@@ -339,7 +339,7 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                     llm_client=None, debate_cache=None, debate_rows=None,
                     pending_trades=None, github_token=None, repo=None,
                     account_label=None, session=requests, state_dir=DEFAULT_STATE_DIR,
-                    entries_enabled=True):
+                    entries_enabled=True, owner_username=None, ntfy_topic=None):
     """Resolves one symbol's decision for this cycle: sell-on-stop/target
     exit if a held position crossed its stop or target, otherwise
     decide_trade() for a fresh entry -- but only if the symbol isn't
@@ -626,11 +626,26 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 }
                 print(f"{symbol}: already has a pending trade proposal, skipping")
             else:
-                issue_number = trade_approval.propose_trade(
-                    symbol=symbol, side="buy", qty=decision.shares, price=current_price,
-                    tier=tier, account_label=account_label, reasoning=decision.reason,
-                    github_token=github_token, repo=repo, session=session,
-                )
+                # An AUTO_APPROVE_TIERS buy skips the GitHub round trip entirely: no issue is
+                # created, and the row is written with issue_number=None so
+                # process_pending_trades treats it as already approved. It still goes THROUGH
+                # pending_trades rather than executing here, which is the whole point -- that
+                # path already owns order submission, price-staleness re-validation, both
+                # drawdown breakers and the tier_pools debit, all of it heavily commented.
+                # Duplicating that here to save one cycle of latency would be the riskiest
+                # possible trade for the smallest possible gain on a strategy with 4 round
+                # trips of history. The cost is that the fill lands next cycle (~15 min), and
+                # the benefit is that the breakers get re-checked against fresher equity than
+                # the signal ever saw.
+                auto_approved = tier in AUTO_APPROVE_TIERS
+                issue_number = None
+                if not auto_approved:
+                    issue_number = trade_approval.propose_trade(
+                        symbol=symbol, side="buy", qty=decision.shares, price=current_price,
+                        tier=tier, account_label=account_label, reasoning=decision.reason,
+                        github_token=github_token, repo=repo, owner_username=owner_username,
+                        ntfy_topic=ntfy_topic, session=session,
+                    )
                 pending_trades[symbol] = {
                     "issue_number": issue_number, "side": "buy", "qty": decision.shares,
                     "price_at_proposal": current_price, "stop_price": decision.stop_price,
@@ -639,9 +654,16 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
                 }
                 symbol_statuses[symbol] = {
                     "position_open": False, "shares": None, "entry_price": None,
-                    "current_price": current_price, "action": "proposed", "reason": decision.reason,
+                    "current_price": current_price,
+                    "action": "auto-approved" if auto_approved else "proposed",
+                    "reason": (f"{decision.reason}; auto-approved (tier {tier}), settling next cycle"
+                               if auto_approved else decision.reason),
                 }
-                print(f"{symbol}: proposed buy for {decision.shares} shares (issue #{issue_number}), awaiting approval")
+                if auto_approved:
+                    print(f"{symbol}: auto-approved buy for {decision.shares} shares "
+                          f"(tier {tier}, no approval issue), settling next cycle")
+                else:
+                    print(f"{symbol}: proposed buy for {decision.shares} shares (issue #{issue_number}), awaiting approval")
         else:
             symbol_statuses[symbol] = {
                 "position_open": False, "shares": None, "entry_price": None,
@@ -688,7 +710,8 @@ def process_symbol(symbol, signal, current_price, today, open_positions, equity,
 
 def run_tier1_rebalance(trading_client, data_client, tier_pools, pending_trades=None,
                          github_token=None, repo=None, account_label=None, today=None,
-                         session=requests, last_known_holdings=None):
+                         session=requests, last_known_holdings=None,
+                         owner_username=None, ntfy_topic=None):
     """I/O wrapper around tier1_rebalance.compute_rebalance_orders(): fetches
     each tier-1 symbol's latest bar and Alpaca's real current holdings,
     computes the rebalance orders, and settles them -- sells execute
@@ -780,10 +803,15 @@ def run_tier1_rebalance(trading_client, data_client, tier_pools, pending_trades=
             if order.symbol in pending_trades:
                 print(f"{order.symbol}: already has a pending trade proposal, skipping rebalance buy")
                 continue
+            # Tier 1 is NOT in AUTO_APPROVE_TIERS, so this is the one proposal path that still
+            # waits on a human -- and it fires about once a month, which is exactly why the
+            # assignee/@mention/ntfy notification matters more here than anywhere else. A
+            # once-a-month approval is the one you cannot build a habit around.
             issue_number = trade_approval.propose_trade(
                 symbol=order.symbol, side="buy", qty=order.qty, price=current_prices[order.symbol],
                 tier=1, account_label=account_label, reasoning="tier-1 monthly drift rebalance",
-                github_token=github_token, repo=repo, session=session,
+                github_token=github_token, repo=repo, owner_username=owner_username,
+                ntfy_topic=ntfy_topic, session=session,
             )
             pending_trades[order.symbol] = {
                 "issue_number": issue_number, "side": "buy", "qty": order.qty,
@@ -855,13 +883,33 @@ def process_pending_trades(pending_trades, today, trading_client, drawdown_break
                 del pending_trades[symbol]
                 continue
 
-            try:
-                decision = trade_approval.get_owner_reaction(
-                    trade["issue_number"], owner_username, github_token, repo, session=session,
-                )
-            except trade_approval.IssueNotFound:
-                del pending_trades[symbol]
-                continue
+            if trade["issue_number"] is None:
+                # No issue exists to read a reaction from, because an AUTO_APPROVE_TIERS buy
+                # never created one. Everything below -- price-staleness re-validation, both
+                # breakers, the tier_pools debit -- still runs exactly as for a human-approved
+                # trade; only the "did a human react" question is skipped.
+                if trade["tier"] in AUTO_APPROVE_TIERS:
+                    decision = "approved"
+                else:
+                    # Fail CLOSED, loudly. A row reaching here with no issue number and a tier
+                    # nobody auto-approves cannot have come from this build's proposal path, so
+                    # it is either a hand-edited pending_trades.csv or a row written by an
+                    # older/newer build. Treating it as approved would execute a trade no human
+                    # ever saw and no policy ever sanctioned; treating it as pending would
+                    # strand it forever, since there is no issue that could ever be reacted to.
+                    print(f"{symbol}: pending row has no approval issue but tier "
+                          f"{trade['tier']!r} is not auto-approved; refusing to settle it and "
+                          f"dropping the row", file=sys.stderr)
+                    del pending_trades[symbol]
+                    continue
+            else:
+                try:
+                    decision = trade_approval.get_owner_reaction(
+                        trade["issue_number"], owner_username, github_token, repo, session=session,
+                    )
+                except trade_approval.IssueNotFound:
+                    del pending_trades[symbol]
+                    continue
 
             if decision == "rejected":
                 trade_approval.close_issue(
@@ -986,6 +1034,10 @@ def main():
     deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     owner_username = repo.split("/")[0] if repo else ""
+    # Optional: absent, propose_trade still creates the issue and warns on stderr that no
+    # phone notification went out. Deliberately not added to the required-keys check above --
+    # a missing notification channel must never stop the cycle from trading.
+    ntfy_topic = os.environ.get("NTFY_TOPIC")
 
     state_dir = os.environ.get("GRAYWIND_STATE_DIR", "state")
     dashboard_dir = os.environ.get("GRAYWIND_DASHBOARD_DIR", "dashboard-data")
@@ -1101,6 +1153,7 @@ def main():
                     trading_client, data_client, tier_pools, pending_trades=pending_trades,
                     last_known_holdings=last_known_tier1_holdings,
                     github_token=github_token, repo=repo, account_label=account_label, today=today,
+                    owner_username=owner_username, ntfy_topic=ntfy_topic,
                 )
                 # Rebalance buys are now only PROPOSED, not executed. Stamping
                 # the month regardless would mean an unapproved proposal that
@@ -1179,6 +1232,7 @@ def main():
                     decision_rows=decision_rows,
                     llm_client=llm_client, debate_cache=debate_cache, debate_rows=debate_rows,
                     pending_trades=pending_trades, github_token=github_token, repo=repo,
+                    owner_username=owner_username, ntfy_topic=ntfy_topic,
                     account_label=account_label, state_dir=state_dir,
                     entries_enabled=(symbol in WATCHLIST),
                 )

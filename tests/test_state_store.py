@@ -521,3 +521,39 @@ def test_save_tier1_holdings_overwrites_previous_contents(tmp_path):
     save_tier1_holdings({"SPY": 5.0}, state_dir=state_dir)
     save_tier1_holdings({}, state_dir=state_dir)
     assert load_tier1_holdings(state_dir=state_dir) == {}
+
+
+def test_pending_trades_round_trip_preserves_a_none_issue_number(tmp_path):
+    """An auto-approved tier-2/3 row has no GitHub issue, so issue_number is None. It must
+    survive a save/load cycle as None -- not as the string "None", and not by raising."""
+    state_dir = str(tmp_path / "state")
+    save_pending_trades({
+        "AAPL": {
+            "issue_number": None, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2024-01-08",
+        },
+    }, state_dir=state_dir)
+
+    assert load_pending_trades(state_dir=state_dir)["AAPL"]["issue_number"] is None
+
+
+def test_load_pending_trades_keeps_other_rows_when_one_has_an_empty_issue_number(tmp_path):
+    """Regression guard for the real hazard here: load_pending_trades' except clause discards
+    the ENTIRE file, so if an empty issue_number raised ValueError it would silently drop every
+    other pending proposal too -- including manual tier-1 rows awaiting approval."""
+    state_dir = str(tmp_path / "state")
+    save_pending_trades({
+        "AAPL": {
+            "issue_number": None, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2024-01-08",
+        },
+        "SPY": {
+            "issue_number": 77, "side": "buy", "qty": 2.0, "price_at_proposal": 400.0,
+            "stop_price": None, "target_price": None, "tier": 1, "proposed_date": "2024-01-08",
+        },
+    }, state_dir=state_dir)
+
+    loaded = load_pending_trades(state_dir=state_dir)
+    assert set(loaded) == {"AAPL", "SPY"}
+    assert loaded["AAPL"]["issue_number"] is None
+    assert loaded["SPY"]["issue_number"] == 77
