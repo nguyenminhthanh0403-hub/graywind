@@ -33,6 +33,15 @@ unload() {
     launchctl bootout "gui/$UID/$1" 2>/dev/null \
         || launchctl unload "$AGENTS/$1.plist" 2>/dev/null \
         || true
+    # bootout returns before the service is actually gone. Bootstrapping into
+    # that window fails with a bare "Bad request" and leaves the agent NOT
+    # installed while the script reports success -- observed on a reinstall,
+    # where the backend silently vanished and the avatar then sat in its
+    # 60-second port wait. Wait for the label to disappear.
+    for _ in $(seq 1 50); do
+        launchctl print "gui/$UID/$1" >/dev/null 2>&1 || return 0
+        sleep 0.1
+    done
 }
 
 DRY_RUN=0
@@ -92,6 +101,17 @@ chmod 600 "$ENV_FILE"
 
 chmod +x "$MAVIS_DIR/scripts/mavis-backend.sh" "$MAVIS_DIR/scripts/mavis-avatar.sh"
 
+# --- the avatar's TCC identity ---------------------------------------
+# The avatar is launched THROUGH an app bundle, not as a bare script, and
+# that is a microphone-permission decision rather than cosmetics. macOS keys
+# a mic grant to the requesting binary's signing identity; running the script
+# directly makes that Homebrew's ad-hoc-signed python3.14 at a version-pinned
+# Cellar path, which macOS re-prompts for and lists as "Python". The bundle
+# identifier is stable across Homebrew upgrades and reads "Johnny".
+BUNDLE="$HOME/Applications/Johnny.app"
+bash "$MAVIS_DIR/scripts/build_app_bundle.sh" >/dev/null
+[ -d "$BUNDLE" ] || { echo "bundle build failed; not installing the avatar agent" >&2; exit 1; }
+
 # --- plists -----------------------------------------------------------
 # Backend: unconditional KeepAlive. It is a server; if it dies we always want
 # it back. The wrapper exits 78 (EX_CONFIG) on a missing/!incomplete env file,
@@ -137,7 +157,10 @@ cat > "$AGENTS/$AVATAR_LABEL.plist" <<EOF
     <string>$AVATAR_LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$MAVIS_DIR/scripts/mavis-avatar.sh</string>
+        <string>/usr/bin/open</string>
+        <string>-W</string>
+        <string>-a</string>
+        <string>$BUNDLE</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -166,10 +189,18 @@ fi
 
 unload "$BACKEND_LABEL"
 unload "$AVATAR_LABEL"
-launchctl bootstrap "gui/$UID" "$AGENTS/$BACKEND_LABEL.plist" 2>/dev/null \
-    || launchctl load "$AGENTS/$BACKEND_LABEL.plist"
-launchctl bootstrap "gui/$UID" "$AGENTS/$AVATAR_LABEL.plist" 2>/dev/null \
-    || launchctl load "$AGENTS/$AVATAR_LABEL.plist"
+start() {
+    launchctl bootstrap "gui/$UID" "$AGENTS/$1.plist" 2>/dev/null \
+        || launchctl load "$AGENTS/$1.plist" 2>/dev/null \
+        || true
+    # Verify rather than trust: both spellings above can fail quietly, and an
+    # agent that was never installed looks exactly like one that was.
+    launchctl print "gui/$UID/$1" >/dev/null 2>&1 \
+        || { echo "FAILED to start $1 -- it is not installed." >&2; return 1; }
+}
+
+start "$BACKEND_LABEL"
+start "$AVATAR_LABEL"
 
 echo "Installed $BACKEND_LABEL and $AVATAR_LABEL."
 echo "  keys:  $ENV_FILE (mode 600)"
