@@ -29,6 +29,10 @@ from direct.actor.Actor import Actor
 from direct.gui.OnscreenText import OnscreenText
 from panda3d.core import AmbientLight, DirectionalLight, TextNode, Vec4
 
+CAPTION_TOP = -0.42
+# Last row may not reach the credit band below it.
+CAPTION_FLOOR = -0.88
+
 from avatar import props
 
 ASSET_DIR = Path(__file__).resolve().parent.parent / "assets" / "avatar"
@@ -505,11 +509,42 @@ class AvatarScene:
                 fg=(1.0, 0.6, 0.3, 1.0), align=TextNode.ACenter, mayChange=True)
         self._notice.setText(text)
 
+    def show_caption(self, text: str) -> None:
+        """His answer, rendered so it reads with the sound off. "" clears.
+
+        Anchored at CAPTION_TOP and grows DOWNWARD, so the anchor alone
+        guarantees nothing: what matters is where the last row lands. The
+        credit below it is an attribution condition and must stay readable
+        while he talks, so the gap is sized for the worst case -- wordwrap
+        breaks on whitespace only, so a hyphen-heavy answer ("tier-pool
+        drawdown-breaker...") packs into far more rows than prose of the same
+        length, and MAVIS_MAX_ANSWER_CHARS can raise the cap to 420.
+        test_caption_never_covers_the_credit pins this.
+        """
+        if getattr(self, "_caption", None) is None:
+            self._caption = OnscreenText(
+                text="", pos=(0.0, CAPTION_TOP), scale=0.04,
+                fg=(0.92, 0.92, 0.95, 1.0), align=TextNode.ACenter,
+                mayChange=True, wordwrap=30)
+        self._caption.setText(text)
+        if not text:
+            return
+        # Measure, don't predict. Row count is not a function of length:
+        # wordwrap breaks on whitespace only, so one 34-character hyphenated
+        # token occupies a whole row, and 420 such characters ran to z=-1.198
+        # -- past the credit and off the bottom of the frame. Trim from the
+        # end until the last row clears the floor.
+        while len(text) > 1 and self._caption.getTightBounds()[0][2] <= CAPTION_FLOOR:
+            text = text[:max(1, len(text) - 16)]
+            self._caption.setText(text.rstrip() + "...")
+
     def show(self) -> None:
         self.actor.show()
         self.credit.show()
         if getattr(self, "_notice", None) is not None:
             self._notice.show()
+        if getattr(self, "_caption", None) is not None:
+            self._caption.show()
         self.visible = True
 
     def hide(self) -> None:
@@ -519,4 +554,6 @@ class AvatarScene:
         # over the bare desktop now that the window is transparent.
         if getattr(self, "_notice", None) is not None:
             self._notice.hide()
+        if getattr(self, "_caption", None) is not None:
+            self._caption.hide()
         self.visible = False

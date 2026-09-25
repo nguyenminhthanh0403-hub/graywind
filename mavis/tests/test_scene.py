@@ -96,6 +96,46 @@ def test_attribution_text_is_present(avatar):
     assert "Stuxed" in avatar.credit.getText()
 
 
+def test_caption_shows_the_exact_answer_text(avatar):
+    avatar.show_caption("gold is a hedge, choom")
+
+    assert avatar._caption.getText() == "gold is a hedge, choom"
+
+    avatar.show_caption("")
+    assert avatar._caption.getText() == ""
+
+
+def test_caption_never_covers_the_credit(avatar):
+    """The credit is an attribution condition -- a caption may not cover it.
+
+    Asserting the ANCHOR is above the credit proves nothing: the caption grows
+    downward, so only the last rendered row matters. wordwrap breaks on
+    whitespace only, so hyphenated terms pack into many more rows than prose
+    of the same length -- and MAVIS_MAX_ANSWER_CHARS can raise the cap to 420.
+    That worst case is what this pins.
+    """
+    worst = " ".join(["tier-pool-drawdown-breaker-latency"] * 20)[:420]
+    avatar.show_caption(worst)
+
+    caption_bottom = avatar._caption.getTightBounds()[0][2]
+    credit_top = avatar.credit.getTightBounds()[1][2]
+
+    assert caption_bottom > credit_top, (
+        f"caption reaches {caption_bottom:.3f}, credit top is {credit_top:.3f}")
+
+
+def test_caption_hides_with_the_actor(avatar):
+    """The window is transparent: an orphaned caption would float over the
+    bare desktop after he is dismissed, exactly like the notice."""
+    avatar.show_caption("still here")
+    avatar.hide()
+
+    assert avatar._caption.isHidden()
+
+    avatar.show()
+    assert not avatar._caption.isHidden()
+
+
 def test_every_avatar_declares_a_credit():
     """Attribution is a licence condition for the CC-BY model and basic
     honesty for the ported one, so no entry may ship without a credit."""

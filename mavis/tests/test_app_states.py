@@ -10,6 +10,7 @@ class StubScene:
         self.mouth = None
         self.plays = []          # (clip, loop)
         self.notices = []
+        self.captions = []
         self.config = config or {}
 
     def hide(self):
@@ -27,6 +28,9 @@ class StubScene:
 
     def show_notice(self, txt):
         self.notices.append(txt)
+
+    def show_caption(self, txt):
+        self.captions.append(txt)
 
 
 class StubCanned:

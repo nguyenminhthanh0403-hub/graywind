@@ -188,11 +188,18 @@ class Runtime:
         else:
             self.scene.show_notice("")
 
-    async def _answer(self, question: str) -> str:
+    async def _answer(self, question: str) -> tuple[str, str]:
+        """The spoken wav and the exact text it says.
+
+        The text is returned rather than re-derived so the caption is the
+        answer itself, not a transcription of his audio -- captioning our own
+        speech through STT would add both latency and a way to be wrong.
+        """
         answer = await brain.ask(question)
         if not answer:
             raise brain.BrainError("the backend returned an empty answer")
-        return await asyncio.to_thread(self._voice, answer)
+        wav = await asyncio.to_thread(self._voice, answer)
+        return wav, answer
 
     async def _conversation(self) -> None:
         """One wake-to-dismissal session."""
@@ -236,16 +243,26 @@ class Runtime:
                 pending.cancel()
                 raise
             try:
-                wav = await pending
+                wav, answer_text = await pending
             except brain.BrainError as exc:
                 self.on_render(lambda: self.machine.on_failure(str(exc)))
                 continue
             self.on_render(lambda: (self._settle_notice(),
+                                    self.scene.show_caption(answer_text),
                                     self.machine.on_answer_ready()))
             try:
                 await asyncio.to_thread(self.say, wav)
             finally:
+                # rmtree FIRST: it cannot raise, and on_render can. Escape
+                # pressed mid-sentence sets _stopping, the render loop is
+                # already gone, and on_render gives up with RuntimeError --
+                # which would otherwise skip this cleanup and replace whatever
+                # `say` was propagating with a shutdown error.
                 shutil.rmtree(os.path.dirname(wav), ignore_errors=True)
+                try:
+                    self.on_render(lambda: self.scene.show_caption(""))
+                except RuntimeError:
+                    pass    # shutting down; there is no screen left to clear
             self.on_render(self.machine.on_spoken)
 
     async def _serve(self) -> None:
