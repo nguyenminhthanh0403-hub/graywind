@@ -96,6 +96,43 @@ def test_attribution_text_is_present(avatar):
     assert "Stuxed" in avatar.credit.getText()
 
 
+def test_cigarette_stays_seated_between_the_fingers(keanu):
+    """The prop offset must be fitted against the ANIMATED clip.
+
+    The original numbers were measured on the bind pose, and the fingers
+    animate out from under them: at frame 0 the cigarette was entirely inside
+    the hand and invisible, and by frame 30 it speared through the index and
+    middle fingers. Nothing in the suite noticed, because a prop's position is
+    not something any other assertion looks at.
+
+    The ideal anchor -- the midpoint of the index and middle DISTAL joints,
+    pushed clear of the skin and set back along the fingers -- is constant in
+    the anchor joint's local space across all 538 frames, so this can be
+    pinned exactly rather than sampled loosely.
+    """
+    from panda3d.core import NodePath
+
+    actor = keanu.actor
+    assert keanu.prop is not None, "no cigarette attached"
+    idx = actor.expose_joint(None, "modelRoot", "ValveBiped.Bip01_R_Finger12")
+    mid = actor.expose_joint(None, "modelRoot", "ValveBiped.Bip01_R_Finger22")
+    idx_base = actor.expose_joint(None, "modelRoot", "ValveBiped.Bip01_R_Finger11")
+    render = keanu.base.render
+
+    for frame in (0, 130, 260, 400, 530):
+        actor.pose("smoking", frame)
+        actor.update(force=True)
+
+        finger_dir = idx.get_pos(render) - idx_base.get_pos(render)
+        finger_dir.normalize()
+        target = (idx.get_pos(render) + mid.get_pos(render)) * 0.5 - finger_dir * 0.022
+        drift = (keanu.prop.get_pos(render) - target).length()
+
+        assert drift < 0.02, (
+            f"frame {frame}: cigarette is {drift*1000:.0f}mm from the grip "
+            "between the fingers -- it is buried in the hand or floating free")
+
+
 def test_caption_shows_the_exact_answer_text(avatar):
     avatar.show_caption("gold is a hedge, choom")
 

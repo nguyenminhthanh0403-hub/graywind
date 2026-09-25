@@ -104,8 +104,17 @@ AVATARS = {
         # chrome hand's 194mm at 196. Fitted, not guessed -- the filter end
         # sits 25mm behind the pinch of the index and middle fingers, running
         # along the index so the lit end clears the fingertips.
+        # FITTED AGAINST THE ANIMATED CLIP, not the bind pose -- that is the
+        # whole point. The previous offset was measured on the rest pose and
+        # the fingers animate out from under it: at frame 0 the cigarette was
+        # entirely inside the hand (invisible) and by frame 30 it speared
+        # through the index and middle fingers. Measured over 538 frames, the
+        # midpoint of the index and middle DISTAL joints pushed 12mm clear of
+        # the skin is constant in this joint's local space to 4 decimal places,
+        # so a static offset is correct -- the old numbers were just wrong,
+        # with z the right magnitude and the wrong sign.
         "prop": {"joint": "ValveBiped.Bip01_R_Finger11",
-                 "pos": (-0.0009, -0.0143, -0.0251), "hpr": (153.1, 90.0, 0.0),
+                 "pos": (0.01020, -0.01338, 0.00348), "hpr": (152.5, 90.0, -61.7),
                  "clips": ("smoking",)},
     },
     "jonny": {
