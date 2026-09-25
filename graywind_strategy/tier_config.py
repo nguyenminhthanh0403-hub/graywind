@@ -41,6 +41,26 @@ assert not (set(SYMBOL_TIER) & set(TIER1_SYMBOL_WEIGHTS)), (
     "an intraday tier-2/3 symbol and a tier-1 buy-and-hold symbol"
 )
 
+# Tiers whose buys execute WITHOUT a human approving a GitHub issue first. Tiers 2 and 3 are
+# the small intraday positions, and by the time a buy is proposed it has already cleared every
+# mechanical gate (signal, sentiment, earnings, sector, macro, drawdown and rolling breakers),
+# so a human :+1: added nothing but latency -- 30 consecutive proposals expired unapproved
+# between 2026-09-04 and 2026-09-24, which is a 100% silent rejection rate.
+#
+# Tier 1 is deliberately EXCLUDED. The gate it sits behind is about SIZE, not discretion:
+# tier 1 is ~70% of capital and a single monthly rebalance order is an order of magnitude
+# larger than a tier-2/3 entry, so it stays worth a human look even though it is the most
+# mechanical order in the system (a fixed-weight index sweep).
+#
+# Any tier listed here must also be a key in tier_pools, or the settle path in
+# process_pending_trades refuses the buy ("has no capital pool") instead of executing it.
+AUTO_APPROVE_TIERS = {2, 3}
+
+assert AUTO_APPROVE_TIERS.issubset(set(TIER_TARGET_WEIGHTS)), (
+    "every tier in AUTO_APPROVE_TIERS must have a capital pool in TIER_TARGET_WEIGHTS -- "
+    "otherwise its auto-approved buys are refused at settlement instead of executing"
+)
+
 
 def sector_counts_for_tier(tier, symbol_tier=None, sector_map=SYMBOL_SECTOR):
     if symbol_tier is None:

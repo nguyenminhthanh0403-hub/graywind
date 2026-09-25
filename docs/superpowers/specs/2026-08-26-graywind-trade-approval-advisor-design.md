@@ -1,5 +1,29 @@
 # Graywind Trade-Approval Advisor — Design Spec
 
+> **SUPERSEDED IN PART — 2026-09-24.** The Goal below ("you approve every new position")
+> no longer describes shipped behavior. Tiers 2 and 3 now execute WITHOUT human approval
+> (`tier_config.AUTO_APPROVE_TIERS`); only tier 1 still opens an approval issue.
+>
+> Why: between 2026-09-04 and 2026-09-24, **30 consecutive proposals expired unapproved — a
+> 100% silent rejection rate.** The gate worked exactly as specced; the human did not, because
+> a bot-authored issue with no assignee and no `@mention` generates no GitHub notification at
+> all, and proposals die at market close. The gate was not filtering bad trades, it was
+> discarding every trade. Two changes followed:
+>
+> 1. **Tiers 2/3 auto-approve.** They are the small intraday positions and have already
+>    cleared every mechanical gate by the time a buy is proposed. Tier 1 stays manual because
+>    it is ~70% of capital and one rebalance order is an order of magnitude larger — it is
+>    gated on **size**, not discretion.
+> 2. **Proposals now notify.** `propose_trade` assigns the owner, `@mention`s them, and pushes
+>    an ntfy.sh notification (`NTFY_TOPIC` secret) linking to the issue.
+>
+> Auto-approved buys still route through `pending_trades` and `process_pending_trades`, so
+> price-staleness re-validation, both drawdown breakers and the `tier_pools` debit all still
+> apply. Only the "did a human react" question is skipped. The cost is that a fill lands one
+> cycle (~15 min) after the signal; the benefit is that the breakers are re-checked against
+> fresher equity than the signal ever saw. Everything below about exits, expiry, re-validation
+> and "Why GitHub Issues" still holds.
+
 **Written:** 2026-08-26 · Personal-use only (confirmed with the user — this is not a
 multi-user advisory product, no RIA/compliance surface). Builds on
 `docs/superpowers/specs/2026-08-26-graywind-dual-account-tier-symbols-design.md` (both

@@ -696,9 +696,10 @@ def test_pending_same_day_trades_real_decide_trade_blocks_when_reservation_hits_
 def test_pending_same_day_trades_real_decide_trade_allows_when_reservation_under_cap():
     # Same realized count (1), but one of the "other" positions was opened
     # on an earlier day, so only 1 counts as pending -> 1 + 1 < 3 -> allowed.
-    # The reservation-under-cap outcome now shows up as a buy *proposal*
-    # (propose_trade called, symbol entered into pending_trades) rather than
-    # an executed order, since process_symbol no longer executes buys itself.
+    # The reservation-under-cap outcome shows up as a pending_trades row rather
+    # than an executed order, since process_symbol no longer executes buys
+    # itself. AAPL is tier 2, which is in AUTO_APPROVE_TIERS, so no GitHub
+    # proposal is created either -- the row itself is the whole observable.
     throttle = PDTThrottle()
     throttle.record_day_trade(date(2024, 1, 8))
     open_positions = {
@@ -718,10 +719,11 @@ def test_pending_same_day_trades_real_decide_trade_allows_when_reservation_under
             drawdown_breaker=MagicMock(), pending_trades=pending_trades,
             github_token="tok", repo="me/graywind", account_label="100k",
         )
-    mock_propose.assert_called_once()
+    mock_propose.assert_not_called()  # tier 2 is auto-approved; no issue is opened
     trading_client.submit_order.assert_not_called()
     assert "AAPL" not in open_positions
     assert "AAPL" in pending_trades
+    assert pending_trades["AAPL"]["issue_number"] is None
 
 
 # --- dashboard export collection: process_symbol optionally records what
@@ -729,11 +731,15 @@ def test_pending_same_day_trades_real_decide_trade_allows_when_reservation_under
 # defaulting to None (no-op) so every pre-existing call site above is
 # unaffected.
 
-def test_process_symbol_proposes_buy_instead_of_executing():
+def test_process_symbol_auto_approves_a_tier_2_buy_without_opening_an_issue():
     # SYMBOL_TIER is patched explicitly here (rather than relying on AAPL's real tag) so this
     # test is isolated from tier_config.py's actual contents -- AAPL is tagged tier 2 for real
     # once the dual-account/tier-symbols plan has shipped, and this test's `tier=2` expectation
     # must track that, not silently drift to `None` if tier_config.py ever changes.
+    #
+    # Tier 2 is in AUTO_APPROVE_TIERS, so no GitHub issue is created and issue_number is None.
+    # The row still goes through pending_trades: process_pending_trades owns order submission,
+    # price re-validation and the tier_pools debit, so the fill lands next cycle.
     cycle_trades = []
     symbol_statuses = {}
     pending_trades = {}
@@ -750,17 +756,42 @@ def test_process_symbol_proposes_buy_instead_of_executing():
             cycle_timestamp="2026-08-15T10:00:00-04:00", cycle_trades=cycle_trades, symbol_statuses=symbol_statuses,
             pending_trades=pending_trades, github_token="tok", repo="me/graywind", account_label="100k",
         )
-    mock_propose.assert_called_once_with(
-        symbol="AAPL", side="buy", qty=10, price=100.0, tier=2, account_label="100k",
-        reasoning="signal=buy", github_token="tok", repo="me/graywind", session=requests,
-    )
+    mock_propose.assert_not_called()
     trading_client.submit_order.assert_not_called()
-    assert cycle_trades == []  # not a real trade yet -- just a proposal
-    assert symbol_statuses["AAPL"]["action"] == "proposed"
+    assert cycle_trades == []  # not a real trade yet -- settles next cycle
+    assert symbol_statuses["AAPL"]["action"] == "auto-approved"
     assert pending_trades["AAPL"] == {
-        "issue_number": 101, "side": "buy", "qty": 10, "price_at_proposal": 100.0,
+        "issue_number": None, "side": "buy", "qty": 10, "price_at_proposal": 100.0,
         "stop_price": 98.0, "target_price": 103.0, "tier": 2, "proposed_date": "2024-01-08",
     }
+
+
+def test_process_symbol_still_proposes_a_buy_for_a_tier_that_is_not_auto_approved():
+    """The manual path must keep working, and must carry the notification arguments -- a
+    proposal nobody is notified about is the exact failure that expired issues #4-#38."""
+    symbol_statuses = {}
+    pending_trades = {}
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True), \
+         patch("live_loop.AUTO_APPROVE_TIERS", set()), patch(
+        "live_loop.decide_trade",
+        return_value=TradeDecision(action="buy", reason="signal=buy", shares=10, stop_price=98.0, target_price=103.0),
+    ), patch("live_loop.trade_approval.propose_trade", return_value=101) as mock_propose:
+        process_symbol(
+            symbol="AAPL", signal="buy", current_price=100.0, today=date(2024, 1, 8),
+            open_positions={}, equity=10000.0, pdt_throttle=MagicMock(), position_sizer=MagicMock(),
+            drawdown_breaker_ok=True, fred_api_key="k", news_client=object(), finnhub_api_key="k",
+            trading_client=MagicMock(), drawdown_breaker=MagicMock(),
+            symbol_statuses=symbol_statuses, pending_trades=pending_trades,
+            github_token="tok", repo="me/graywind", account_label="100k",
+            owner_username="me", ntfy_topic="sekrit-topic",
+        )
+    mock_propose.assert_called_once_with(
+        symbol="AAPL", side="buy", qty=10, price=100.0, tier=2, account_label="100k",
+        reasoning="signal=buy", github_token="tok", repo="me/graywind",
+        owner_username="me", ntfy_topic="sekrit-topic", session=requests,
+    )
+    assert symbol_statuses["AAPL"]["action"] == "proposed"
+    assert pending_trades["AAPL"]["issue_number"] == 101
 
 
 def test_process_symbol_skips_duplicate_proposal_for_already_pending_symbol():
@@ -2027,7 +2058,7 @@ def test_run_tier1_rebalance_proposes_buy_instead_of_executing():
     mock_propose.assert_called_once_with(
         symbol="VTI", side="buy", qty=2.0, price=100.0, tier=1, account_label="100k",
         reasoning="tier-1 monthly drift rebalance", github_token="tok", repo="me/graywind",
-        session=requests,
+        owner_username=None, ntfy_topic=None, session=requests,
     )
     assert tier_pools[1] == 200.0  # unchanged -- only execution (Task 5) touches this
     assert pending_trades["VTI"] == {
@@ -2775,3 +2806,157 @@ def test_reconcile_warns_about_broker_position_even_when_off_watchlist(capsys):
     live_loop.reconcile_positions(trading_client, {})
     err = capsys.readouterr().err
     assert "TSLA" in err and "WARNING" in err
+
+
+def test_process_pending_trades_settles_auto_approved_row_without_reading_reactions():
+    """An AUTO_APPROVE_TIERS row has no issue, so get_owner_reaction must never be called --
+    but every downstream protection (price re-validation, breakers, tier_pools debit) still
+    runs exactly as it does for a human-approved trade."""
+    fake_bar = MagicMock(close=101.0)  # within tolerance of the 100.0 proposal price
+    pending_trades = {
+        "AAPL": {
+            "issue_number": None, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2024-01-08",
+        },
+    }
+    open_positions = {}
+    # Pool deliberately COVERS the 5 x 101.0 buy. process_pending_trades debits the pool with
+    # no cash-sufficiency check, so a pool of 500.0 here would assert a NEGATIVE pool as
+    # expected behaviour and quietly bless that gap. Unreachable while each tier holds one
+    # symbol; becomes reachable as soon as a second tier-2/3 symbol is added.
+    tier_pools = {1: 0.0, 2: 1000.0, 3: 0.0}
+    trading_client = MagicMock()
+    drawdown_breaker = MagicMock()
+    drawdown_breaker.can_open_new_trade.return_value = True
+    with patch("live_loop.trade_approval.get_owner_reaction") as mock_reaction, \
+         patch("live_loop.trade_approval.close_issue") as mock_close, \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]):
+        process_pending_trades(
+            pending_trades, today=date(2024, 1, 8), trading_client=trading_client,
+            drawdown_breaker=drawdown_breaker, github_token="tok", repo="me/graywind",
+            owner_username="me", tier_pools=tier_pools, open_positions=open_positions,
+            data_client=MagicMock(), cycle_trades=[], symbol_statuses={},
+        )
+    mock_reaction.assert_not_called()
+    trading_client.submit_order.assert_called_once()
+    assert tier_pools[2] == 1000.0 - 5.0 * 101.0
+    assert open_positions["AAPL"]["entry_price"] == 101.0
+    # close_issue is still called on the success path, but with issue_number=None it is a
+    # no-op inside trade_approval rather than a GitHub round trip.
+    assert mock_close.call_args.args[0] is None
+    assert pending_trades == {}
+
+
+def test_process_pending_trades_still_revalidates_an_auto_approved_row_against_stale_price():
+    """Auto-approve skips the human, NOT the safety checks. A tier-2 row whose price ran away
+    between signal and settlement must be refused, same as a human-approved one."""
+    fake_bar = MagicMock(close=130.0)  # way past PRICE_STALENESS_TOLERANCE vs 100.0
+    pending_trades = {
+        "AAPL": {
+            "issue_number": None, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2024-01-08",
+        },
+    }
+    tier_pools = {1: 0.0, 2: 500.0, 3: 0.0}
+    trading_client = MagicMock()
+    drawdown_breaker = MagicMock()
+    drawdown_breaker.can_open_new_trade.return_value = True
+    with patch("live_loop.trade_approval.close_issue"), \
+         patch("live_loop.fetch_bars", return_value=[fake_bar]):
+        process_pending_trades(
+            pending_trades, today=date(2024, 1, 8), trading_client=trading_client,
+            drawdown_breaker=drawdown_breaker, github_token="tok", repo="me/graywind",
+            owner_username="me", tier_pools=tier_pools, open_positions={},
+            data_client=MagicMock(), cycle_trades=[], symbol_statuses={},
+        )
+    trading_client.submit_order.assert_not_called()
+    assert tier_pools[2] == 500.0  # untouched
+    assert pending_trades == {}
+
+
+def test_process_pending_trades_fails_closed_on_issueless_row_for_a_non_auto_approved_tier(capsys):
+    """A row with no issue number and a tier nobody auto-approves cannot have come from this
+    build. Executing it would trade on an authorisation that never existed; leaving it pending
+    would strand it forever, since there is no issue anyone could ever react to."""
+    pending_trades = {
+        "SPY": {
+            "issue_number": None, "side": "buy", "qty": 2.0, "price_at_proposal": 100.0,
+            "stop_price": None, "target_price": None, "tier": 1, "proposed_date": "2024-01-08",
+        },
+    }
+    tier_pools = {1: 5000.0, 2: 0.0, 3: 0.0}
+    trading_client = MagicMock()
+    drawdown_breaker = MagicMock()
+    drawdown_breaker.can_open_new_trade.return_value = True
+    with patch("live_loop.trade_approval.get_owner_reaction") as mock_reaction, \
+         patch("live_loop.fetch_bars", return_value=[MagicMock(close=100.0)]):
+        process_pending_trades(
+            pending_trades, today=date(2024, 1, 8), trading_client=trading_client,
+            drawdown_breaker=drawdown_breaker, github_token="tok", repo="me/graywind",
+            owner_username="me", tier_pools=tier_pools, open_positions={},
+            data_client=MagicMock(), cycle_trades=[], symbol_statuses={},
+        )
+    mock_reaction.assert_not_called()
+    trading_client.submit_order.assert_not_called()
+    assert tier_pools[1] == 5000.0  # untouched
+    assert pending_trades == {}  # dropped rather than stranded
+    assert "not auto-approved" in capsys.readouterr().err
+
+
+def test_process_pending_trades_expires_a_stale_auto_approved_row_without_touching_github():
+    """An auto-approved row normally settles on the very next cycle, but a buy signalled in the
+    day's LAST cycle has no next cycle -- it goes stale and is dropped, so the trade silently
+    never happens. That is the same (correct) conservatism proposals already had: an overnight
+    signal should not fire blind the next morning. It must not attempt a GitHub call, since
+    there is no issue."""
+    pending_trades = {
+        "AAPL": {
+            "issue_number": None, "side": "buy", "qty": 5.0, "price_at_proposal": 100.0,
+            "stop_price": 95.0, "target_price": 110.0, "tier": 2, "proposed_date": "2024-01-05",
+        },
+    }
+    trading_client = MagicMock()
+    fake_session = MagicMock()
+    process_pending_trades(
+        pending_trades, today=date(2024, 1, 8), trading_client=trading_client,
+        drawdown_breaker=MagicMock(), github_token="tok", repo="me/graywind",
+        owner_username="me", tier_pools={1: 0.0, 2: 500.0, 3: 0.0}, open_positions={},
+        data_client=MagicMock(), cycle_trades=[], symbol_statuses={}, session=fake_session,
+    )
+    assert pending_trades == {}
+    trading_client.submit_order.assert_not_called()
+    fake_session.post.assert_not_called()   # no comment posted
+    fake_session.patch.assert_not_called()  # no issue closed
+
+
+def test_process_symbol_credits_tier1_pool_when_a_buy_and_hold_sleeve_position_stops_out():
+    """Regression guard for a ~$49k silent loss. SPY is the tier-1 sleeve and is NOT in
+    SYMBOL_TIER, so tier resolved to None and _settle_sell_fill's `if tier is not None` guard
+    discarded the entire proceeds of its stop exit -- understating tier_pools[1] forever and
+    shrinking the 70% sleeve at the next monthly rebalance."""
+    tier_pools = {1: 1000.0, 2: 0.0, 3: 0.0}
+    open_positions = {
+        "SPY": _position(shares=65.0, stop=754.75, target=793.25, opened_date="2026-08-19"),
+    }
+    # Starts from a sell already resting: the exit submits on one cycle and settles on a later
+    # one via pending_sell_order_id, and the tier-pool credit happens at SETTLEMENT.
+    open_positions["SPY"]["pending_sell_order_id"] = "order-1"
+    filled_order = MagicMock()
+    filled_order.filled_qty = "65.0"
+    filled_order.filled_avg_price = "754.00"
+    filled_order.filled_at = datetime(2026, 9, 16, 10, 0, tzinfo=ET)
+    filled_order.status = OrderStatus.FILLED
+    trading_client = MagicMock()
+    trading_client.get_order_by_id.return_value = filled_order
+
+    with patch.dict("live_loop.SYMBOL_TIER", {"AAPL": 2}, clear=True), \
+         patch.dict("live_loop.TIER1_SYMBOL_WEIGHTS", {"SPY": 1.0}, clear=True):
+        process_symbol(
+            symbol="SPY", signal="hold", current_price=750.0, today=date(2026, 9, 16),
+            open_positions=open_positions, equity=100000.0, pdt_throttle=PDTThrottle(),
+            position_sizer=PositionSizer(), drawdown_breaker_ok=True, fred_api_key="k",
+            news_client=object(), finnhub_api_key="k", trading_client=trading_client,
+            drawdown_breaker=MagicMock(), tier_pools=tier_pools, entries_enabled=False,
+        )
+
+    assert tier_pools[1] == 1000.0 + 65.0 * 754.0  # proceeds credited, not discarded
