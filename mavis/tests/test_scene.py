@@ -96,6 +96,93 @@ def test_attribution_text_is_present(avatar):
     assert "Stuxed" in avatar.credit.getText()
 
 
+def _at(sc, t, clip="idle"):
+    """Put the scene on `clip` with its dwell clock started at time `t`.
+
+    Also restores every clip's control effect. The `keanu` fixture is
+    module-scoped, so a test that leaves a clip faded to zero silently
+    freezes the model for every test after it -- which is exactly what
+    blending makes possible.
+    """
+    sc._fade = None
+    sc._pending = None
+    sc._looping = None
+    sc._clip_start = 0.0
+    sc.idle(t)
+    sc.play(clip)
+    sc.idle(t)
+    for other in sc.actor.get_anim_names():
+        sc.actor.set_control_effect(other, 1.0 if other == clip else 0.0)
+    return sc
+
+
+def test_a_switch_inside_the_dwell_is_deferred_not_dropped(keanu):
+    """Dropping it is how the pose ends up disagreeing with what he is doing."""
+    _at(keanu, 0.0, "idle")
+
+    keanu.play("smoking")
+    assert keanu._pending is not None, "switch inside the dwell was not held"
+
+    keanu.idle(1.0)
+    assert keanu._fade is None, "switched away before MIN_DWELL elapsed"
+
+    keanu.idle(scene.MIN_DWELL + 0.1)
+    assert keanu._fade is not None and keanu._fade[1] == "smoking", (
+        "deferred switch was dropped instead of applied once the dwell expired")
+
+
+def test_asking_for_the_current_clip_cancels_a_deferred_switch(keanu):
+    """"Stay here" must beat a request made a moment earlier."""
+    _at(keanu, 0.0, "idle")
+    keanu.play("smoking")
+    assert keanu._pending is not None
+
+    keanu.play("idle")
+
+    assert keanu._pending is None, "he would have wandered off to smoking later"
+
+
+def test_dismiss_ignores_the_dwell(keanu):
+    """Being told to leave is not something to sit on for two seconds."""
+    _at(keanu, 0.0, "idle")
+
+    keanu.play("dismiss", loop=False)
+
+    assert keanu._pending is None
+    assert keanu._fade is None, "dismiss should snap, not fade"
+
+
+def test_clips_cross_fade_rather_than_cut(keanu, monkeypatch):
+    """`actor.loop()` restarts at frame 0; that cut is what read as a glitch.
+
+    Asserts the weights this code actually sends. Panda3D's Actor has
+    setControlEffect but no getter, so the call is recorded rather than
+    read back.
+    """
+    _at(keanu, 0.0, "idle")
+    keanu.idle(scene.MIN_DWELL + 0.1)
+
+    sent = []
+    real = keanu.actor.set_control_effect
+    monkeypatch.setattr(keanu.actor, "set_control_effect",
+                        lambda clip, w: (sent.append((clip, w)), real(clip, w))[1])
+
+    keanu.play("smoking")
+    start = keanu._fade[2]
+    sent.clear()
+    keanu.idle(start + scene.CROSSFADE * 0.5)
+
+    weights = dict(sent)
+    assert 0.0 < weights["smoking"] < 1.0, f"mid-fade weight not partial: {weights}"
+    assert weights["idle"] == pytest.approx(1.0 - weights["smoking"]), (
+        "the two clips must sum to one or he gets heavier and lighter mid-blend")
+
+    sent.clear()
+    keanu.idle(start + scene.CROSSFADE + 0.01)
+    assert keanu._fade is None
+    assert dict(sent)["smoking"] == 1.0
+
+
 def test_cigarette_stays_seated_between_the_fingers(keanu):
     """The prop offset must be fitted against the ANIMATED clip.
 
@@ -343,6 +430,7 @@ def test_keanu_animation_moves_the_body(keanu):
     its bind pose. These frames exist only because tools/retarget_anim.py put
     them there, so this is what proves the retarget survived export."""
     bundle = keanu._bundle
+    keanu.actor.set_control_effect("idle", 1.0)   # blending scales pose() too
     keanu.actor.pose("idle", 0)
     bundle.forceUpdate()
     first = _vertices(keanu.actor, "head")

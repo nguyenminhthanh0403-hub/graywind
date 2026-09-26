@@ -236,6 +236,23 @@ _DRIVERS = {"slider": _SliderMouth, "joint": _JawMouth}
 
 SWAY_RATE = 0.4
 
+# Clips cross-fade rather than cut. `actor.loop()` restarts at frame 0, which
+# is what made pose changes read as a glitch rather than a movement.
+CROSSFADE = 0.45
+# ...and once a clip starts it holds for this long before giving way, because
+# the moment table sends him to `smoking` for "thinking" and back to `idle`
+# for "speaking": a short think would otherwise flash the cigarette up and
+# snap it away again inside a second.
+MIN_DWELL = 2.5
+# Being told to leave is not something to sit on.
+URGENT = frozenset({"dismiss"})
+
+
+def _smoothstep(t: float) -> float:
+    """3t^2 - 2t^3, clamped. Linear weights make the swap visible at the ends."""
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    return t * t * (3.0 - 2.0 * t)
+
 
 class _IdleMotion:
     """Layered sine motion on real joints, so the body is never quite still.
@@ -335,6 +352,11 @@ class AvatarScene:
         self._frame_head()
 
         if self.animated:
+            # No set_control_effect here on purpose: loop() already leaves the
+            # clip at full weight even under setBlend(animBlend=True) --
+            # measured, 6943 head vertices move either way. Only a clip that
+            # is being blended AGAINST another needs its weight set, which is
+            # _begin_fade's job.
             self.actor.loop(self.config["idle_anim"])
             self._looping = self.config["idle_anim"]
         self._light()
@@ -347,6 +369,15 @@ class AvatarScene:
             fg=(0.8, 0.8, 0.85, 1.0), align=TextNode.ACenter, mayChange=True,
         )
         self._t = 0.0
+        self._clip_start = 0.0
+        self._pending = None        # (name, loop) deferred by MIN_DWELL
+        self._fade = None           # (from, to, started, loop) while blending
+        if self.animated:
+            # Without this every set_control_effect is ignored and the clips
+            # hard-cut exactly as before. `animBlend` is camelCase on purpose:
+            # Actor is a Python class, not a C++ binding, so it gets none of
+            # the snake_case aliasing the rest of Panda3D has.
+            self.actor.setBlend(animBlend=True)
         self.visible = True
 
     def _init_shader(self):
@@ -455,23 +486,84 @@ class AvatarScene:
         to the procedural channels.
         """
         self._t = elapsed
-        if self.animated:
+        if not self.animated:
+            self.actor.set_h(math.sin(elapsed * SWAY_RATE)
+                             * self.config.get("sway", 12.0))
+            self.motion.apply(elapsed)
             return
-        self.actor.set_h(math.sin(elapsed * SWAY_RATE) * self.config.get("sway", 12.0))
-        self.motion.apply(elapsed)
+        self._advance_blend(elapsed)
 
     def play(self, name: str, loop: bool = True) -> bool:
-        """Switch to another clip, e.g. "smoking". False if it has none."""
+        """Switch to another clip, e.g. "smoking". False if it has none.
+
+        The switch cross-fades and may be DEFERRED: a clip that has been up for
+        less than MIN_DWELL keeps the screen and the request is held, newest
+        winning, until the dwell expires. A deferred request is never dropped
+        -- dropping it is how the pose ends up disagreeing with what he is
+        actually doing.
+        """
         if not self.animated or name not in self.actor.getAnimNames():
             return False
-        # loop() restarts from frame 0, so re-requesting the clip he is already
-        # looping (speaking -> listening are both idle) would jerk him mid-breath.
-        if loop and self._looping == name:
+        # Where he is already heading: mid-fade that is the incoming clip, not
+        # the one still on screen. Re-requesting it must not restart anything.
+        heading_for = self._fade[1] if self._fade else self._looping
+        if name == heading_for:
+            # Also cancels a deferred request: asking for the clip already on
+            # screen means "stay here", and leaving the old pending in place
+            # would walk him off to it seconds later for no reason.
+            self._pending = None
             return True
-        (self.actor.loop if loop else self.actor.play)(name)
-        self._looping = name if loop else None
-        self._show_prop(name)
+
+        if name in URGENT:
+            self._pending = None
+            self._begin_fade(name, loop, snap=True)
+            return True
+
+        if self._looping is not None and (self._t - self._clip_start) < MIN_DWELL:
+            self._pending = (name, loop)
+            return True
+
+        self._pending = None
+        self._begin_fade(name, loop)
         return True
+
+    def _begin_fade(self, name: str, loop: bool, snap: bool = False) -> None:
+        """Start `name` and blend the outgoing clip out over CROSSFADE."""
+        outgoing = self._fade[1] if self._fade else self._looping
+        (self.actor.loop if loop else self.actor.play)(name)
+        self._show_prop(name)
+
+        if snap or outgoing is None or outgoing == name:
+            for clip in self.actor.get_anim_names():
+                self.actor.set_control_effect(clip, 1.0 if clip == name else 0.0)
+            self._fade = None
+            self._looping = name if loop else None
+            self._clip_start = self._t
+            return
+
+        self.actor.set_control_effect(outgoing, 1.0)
+        self.actor.set_control_effect(name, 0.0)
+        self._fade = (outgoing, name, self._t, loop)
+
+    def _advance_blend(self, elapsed: float) -> None:
+        """Drive the cross-fade and release a deferred request. Called per frame."""
+        if self._fade is not None:
+            outgoing, incoming, started, loop = self._fade
+            weight = _smoothstep((elapsed - started) / CROSSFADE)
+            self.actor.set_control_effect(outgoing, 1.0 - weight)
+            self.actor.set_control_effect(incoming, weight)
+            if weight >= 1.0:
+                self.actor.stop(outgoing)
+                self.actor.set_control_effect(outgoing, 0.0)
+                self._fade = None
+                self._looping = incoming if loop else None
+                self._clip_start = elapsed
+
+        if self._pending is not None and self._fade is None:
+            if self._looping is None or (elapsed - self._clip_start) >= MIN_DWELL:
+                name, loop = self._pending      # read BEFORE clearing it
+                self._pending = None
+                self._begin_fade(name, loop)
 
     def _attach_prop(self):
         """Parent the cigarette to a hand joint, hidden until a clip wants it.
