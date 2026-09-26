@@ -66,3 +66,40 @@ def format_context(hits: list[dict]) -> str | None:
     )
     lines = [header] + [f"- {hit['text']}" for hit in hits]
     return "\n".join(lines)
+
+# Terms that name something only THIS project has. Frequencies were taken from
+# the repo itself rather than invented: tier_pools 303, macro_gate 190,
+# vix_gate 98, drawdown breaker 30, deflated sharpe 17.
+#
+# They exist because an ungrounded answer about the owner's OWN trading system
+# is worse than no answer, and the failure is invisible: asked "what is the
+# macro gate" the model returned a confident description of an electronics
+# component, and asked "how much capital does tier 1 get" it returned Basel III
+# bank capital ratios -- both with zero citations, in the same tone as a
+# correct answer. A person cannot tell those apart by listening.
+#
+# Deliberately hand-maintained. Deriving it from the corpus would be circular:
+# the whole point is to catch questions the corpus CANNOT answer.
+PROJECT_TERMS = (
+    "macro gate", "macro_gate", "vix gate", "vix_gate", "volatility gate",
+    "sentiment gate", "backtest gate", "tier pool", "tier pools", "tier_pools",
+    "tier 1", "tier 2", "tier 3", "drawdown breaker", "rolling breaker",
+    "kill check", "edge thesis", "deflated sharpe", "position cap",
+    "news debate", "trade approval", "graywind",
+)
+
+UNGROUNDED = (
+    "That's one of mine and I don't have it in what I've been given, so I'd "
+    "only be guessing. Nothing in the corpus covers it."
+)
+
+
+def names_project_internals(query: str) -> bool:
+    """True if the query asks about something only this project has.
+
+    Used to decide whether an empty retrieval should REFUSE rather than fall
+    through to the model's general knowledge. "What is gold" deserves a
+    general answer; "what is the macro gate" does not.
+    """
+    lowered = f" {query.lower()} "
+    return any(term in lowered for term in PROJECT_TERMS)

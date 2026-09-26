@@ -35,9 +35,21 @@ async def ask(req: AskRequest, api_key: str = Depends(auth.require_api_key)):
         graywind_grounding.format_context(graywind_hits),
     ])) or None
 
+    # Refuse rather than confabulate. With no context the model answers from
+    # general knowledge in exactly the same confident tone, and for a question
+    # about the owner's own system that is worse than silence -- he cannot
+    # hear the difference, and there are no citations to warn him.
+    if not context and graywind_grounding.names_project_internals(req.query):
+        return {
+            "answer": graywind_grounding.UNGROUNDED,
+            "citations": [],
+            "grounded": False,
+        }
+
     answer = await groq_answer(req.query, context, max_chars=req.max_chars)
 
     return {
         "answer": answer,
         "citations": bullion_hits + graywind_hits,
+        "grounded": bool(context),
     }

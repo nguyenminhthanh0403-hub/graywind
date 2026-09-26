@@ -110,3 +110,45 @@ def test_ask_passes_max_chars_through_when_given(client, monkeypatch):
 
     assert resp.status_code == 200
     assert seen["max_chars"] == 200
+
+def test_ungrounded_question_about_our_own_system_is_refused(client, monkeypatch):
+    """Both of these were observed live, with zero citations and full
+    confidence: "what is the macro gate" came back about electronics, and
+    "how much capital does tier 1 get" came back as Basel III. The model is
+    never called for these -- a guess is the failure, not a slow guess."""
+    called = []
+
+    async def explode(*a, **kw):
+        called.append(1)
+        raise AssertionError("the model must not be asked at all")
+
+    monkeypatch.setattr(app_module, "groq_answer", explode)
+
+    for query in ("what is the macro gate",
+                  "how much capital does tier 1 get",
+                  "explain the drawdown breaker"):
+        resp = client.post("/ask", json={"query": query},
+                           headers={"X-API-Key": "secret123"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["grounded"] is False
+        assert body["citations"] == []
+        assert "guessing" in body["answer"]
+    assert not called
+
+
+def test_a_general_question_still_gets_a_general_answer(client, monkeypatch):
+    """The guard must not turn him into a machine that only reads files.
+    "What is gold" is not about Graywind and deserves a real answer."""
+    async def fake(query, context=None, max_chars=None):
+        return "Gold is a store of value."
+
+    monkeypatch.setattr(app_module, "groq_answer", fake)
+
+    resp = client.post("/ask", json={"query": "what is the capital of France"},
+                       headers={"X-API-Key": "secret123"})
+
+    assert resp.status_code == 200
+    assert resp.json()["answer"] == "Gold is a store of value."
+
